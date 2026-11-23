@@ -18,3 +18,10 @@
 - 用原生 Pi 加同一模型、工具和权限作为基线，验证新增策略的实际收益。
 - 优先关注完成率、人工介入、恢复表现和成本，避免固定增加不必要的 Agent 或评审。
 - 保留用户历史任务、配置和凭据。文档中的目标行为与当前代码行为须明确区分。
+
+## Fork 开发方式
+
+- 当前开发仓库为 `skygazer42/kada`，`origin` 指向该 Fork，`upstream` 跟踪 `muzizhi7/kada`。
+- 功能开发使用 Fork 的功能分支，Git 提交身份为 `skygazer42`。
+- 当前阶段先在 Fork 迭代，上游 PR 由用户后续安排。
+- 下一阶段功能方案见 [个人助手开发计划](docs/superpowers/plans/2026-11-23-personal-assistant.md)。
