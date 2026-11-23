@@ -10,6 +10,13 @@ import { LocalRuntime, type RuntimeOptions } from "./runtime.js";
 import { cloudModels } from "./models.js";
 import { errorText } from "./util.js";
 import { taskView } from "./task-view.js";
+import { MemoryMutationError } from "./user-memory.js";
+import { createRemoteHandler,quarantineLegacyRemoteTasks } from './remote.js';
+import { RemoteDevices } from './remote-devices.js';
+import { artifactTarget, openLocalPath } from './artifacts.js';
+import type { SkillSelection } from './skills.js';
+import type { McpDefinition } from './mcp-tools.js';
+import type { RoutineInput } from './routines.js';
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -29,6 +36,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   const release = await lockfile.lock(config.dataDir, { stale: 5000, update: 1000, retries: { retries: 6, minTimeout: 1000, maxTimeout: 1000 } });
   const computer = new ComputerBridge();
   let runtime: LocalRuntime | undefined;
+  const devices = new RemoteDevices(config.dataDir);
+  let remote: ReturnType<typeof createRemoteHandler>;
   let token: string;
   const tokenFile = join(config.dataDir, "token");
   try { token = (await readFile(tokenFile, "utf8")).trim(); }
@@ -47,26 +56,116 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view"] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','task-handoff','remote-web','routines'] });
+      if (await remote(req,res)) return;
       const supplied = Buffer.from(req.headers.authorization?.replace(/^Bearer /, "") ?? "");
       const expected = Buffer.from(token);
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return send(401, { error: "Unauthorized" });
       if (req.headers.origin && req.headers.origin !== `http://127.0.0.1:${config.port}`) return send(403, { error: "Cross-origin requests are not allowed" });
+      const controls = config.computer ? computer : options?.computer;
+      if (url.pathname === '/v1/computer' && req.method === 'GET') return send(200,controls?.status?.() ?? {connected:false,mode:'disabled',owner:null,observed:false,busy:false,takingOver:false});
+      if (['/v1/computer/takeover','/v1/computer/return'].includes(url.pathname) && req.method === 'POST') {
+        if (!controls?.takeover || !controls.returnControl) throw new Error('Computer control is disabled. Select an existing driver before taking control.');
+        return send(200,url.pathname.endsWith('/takeover') ? await controls.takeover() : await controls.returnControl());
+      }
       if (url.pathname === "/v1/environment" && req.method === "GET") return send(200, await runtime.localSetup());
-      if (url.pathname === "/v1/environment/memory" && req.method === "GET") return send(200, await runtime.localMemory());
+      if (url.pathname === "/v1/environment/memory" && req.method === "GET") return send(200, await runtime.localMemory(url.searchParams.get("workspace") ?? undefined));
+      const memory = /^\/v1\/environment\/memory\/([^/]+)(?:\/(forget))?$/.exec(url.pathname);
+      if (memory && ((!memory[2] && req.method === "PATCH") || (memory[2] === "forget" && req.method === "POST"))) {
+        const input = await body(req);
+        if (typeof input.expectedRevision !== "string" || typeof input.requestId !== "string" || (req.method === "PATCH" && typeof input.text !== "string")) throw new MemoryMutationError(400, "Supply expectedRevision, requestId and correction text.");
+        return send(200, await runtime.changeMemory(decodeURIComponent(memory[1]!), { action: memory[2] === "forget" ? "forget" : "correct", expectedRevision: input.expectedRevision, requestId: input.requestId, ...(typeof input.text === "string" ? { text: input.text } : {}) }, url.searchParams.get("workspace") ?? undefined));
+      }
       if (url.pathname === "/v1/environment/refresh" && req.method === "POST") return send(200, await runtime.localSetup(true));
-      if (url.pathname === "/v1/tasks" && req.method === "GET") return send(200, await runtime.list());
+      if (url.pathname === '/v1/settings/models' && req.method === 'GET') return send(200,await runtime.providers.list(config.model));
+      if (['/v1/settings/models/check','/v1/settings/models/select'].includes(url.pathname) && req.method === 'POST') {
+        const input = await body(req);
+        if (typeof input.provider !== 'string' || typeof input.modelId !== 'string') throw new Error('Provide provider and modelId.');
+        const ref = {provider:input.provider,modelId:input.modelId};
+        return send(200,url.pathname.endsWith('/check') ? await runtime.providers.check(ref) : await runtime.providers.select(ref));
+      }
+      if (url.pathname === '/v1/settings/skills' && req.method === 'GET') {
+        const workspace = url.searchParams.get('workspace');
+        if (!workspace) throw new Error('Provide the current workspace.');
+        return send(200,await runtime.skillCatalog(workspace));
+      }
+      if (url.pathname === '/v1/settings/skills' && req.method === 'PATCH') {
+        const input = await body(req);
+        if (typeof input.workspace !== 'string' || typeof input.name !== 'string' || typeof input.enabled !== 'boolean') throw new Error('Provide workspace, name and enabled.');
+        return send(200,await runtime.setSkillEnabled(input.workspace,input.name,input.enabled));
+      }
+      if (url.pathname === '/v1/settings/skills/rollback' && req.method === 'POST') {
+        const input = await body(req);
+        if (typeof input.name !== 'string' || typeof input.version !== 'string') throw new Error('Provide name and version.');
+        return send(200,await runtime.rollbackSkill({name:input.name,version:input.version}));
+      }
+      if (url.pathname === '/v1/settings/mcp') {
+        if (req.method === 'GET') return send(200,await runtime.mcp.list());
+        if (req.method === 'POST') return send(201,await runtime.mcp.configure(await body(req) as McpDefinition));
+      }
+      const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable)$/.exec(url.pathname);
+      if (mcp && req.method === 'POST') {
+        const id = decodeURIComponent(mcp[1]!);
+        if (mcp[2] === 'test') return send(200,await runtime.mcp.test(id));
+        if (mcp[2] === 'disable') return send(200,await runtime.mcp.disable(id));
+        const input = await body(req);
+        if (!Array.isArray(input.tools) || !input.tools.every(tool => typeof tool === 'string') || typeof input.revision !== 'string') throw new Error('Enable the displayed tools with their tested revision.');
+        return send(200,await runtime.mcp.enable(id,input.tools,input.revision));
+      }
+      if (url.pathname === '/v1/routines') {
+        if (req.method === 'GET') return send(200,await runtime.routines.list());
+        if (req.method === 'POST') return send(201,await runtime.routines.create(await body(req) as RoutineInput));
+      }
+      const routine = /^\/v1\/routines\/([^/]+)$/.exec(url.pathname);
+      if (routine) {
+        if (req.method === 'PATCH') return send(200,await runtime.routines.update(decodeURIComponent(routine[1]!),await body(req) as RoutineInput));
+        if (req.method === 'DELETE') return send(200,await runtime.routines.cancel(decodeURIComponent(routine[1]!)));
+      }
+      if (url.pathname === '/v1/remote/devices') {
+        if (req.method === 'GET') return send(200,await devices.list());
+        if (req.method === 'POST') {
+          const input = await body(req);
+          if (typeof input.accountId !== 'string' || typeof input.deviceId !== 'string') throw new Error('Provide accountId and deviceId.');
+          return send(201,await devices.pair(input.accountId,input.deviceId));
+        }
+      }
+      const device = /^\/v1\/remote\/devices\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (device && req.method === 'DELETE') return send(200,await devices.revoke(decodeURIComponent(device[1]!),decodeURIComponent(device[2]!)));
+      if (url.pathname === '/v1/notifications' && req.method === 'GET') return send(200,await runtime.notifications());
+      const notification = /^\/v1\/notifications\/([a-f0-9]{64})\/read$/.exec(url.pathname);
+      if (notification && req.method === 'POST') return send(200,await runtime.readNotification(notification[1]!));
+      const taskNotification = /^\/v1\/tasks\/([a-f0-9-]{36})\/notifications\/read$/.exec(url.pathname);
+      if (taskNotification && req.method === 'POST') return send(200,await runtime.readTaskNotifications(taskNotification[1]!));
+      const artifacts = /^\/v1\/tasks\/([a-f0-9-]{36})\/artifacts(?:\/(\d+)\/open)?$/.exec(url.pathname);
+      if (artifacts) {
+        if (artifacts[2] === undefined && req.method === 'GET') return send(200,await runtime.artifacts(artifacts[1]!));
+        if (artifacts[2] !== undefined && req.method === 'POST') {
+          const input = await body(req);
+          if (input.reveal !== undefined && typeof input.reveal !== 'boolean') throw new Error('reveal must be a boolean.');
+          const artifact = await artifactTarget(await runtime.status(artifacts[1]!),Number(artifacts[2]));
+          await openLocalPath(artifact.path,artifact.kind,input.reveal === true);
+          return send(200,{ok:true,path:artifact.path});
+        }
+      }
+      const capture = /^\/v1\/tasks\/([a-f0-9-]{36})\/skills\/capture$/.exec(url.pathname);
+      if (capture && req.method === 'POST') {
+        const input = await body(req);
+        if (typeof input.path !== 'string') throw new Error('Provide the verified Skill directory.');
+        return send(200,await runtime.captureSkill(capture[1]!,input.path));
+      }
+      if (url.pathname === "/v1/tasks" && req.method === "GET") return send(200, await runtime.list(url.searchParams.get('filter') ?? 'all'));
       if (url.pathname === "/v1/tasks" && req.method === "POST") {
         const input = await body(req);
         if (typeof input.objective !== "string" || (input.workspace !== undefined && typeof input.workspace !== "string")) throw new Error("Expected objective and optional workspace strings");
         if (input.confirmed !== undefined && typeof input.confirmed !== "boolean") throw new Error("confirmed must be a boolean");
         if (input.mode !== undefined && input.mode !== "chat") throw new Error("mode must be chat when supplied");
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
-        return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat" }));
+        return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined }));
       }
-      const match = /^\/v1\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|cancel|messages|confirm|view))?$/.exec(url.pathname);
+      const match = /^\/v1\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|cancel|messages|confirm|view|memory))?$/.exec(url.pathname);
       if (!match) return send(404, { error: "Not found" });
       const id = match[1]!;
+      if (match[2] === "memory" && req.method === "GET") return send(200, await runtime.taskMemory(id));
       if (match[2] === "view" && req.method === "GET") return send(200, taskView(await runtime.status(id)));
       if (!match[2] && req.method === "GET") return send(200, await runtime.status(id));
       if (req.method !== "POST") return send(405, { error: "Method not allowed" });
@@ -84,12 +183,18 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         default: return send(404, { error: "Not found" });
       }
       return send(200, { ok: true });
-    } catch (error) { send((error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400, { error: errorText(error) }); }
+    } catch (error) {
+      const details = error && typeof error === 'object' ? error as {status?:unknown;code?:unknown} : {};
+      const status = typeof details.status === 'number' && details.status >= 400 && details.status < 600 ? details.status : details.code === 'ENOENT' ? 404 : 400;
+      send(status, { error: errorText(error), ...(error instanceof MemoryMutationError && error.current ? { current: error.current } : {}) });
+    }
   });
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
     runtime = new LocalRuntime(config, { ...options, models: options?.models ?? cloudModels(), extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
+    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials()});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
+    await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));
     await runtime.recover();
     await runtime.localSetup();
     ready = true;

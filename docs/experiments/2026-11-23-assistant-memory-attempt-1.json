@@ -1,0 +1,82 @@
+{
+  "at": "2026-11-23T18:58:59.053Z",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "passed": false,
+  "maxRequests": 32,
+  "modelRequests": 21,
+  "maxOutputTokensPerRequest": 768,
+  "estimatedCostUsd": null,
+  "results": {
+    "F01-F04-memory-scope-correction-forget": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    },
+    "F05-F06-handoff-and-read-notification": {
+      "passed": true
+    },
+    "F11-F12-reminder-and-change-aware-routine": {
+      "passed": true
+    },
+    "F13-F15-mobile-reconnect-attachment-delivery": {
+      "passed": false,
+      "detail": "operation_failed"
+    },
+    "F17-two-owned-workers-return-verified-files": {
+      "passed": false,
+      "detail": "operation_failed"
+    }
+  },
+  "tasks": [
+    {
+      "id": "ee059e40-99a9-4178-a6dc-7ffe26a57b40",
+      "tokens": 3259,
+      "input": 3245,
+      "output": 14,
+      "cached": 0
+    },
+    {
+      "id": "93dd4033-7b7c-4b43-a982-69dd6606271a",
+      "tokens": 3440,
+      "input": 3438,
+      "output": 2,
+      "cached": 0
+    },
+    {
+      "id": "851730d2-e3c4-412c-a1b5-ac191db004f0",
+      "tokens": 4795,
+      "input": 4763,
+      "output": 32,
+      "cached": 0
+    },
+    {
+      "id": "c535fa1a-c596-48a4-b6bd-a2e218449efd",
+      "tokens": 9644,
+      "input": 9191,
+      "output": 69,
+      "cached": 384
+    },
+    {
+      "id": "486ed27e-5e7f-47db-a5c3-89f7d8900c52",
+      "tokens": 9638,
+      "input": 8816,
+      "output": 54,
+      "cached": 768
+    },
+    {
+      "id": "b7c2d366-8609-4ed0-b818-98ee242ea34e",
+      "tokens": 8097,
+      "input": 7276,
+      "output": 821,
+      "cached": 0
+    },
+    {
+      "id": "0b721523-2fb9-4d68-9861-741e002cb077",
+      "tokens": 53619,
+      "input": 18511,
+      "output": 2916,
+      "cached": 32192
+    }
+  ],
+  "totalTaskTokens": 92492,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

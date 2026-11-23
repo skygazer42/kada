@@ -8,6 +8,8 @@ Kada 是基于 Pi 的目标驱动 Agent。它了解你已有的工作环境，�
 
 [English](README.en.md) · [快速试用](docs/TRYOUT.md) · [使用手册](docs/USAGE.md) · [发布记录](https://github.com/muzizhi7/kada/releases) · [MIT](LICENSE)
 
+Fork 的个人助手开发版增加记忆管理、交接通知、模型与工具设置、持久提醒和手机文件任务入口。逐功能参考代码见[Spec](docs/specs/2026-11-23-personal-assistant.md)，命令与限制见[个人助手说明](docs/assistant-usage.md)。版本 0.9.0 用于区分新的本地 API；升级后重启 daemon，原有任务和配置保留。
+
 ![Kada：待机、工作、交付](docs/images/kada-states.png)
 
 你可能已经有自己的工具、Skills 和工作习惯，也有一些需要多个步骤才能完成的事。Kada 会先发现本机已有的 Agent 配置和 Skills，再结合你给出的目标整理交付、范围和预算。确认后，它在后台使用本地工具推进，遇到检查失败会在预算内尝试修正，完成时把文件和实际检查结果交给你。

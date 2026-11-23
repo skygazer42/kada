@@ -277,7 +277,7 @@ struct PetBubble: View {
             HStack {
                 Button("新的目标") { model.newGoal() }.buttonStyle(.plain).foregroundColor(Palette.muted)
                 Spacer()
-                Text("本次估算 $\(PetBudget.money(model.task?.budget.estimatedCostUsd ?? 0))").foregroundColor(Palette.muted)
+                Text("本次估算 \(model.task?.budget.costText ?? "—")").foregroundColor(Palette.muted)
             }.font(.system(size: 13))
         }.padding([.horizontal, .bottom], 24).padding(.top, 10)
     }
@@ -424,7 +424,7 @@ struct PetBubble: View {
                 VStack(alignment: .leading, spacing: 5) { Text("总费用上限").font(.system(size: 13)).foregroundColor(Palette.muted); Text("$" + PetBudget.money(budget.maxEstimatedCostUsd)).font(.system(size: 22)).monospacedDigit() }.frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: 5) { Text("执行时限").font(.system(size: 13)).foregroundColor(Palette.muted); Text("\(max(1, Int(ceil(budget.maxDurationMs / 60000)))) 分钟").font(.system(size: 22)).monospacedDigit() }.frame(maxWidth: .infinity, alignment: .leading)
             }.padding(.top, 5)
-            Text("费用含准备消耗，已用约 $\(PetBudget.money(model.task?.budget.estimatedCostUsd ?? 0))。时限从确认起计，到上限会暂停，追加前会请你确认。")
+            Text(model.task?.budget.priceKnown == false ? "价格未知，金额上限无法计量；token 和时限控制仍有效。" : "费用含准备消耗，已用约 \(model.task?.budget.costText ?? "—")。时限从确认起计，到上限会暂停，追加前会请你确认。")
                 .font(.system(size: 13)).foregroundColor(Palette.muted).lineSpacing(4).fixedSize(horizontal: false, vertical: true)
             if let tokens = budget.maxTotalTokens { Text("累计 token 上限 \(tokens)").font(.system(size: 13)).foregroundColor(Palette.muted) }
         }

@@ -1,0 +1,70 @@
+{
+  "provider": "siliconflow",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "limits": {
+    "requests": 20,
+    "maxOutputTokens": 512,
+    "elapsedMs": 240000
+  },
+  "money": null,
+  "requests": 17,
+  "elapsedMs": 113258,
+  "setupFailed": false,
+  "checks": [
+    {
+      "id": "F08",
+      "passed": true,
+      "evidence": {
+        "connection": "available",
+        "newTaskUsesSelection": true,
+        "previousTaskKeepsModel": true
+      },
+      "requests": 2,
+      "elapsedMs": 1783
+    },
+    {
+      "id": "F10",
+      "passed": true,
+      "evidence": {
+        "discovered": true,
+        "explicitlyEnabled": true,
+        "calls": 1,
+        "result": 42,
+        "usage": {
+          "inputTokens": 2893,
+          "outputTokens": 200,
+          "totalTokens": 5845,
+          "money": null
+        }
+      },
+      "requests": 3,
+      "elapsedMs": 11993
+    },
+    {
+      "id": "F09",
+      "passed": true,
+      "evidence": {
+        "version": "0112f08b9c55cabfc10d6519c3236bc09b8b930b552c9e6d134aa243966a6e29",
+        "read": true,
+        "scriptRuns": 1,
+        "scriptDurationMs": 532,
+        "result": 42,
+        "usage": {
+          "inputTokens": 19064,
+          "outputTokens": 1077,
+          "totalTokens": 27725,
+          "money": null
+        }
+      },
+      "requests": 9,
+      "elapsedMs": 36224
+    },
+    {
+      "id": "F18",
+      "passed": false,
+      "reason": "Independent Skill reuse or output verification failed.",
+      "requests": 3,
+      "elapsedMs": 11649
+    }
+  ]
+}

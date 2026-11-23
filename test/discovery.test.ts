@@ -4,8 +4,9 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
+import { createHash, randomUUID } from 'node:crypto';
 import { LocalDiscovery, scanLocalAgents, localContextInstructions } from '../src/discovery.js';
-import { LocalRuntime } from '../src/runtime.js';
+import { LocalRuntime, type TaskMeta } from '../src/runtime.js';
 import { loadConfig } from '../src/config.js';
 import { serve } from '../src/server.js';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
@@ -119,7 +120,7 @@ test('symlink aliases deduplicate and cycles cannot trigger an unbounded native 
 const call=(name:string,args:any)=>fauxAssistantMessage(fauxToolCall(name,args),{stopReason:'toolUse'});
 const toolResults=(c:TranscriptContext,name:string)=>c.messages.filter((m):m is Extract<TranscriptContext['messages'][number],{role:'toolResult'}>=>m.role==='toolResult'&&m.toolName===name);
 
-test('a newly confirmed task discovers another Agent Skill, reads it natively and delivers checked output without importing its plugins',async()=>{
+test('a new catalogue-policy task treats original Skill path reads as files without recording selected Skill use',async()=>{
   const home=await populated();let data='';let requests=0;
   const checker={command:'node acceptance/check.mjs',inputs:['acceptance','input.json'],outputs:['result.json']};
   const f=await scriptedFixture(c=>{
@@ -144,16 +145,43 @@ test('a newly confirmed task discovers another Agent Skill, reads it natively an
     await writeFile(join(f.workspace,'acceptance/check.mjs'),"import assert from'node:assert/strict';import{readFileSync}from'node:fs';assert.equal(JSON.parse(readFileSync('result.json','utf8')),13);\n");
     await f.runtime.localSetup();assert.equal(requests,0,'first scan never calls the model');
     const task=await f.runtime.create('使用已有本地Skills汇总资料',f.workspace,[],{prepare:true});
+    assert.equal(task.skillPolicy,'catalogue');
     const ready=await until(()=>f.runtime.status(task.id),s=>s.status==='awaiting_confirmation');
-    assert.equal(ready.discovery,true);assert.equal(ready.goal!.localSkillReads!.length,1);assert.equal(ready.goal!.skills,undefined);await assert.rejects(stat(join(f.workspace,'result.json')),{code:'ENOENT'});
+    assert.equal(ready.discovery,true);assert.equal(ready.goal!.localSkillReads,undefined);assert.equal(ready.goal!.skills,undefined);await assert.rejects(stat(join(f.workspace,'result.json')),{code:'ENOENT'});
     assert.equal(ready.model.modelId,'scripted','discovered model preferences cannot replace configured provider');
     await f.runtime.confirm(task.id,1,ready.briefDigest!);
     const done=await until(()=>f.runtime.status(task.id),s=>s.status==='completed');
-    assert.equal(done.goal!.reworks,0);assert.equal(done.goal!.localSkillReads!.length,1);
+    assert.equal(done.goal!.reworks,0);assert.equal(done.goal!.localSkillReads,undefined);
     assert.equal(await readFile(join(f.workspace,'result.json'),'utf8'),'13');
     assert.equal(done.budget.costLimit,ready.goal!.brief!.budget.maxEstimatedCostUsd);
     const n=requests;await f.runtime.close();reopened=new LocalRuntime(f.settings,{models:f.models,discovery:{home:home.home}});await reopened.recover();
     assert.equal((await reopened.status(task.id)).status,'completed');assert.equal(requests,n);
+    await assert.rejects(stat(join(home.directory,'NEVER_EXECUTE')),{code:'ENOENT'});
+  }finally{await reopened?.close();await f.close();await home.close();}
+});
+
+test('a recovered historical task without skillPolicy still records original discovered Skill reads',async()=>{
+  const home=await populated(),manifest=join(home.home,'.agents/skills/sum/SKILL.md');
+  const f=await scriptedFixture(context=>{
+    const messages=JSON.stringify(context.messages);
+    assert(messages.includes('Local setup facts'));assert(messages.includes('User work memory'));
+    if(!toolResults(context,'read').length)return call('read',{path:manifest});
+    return call('task_prepare',{outcome:'检查已有本地 Skill',deliverables:['Text answer in summary'],inputs:[],scope:['只读取已有本地 Skill，不运行其插件或脚本'],assumptions:[],questions:[],criteria:[{text:'说明已读 Skill 的用途',method:'inspect'}]});
+  },{discovery:true},()=>[],{discovery:{home:home.home}});
+  let reopened:LocalRuntime|undefined;
+  try{
+    await f.runtime.close();
+    const id=randomUUID(),now=Date.now(),directory=join(f.directory,'tasks',id);
+    const historical:TaskMeta={id,objective:'读取已有本地 Skill 并提出任务说明',workspace:f.workspace,model:f.settings.model!,
+      createdAt:now,deadlineAt:now+60_000,maxDurationMs:60_000,maxSubagents:0,control:'active',schemaVersion:3,planPolicy:'advisory',
+      preparation:true,resourcePolicy:'pi-skills',discovery:true,userMemory:true,acceptance:[],maxEstimatedCostUsd:1,review:false};
+    await mkdir(directory,{recursive:true});await writeFile(join(directory,'task.json'),JSON.stringify(historical));
+    reopened=new LocalRuntime(f.settings,{models:f.models,discovery:{home:home.home}});await reopened.recover();
+    const ready=await until(()=>reopened!.status(id),status=>status.status==='awaiting_confirmation');
+    assert.equal(ready.discovery,true);
+    assert.deepEqual(ready.goal!.localSkillReads,[{path:manifest,sha256:createHash('sha256').update(await readFile(manifest)).digest('hex')}]);
+    assert.equal(ready.goal!.skills,undefined);
+    assert.equal(JSON.parse(await readFile(join(directory,'task.json'),'utf8')).skillPolicy,undefined,'recovery preserves the historical policy');
     await assert.rejects(stat(join(home.directory,'NEVER_EXECUTE')),{code:'ENOENT'});
   }finally{await reopened?.close();await f.close();await home.close();}
 });

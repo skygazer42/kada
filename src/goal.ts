@@ -1,4 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
+import { createHash } from 'node:crypto';
+import { relative, sep } from 'node:path';
 import { defineDoc, defineExtension, defineTool, type ConversationId, type Harness, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { acceptanceChecks, CheckSchema, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -38,7 +40,7 @@ export type GoalState = {
   reason: string | null;
   question: string | null;
   appliedTools: Record<string, boolean>;
-  events: { at: number; type: string; detail: string }[];
+  events: { at: number; type: string; detail: string; revision?:number; resultHash?:string }[];
 };
 export const GoalDoc = defineDoc<GoalState>({
   scope: "session", kind: "local.goal", version: 1, checkpointWhen: () => true,
@@ -52,8 +54,15 @@ export const Reviews = defineDoc<{ verdicts: Record<string, ReviewVerdict> }>({
 
 /** Chord documents are proxies inside commits; detach before returning them to the host. */
 export function plain<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
-export function goalEvent(goal: GoalState, type: string, detail: string): void {
-  goal.events.push({ at: Date.now(), type, detail: detail.slice(0, 4000) });
+export function goalEvent(goal: GoalState, type: string, detail: string, workspace?: string): void {
+  const outputs = goal.candidate?.artifacts.length
+    ? [...(goal.mechanical?.files ?? []), ...(goal.mechanical?.directories ?? [])].map(file => [
+      workspace ? relative(workspace, file.path).split(sep).join("/") : file.path,
+      file.sha256,
+    ]).sort()
+    : goal.candidate?.summary;
+  goal.events.push({ at: Date.now(), type, detail: detail.slice(0, 4000), revision:goal.revision,
+    ...(type === 'completed' ? {resultHash:createHash('sha256').update(JSON.stringify(outputs ?? null)).digest('hex')} : {}) });
   if (goal.events.length > 200) goal.events.splice(0, goal.events.length - 200);
 }
 export async function readGoal(harness: Harness): Promise<GoalState> {

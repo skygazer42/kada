@@ -1,0 +1,66 @@
+{
+  "date": "2026-11-23",
+  "version": "0.9.0",
+  "branch": "codex/assistant-plan",
+  "status": "implemented-with-required-real-driver-test-pending",
+  "referenceLinks": 37,
+  "verification": {
+    "assistant": {
+      "command": "npm run test:assistant",
+      "tests": 89,
+      "passed": 89,
+      "failed": 0,
+      "skipped": 0
+    },
+    "typecheck": true,
+    "build": true,
+    "liveScriptsTypecheck": true,
+    "commitSecretAndConflictCheck": true,
+    "notesVerified": true,
+    "npmProductionAuditVulnerabilities": 0,
+    "legacyDiscovery": {
+      "tests": 2,
+      "passed": 2
+    },
+    "windowsMemoryPathCases": {
+      "tests": 2,
+      "passed": 2
+    },
+    "browser": {
+      "channel": "agent-browser",
+      "viewport": [
+        390,
+        844
+      ],
+      "pairSendReconnectSameConversation": true,
+      "synthetic": true
+    }
+  },
+  "acceptance": {
+    "M": "M01-M08 passed",
+    "H": "H01-H06 target/API checks passed; native GUI open not manually exercised",
+    "C": "C01-C06 passed",
+    "R": "R01-R04 passed, including process kill, sleeping process and queued cancellation",
+    "D": "D01-D06 passed, including compaction, ownership and stale links",
+    "U01": "fake driver passed",
+    "U02": "pending user selection of an existing driver",
+    "A": "A01-A02 passed",
+    "S": "S01-S02 passed"
+  },
+  "live": {
+    "tools": "2026-11-23-assistant-tools.json",
+    "memory": "2026-11-23-assistant-memory-focused.json",
+    "remote": "2026-11-23-assistant-remote-final.json",
+    "handoffRoutinesDelegation": "2026-11-23-assistant-memory-attempt-2.json",
+    "nativePiComparison": "2026-11-23-native-pi-baseline.json",
+    "amountUsd": null,
+    "containsEarlierFailedAttempts": true
+  },
+  "limitations": [
+    "Real computer driver remains disabled pending selection",
+    "macOS build/GUI and physical-phone HTTPS access unverified",
+    "Parallel Windows whole-repo run observed 149 pass/16 fail/1 cancelled/4 skipped; some path assertions subsequently repaired and individually passed",
+    "One Qwen 7B baseline case failed both arms; no completion-rate or cost improvement claim",
+    "Usage is checked at request boundaries and may overshoot within an admitted request"
+  ]
+}

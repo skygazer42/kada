@@ -14,7 +14,7 @@ try { loadEnvFile(".env"); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 
 const args = parseArgs({ allowPositionals: true, options: {
-  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" },
+  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" },
 } });
 const [command = "chat", id, ...rest] = args.positionals;
 const config = await loadConfig(args.values.config);
@@ -25,6 +25,7 @@ try {
   if (args.values.help || command === "help") {
     console.log(`Kada\n\n  npm run chat                             Chat in the terminal; starts/reuses the daemon\n  npm run harness -- chat [task-id]         Start chat or reconnect to a task\n  npm run dev                              Start only the local daemon\n  npm run demo                             Run the explicit offline simulation\n  npm run discover                         Inspect discovered local Agents/Skills/plugins\n  npm run discover -- --refresh             Refresh local discovery metadata\n  npm run harness -- models [provider]      List the installed Pi model catalog\n  npm run harness -- run "goal" --detach    Create a background task\n  npm run harness -- run "goal" --workspace /absolute/path\n  npm run harness -- status [task-id]       Inspect tasks, workers and usage\n  npm run harness -- pause <task-id>\n  npm run harness -- resume <task-id>       Resume with another configured task budget\n  npm run harness -- cancel <task-id>\n  npm run harness -- follow-up <task-id> "message"\n\nrun also accepts --acceptance <checks.json>. All commands accept --config <file>. Configure cloud model credentials through environment variables.`);
     console.log("\n默认 run 先准备待确认说明；在 chat 中 /attach 后确认。只有已有明确授权时使用 run --yes 或聊天 /run，沿用配置预算直接执行。");
+    console.log(`\n个人助手入口（npm run harness -- …）：\n  memory list|edit ID 内容|forget ID|used 任务ID\n  tasks --filter pending|running|delivered\n  inbox [read 通知ID]\n  files 任务ID | files open 任务ID 编号\n  model list [provider] | model check|select provider modelId\n  skills list|enable 名称|disable 名称 --workspace 路径\n  skills rollback 名称 版本 | skills capture 任务ID 目录\n  mcp list|add 配置.json|test ID|enable ID revision 工具…|disable ID\n  routines list|add 规则.json|update ID 规则.json|cancel ID\n  remote list|pair 账户ID 设备ID|revoke 账户ID 设备ID\n  computer status|takeover|return\n\nrun --skills 名称,名称@版本 可固定所选方法；空字符串表示不选方法。`);
   } else if (command === "chat") {
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
@@ -38,9 +39,78 @@ try {
     const stop = () => { void server.close().then(() => process.exit(0), error => { console.error(errorText(error)); process.exit(1); }); };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
+  } else if (command === "memory") {
+    const { ensureDaemon } = await import("./daemon.js");
+    const { ChatSession } = await import("./chat.js");
+    await ensureDaemon(config, args.values.config);
+    const session = new ChatSession(client, event => console.log(event.text), args.values.workspace ? resolve(args.values.workspace) : process.cwd());
+    if (id === "used") {
+      if (!rest[0]) throw new Error("Provide a task ID after memory used.");
+      await session.attach(rest[0]);
+      await session.handle("/memory used");
+    } else await session.handle("/memory " + [id ?? "list", ...rest].join(" "));
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks'].includes(command)) {
+    const {ensureDaemon} = await import('./daemon.js');
+    await ensureDaemon(config,args.values.config);
+    const action = id ?? 'list';
+    const workspace = args.values.workspace ? resolve(args.values.workspace) : process.cwd();
+    const segment = (value:string|undefined) => {
+      if (!value) throw new Error('Missing argument; run help for command syntax.');
+      return encodeURIComponent(value);
+    };
+    const json = async (file:string|undefined) => {
+      if (!file) throw new Error('Provide a JSON configuration file.');
+      return JSON.parse(await readFile(file,'utf8'));
+    };
+    let result:unknown;
+    if (command === 'tasks') result = await request('/v1/tasks?filter='+encodeURIComponent(args.values.filter ?? 'all'));
+    else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
+    else if (command === 'model') {
+      if (action === 'list') {
+        const providers = await request<{id:string}[]>('/v1/settings/models');
+        result = rest[0] ? providers.filter(provider => provider.id === rest[0]) : providers;
+      } else if (action === 'check' || action === 'select') {
+        if (!rest[0] || !rest[1]) throw new Error('Provide provider and modelId.');
+        result = await request('/v1/settings/models/'+action,'POST',{provider:rest[0],modelId:rest[1]});
+      } else throw new Error('Use model list, check or select.');
+    } else if (command === 'skills') {
+      if (action === 'list') result = await request('/v1/settings/skills?workspace='+encodeURIComponent(workspace));
+      else if (action === 'enable' || action === 'disable') {
+        if (!rest[0]) throw new Error('Provide a Skill name.');
+        result = await request('/v1/settings/skills','PATCH',{workspace,name:rest[0],enabled:action === 'enable'});
+      } else if (action === 'rollback') result = await request('/v1/settings/skills/rollback','POST',{name:rest[0],version:rest[1]});
+      else if (action === 'capture') result = await request('/v1/tasks/'+segment(rest[0])+'/skills/capture','POST',{path:rest[1]});
+      else throw new Error('Use skills list, enable, disable, capture or rollback.');
+    } else if (command === 'mcp') {
+      if (action === 'list') result = await request('/v1/settings/mcp');
+      else if (action === 'add') result = await request('/v1/settings/mcp','POST',await json(rest[0]));
+      else if (['test','enable','disable'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',action === 'enable' ? {revision:rest[1],tools:rest.slice(2)} : {});
+      else throw new Error('Use mcp list, add, test, enable or disable.');
+    } else if (command === 'routines') {
+      if (action === 'list') result = await request('/v1/routines');
+      else if (action === 'add') result = await request('/v1/routines','POST',await json(rest[0]));
+      else if (action === 'update') result = await request('/v1/routines/'+segment(rest[0]),'PATCH',await json(rest[1]));
+      else if (action === 'cancel') result = await request('/v1/routines/'+segment(rest[0]),'DELETE');
+      else throw new Error('Use routines list, add, update or cancel.');
+    } else if (command === 'remote') {
+      if (action === 'list') result = {url:(config.remoteOrigin ?? `http://127.0.0.1:${config.port}`)+'/remote',devices:await request('/v1/remote/devices')};
+      else if (action === 'pair') result = await request('/v1/remote/devices','POST',{accountId:rest[0],deviceId:rest[1]});
+      else if (action === 'revoke') result = await request('/v1/remote/devices/'+segment(rest[0])+'/'+segment(rest[1]),'DELETE');
+      else throw new Error('Use remote list, pair or revoke.');
+    } else if (command === 'computer') {
+      if (!['status','takeover','return'].includes(action)) throw new Error('Use computer status, takeover or return.');
+      result = await request('/v1/computer'+(action === 'status' ? '' : '/'+action),action === 'status' ? 'GET' : 'POST',action === 'status' ? undefined : {});
+    } else {
+      if (action === 'open') {
+        const index = Number(rest[1]);
+        if (!Number.isSafeInteger(index) || index < 1) throw new Error('Provide the artifact number from files (starting at 1).');
+        result = await request('/v1/tasks/'+segment(rest[0])+'/artifacts/'+(index-1)+'/open','POST',{});
+      } else result = await request('/v1/tasks/'+segment(id)+'/artifacts');
+    }
+    console.log(JSON.stringify(result,null,2));
   } else if (command === "discover") {
     if (!config.discovery) console.log("本机环境发现已关闭（discovery: false）。");
     else {
@@ -60,7 +130,8 @@ try {
     if (!await client.healthy()) throw new Error("后台未就绪或版本不匹配，请先用 npm run chat 启动/连接当前版本的后台。");
     const objective = [id, ...rest].filter(Boolean).join(" ");
     const acceptance = args.values.acceptance ? JSON.parse(await readFile(args.values.acceptance, "utf8")) : undefined;
-    const task = await request<TaskMeta>("/v1/tasks", "POST", { objective, workspace: args.values.workspace ? resolve(args.values.workspace) : undefined, acceptance, confirmed: args.values.yes });
+    const skills = args.values.skills === undefined ? undefined : args.values.skills.split(',').filter(Boolean).map(ref => { const [name,version] = ref.split('@'); return {name,...(version ? {version} : {})}; });
+    const task = await request<TaskMeta>("/v1/tasks", "POST", { objective, workspace: args.values.workspace ? resolve(args.values.workspace) : undefined, acceptance, confirmed: args.values.yes,skills });
     console.log(`Task: ${task.id}\nWorkspace: ${task.workspace}`);
     if (task.preparation) console.log(`先整理目标和预算；进入聊天 /attach ${task.id} 后确认。已有明确授权可使用 run --yes。`);
     if (!args.values.detach) {

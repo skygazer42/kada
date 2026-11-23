@@ -77,7 +77,12 @@ struct PetBrief: Decodable, Equatable {
     let questions: [String]
     let budget: PetBudget
 }
-struct PetUsage: Decodable, Equatable { let estimatedCostUsd: Double; let costLimit: Double? }
+struct PetUsage: Decodable, Equatable {
+    let estimatedCostUsd: Double
+    let costLimit: Double?
+    var priceKnown: Bool? = nil
+    var costText: String { priceKnown == false ? "费用未知" : "$" + PetBudget.money(estimatedCostUsd) }
+}
 struct PetDelivery: Decodable, Equatable {
     let summary: String
     let artifacts: [String]

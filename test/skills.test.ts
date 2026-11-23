@@ -72,7 +72,7 @@ test('native Skills capture verified files, route by description without keyword
     reopened=new LocalRuntime({...f.settings,learning:false},{models:f.models}); await reopened.recover();
     const restored=await reopened.status(next.id);
     assert.deepEqual(restored.goal!.skills!.pins,pins); assert.deepEqual(restored.budget,next.budget); assert.equal(requests,n);
-    assert.equal((await stat(join(f.directory,'skills/managed'))).mode&0o777,0o700);
+    if (process.platform !== 'win32') assert.equal((await stat(join(f.directory,'skills/managed'))).mode&0o777,0o700);
     await assert.rejects(stat(join(f.directory,'learned-methods')),{code:'ENOENT'});
   }finally{await reopened?.close();await f.close();}
 });

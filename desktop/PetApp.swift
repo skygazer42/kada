@@ -223,11 +223,11 @@ import UniformTypeIdentifiers
     }
     func openArtifact(_ path: String) {
         guard let task = task else { return }
-        do {
-            let url = try PetFiles.artifact(path, workspace: task.workspace)
-            if PetFiles.opensAsDocument(url) { if !NSWorkspace.shared.open(url) { throw PetError.message("没有找到能打开此文件的应用，可以在文件夹中查看。") } }
-            else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-        } catch { self.error = error.localizedDescription }
+        guard let index = task.delivery?.artifacts.firstIndex(of: path) else { error = "此文件尚未验收。"; return }
+        Task {
+            do { let _: PetOK = try await api.request("/v1/tasks/\(task.id)/artifacts/\(index)/open", method: "POST", body: [:]) }
+            catch { self.error = error.localizedDescription }
+        }
     }
     func openFolder() {
         guard let workspace = task?.workspace else { return }
@@ -237,7 +237,7 @@ import UniformTypeIdentifiers
     var resumeMessage: String {
         guard let task = task else { return "" }
         let cap = task.resumeBudget.maxEstimatedCostUsd.map { "$" + PetBudget.money($0) } ?? "\(task.resumeBudget.maxTotalTokens ?? 500000) token"
-        return "已用约 $\(PetBudget.money(task.budget.estimatedCostUsd))。这次会追加 \(cap)，时限 \(max(1, Int(task.resumeBudget.maxDurationMs / 60000))) 分钟。已完成的工作会保留。"
+        return "当前用量：\(task.budget.costText)。这次会追加 \(cap)，时限 \(max(1, Int(task.resumeBudget.maxDurationMs / 60000))) 分钟。已完成的工作会保留。"
     }
 }
 

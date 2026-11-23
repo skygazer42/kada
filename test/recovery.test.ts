@@ -37,6 +37,9 @@ test("SIGKILL during two live subagents recovers without duplicating children", 
     const after = JSON.parse(second.stdout().trim().split("\n").at(-1)!);
     assert.equal(after.type, "completed");
     assert.deepEqual(after.ids, before.ids);
+    assert.deepEqual(after.delegations.map((child:{conversationId:string}) => child.conversationId),before.delegations.map((child:{conversationId:string}) => child.conversationId));
+    assert.equal(after.delegations.length,2);
+    assert(after.delegations.every((child:{parentTaskId:string;status:string;answer?:string;usage:{totalTokens:number}}) => child.parentTaskId === before.taskId && child.status === 'completed' && child.answer && child.usage.totalTokens >= 0));
     const report = await readFile(join(directory, "workspace", "report.md"), "utf8");
     assert.match(report, /Alpha source/);
     assert.match(report, /Beta source/);

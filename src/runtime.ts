@@ -3,29 +3,39 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { Harness, LiveDoc, UserEntry, configure, createRegistry, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension } from "@earendil-works/pi-durable";
+import { Harness, LiveDoc, UserEntry, AssistantEntry, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { delegationExtension } from "./delegation.js";
+import { delegationExtension, listDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
-import { validateModel } from "./models.js";
+import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
 import { GoalDoc, Reviews, goalEvent, goalExtension, plain, readGoal, reviewExtension, type GoalState } from "./goal.js";
 import { localEnvironment, localExecution, taskCompaction } from "./execution.js";
 import { taskUsage } from "./budget.js";
 import { needsWeb, WebUse, webExtension } from "./web.js";
 import type { ComputerBridge } from "./computer.js";
-import { briefDigest, preparationExtension, type Confirmation, type TaskBudget } from "./preparation.js";
+import { briefDigest, budgetValues, preparationExtension, type Confirmation, type TaskBudget } from "./preparation.js";
+import { MemoryMutationError, MemoryUseDoc, memorySelectionId, type MemoryChange, type MemoryReference } from "./user-memory.js";
 import { hashFiles, verificationExtension } from "./verification.js";
 import { MethodStore, learningExtension, learningInstructions, learningReminder, settleLearning } from "./learning.js";
-import { pinSkills, skillInstructions, skillReads, SkillStore, settleSkills } from "./skills.js";
+import { pinSkills, runSkillScript, skillInstructions, skillReads, SkillStore, settleSkills, type SkillSelection, type SkillState } from "./skills.js";
 import { LocalDiscovery, localContextInstructions, type DiscoveryOptions, type LocalContext } from "./discovery.js";
-import { conversationInstructions } from "./conversation.js";
+import { conversationAnswer, conversationInstructions } from "./conversation.js";
+import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
+import { ProviderSettings } from "./provider-settings.js";
+import { McpTools, type McpPin } from "./mcp-tools.js";
+import { LocalRoutines } from "./routines.js";
+import { NotificationStore, taskNotifications } from "./notifications.js";
+import { artifactList } from "./artifacts.js";
+import { taskHandoff } from "./task-view.js";
+import { claudeProject } from './memory-sources.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
+export class TaskConflictError extends Error { readonly status = 409; }
 export interface TaskMeta {
   id: string;
   objective: string;
@@ -51,9 +61,20 @@ export interface TaskMeta {
   discovery?: boolean;
   /** New tasks only: existing discovery tasks retain their original metadata-only context. */
   userMemory?: true;
+  memoryTracking?: true;
   acceptance?: AcceptanceCheck[];
   maxTotalTokens?: number;
   maxEstimatedCostUsd?: number;
+  maxDurationMs?: number;
+  creationHash?: string;
+  skillSelection?: SkillSelection[];
+  skillPins?:SkillState;
+  skillPolicy?:'catalogue';
+  initializationError?:string;
+  remotePolicy?:'workspace';
+  mcpPins?: McpPin[];
+  routineOccurrenceId?: string;
+  routineNotifyOnChange?: true;
   review?: boolean;
   maxReworks?: number;
   maxStalls?: number;
@@ -75,10 +96,14 @@ interface Active {
   /** Disposable cache derived from Pi entries; rebuilt from storage after reopening. */
   compactionCounts: Map<Conversation["id"], { last?: EntryId; count: number }>;
 }
-export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release">; discovery?: DiscoveryOptions; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 
 /** Each top-level task owns a Pi session. The host, rather than the model, decides completion. */
 export class LocalRuntime {
+  readonly providers: ProviderSettings;
+  readonly mcp: McpTools;
+  readonly routines: LocalRoutines;
+  private inbox: NotificationStore;
   private active = new Map<string, Active>();
   private changes = new SerialQueue();
   private closing = false;
@@ -88,6 +113,16 @@ export class LocalRuntime {
   private skillStore?: Promise<SkillStore>;
   private discovery: LocalDiscovery;
   constructor(readonly config: Config, private options: RuntimeOptions) {
+    this.providers = new ProviderSettings(config.dataDir, options.models);
+    this.mcp = new McpTools(config.dataDir);
+    this.inbox = new NotificationStore(config.dataDir);
+    this.routines = new LocalRoutines({dataDir:config.dataDir,execute:async (occurrence,signal) => {
+      signal.throwIfAborted();
+      if (occurrence.action === 'notify') { await this.inbox.notify(occurrence); return {status:'notified'}; }
+      const task = await this.create(occurrence.objective,occurrence.workspace,occurrence.acceptance,{id:occurrence.taskId,budget:occurrence.budget,routineOccurrenceId:occurrence.id,notifyOnChange:occurrence.notifyOnChange,signal});
+      if (task.control === 'budget_limited') return {status:'budget_exhausted'};
+      return {taskId:task.id,status:'started'};
+    }});
     this.discovery = new LocalDiscovery(config.dataDir, options.discovery);
     this.timer = setInterval(() => {
       if (this.closing || this.ticking) return;
@@ -121,72 +156,209 @@ export class LocalRuntime {
     try { return await this.discovery.view(refresh); }
     catch { return { ...empty, notices: ["本机环境发现暂不可用，任务仍可正常执行。"] }; }
   }
-  async localMemory() {
+  async localMemory(workspace?: string) {
     if (this.config.discovery !== true) return { enabled: false, updatedAt: null, facts: [], notices: [] };
-    return this.discovery.memoryView();
+    return this.discovery.memoryView(workspace);
+  }
+  async changeMemory(id: string, input: MemoryChange, workspace?: string) {
+    return this.changes.run(async () => {
+      if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
+      const inventory = await this.discovery.load();
+      await this.discovery.memory.refresh(inventory, workspace);
+      const result = await this.discovery.memory.change(inventory.home, id, input, workspace);
+      for (const active of this.active.values()) if (active.meta.memoryTracking) {
+        active.localContext = await this.discovery.context(true, active.meta.workspace, active.meta.objective);
+        await this.recordMemory(active, true);
+        await this.configureStage(active);
+      }
+      return result;
+    });
   }
   async metadata(id: string): Promise<TaskMeta> { return readJson<TaskMeta>(this.metaFile(id)); }
   private async metadataList(): Promise<TaskMeta[]> {
     await mkdir(join(this.config.dataDir, "tasks"), { recursive: true, mode: 0o700 });
     const names = await readdir(join(this.config.dataDir, "tasks"));
-    const values = await Promise.all(names.filter(n => /^[a-f0-9-]{36}$/.test(n)).map(n => this.metadata(n)));
-    return values.sort((a, b) => b.createdAt - a.createdAt);
+    const values = await Promise.all(names.filter(n => /^[a-f0-9-]{36}$/.test(n)).map(async n => {
+      try { return await this.metadata(n); }
+      catch(error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    }));
+    return values.filter((meta):meta is TaskMeta=>meta!==undefined).sort((a, b) => b.createdAt - a.createdAt);
   }
-  async list() {
+  async list(filter = 'all') {
+    if (!['all','running','pending','delivered'].includes(filter)) throw new Error('Task filter must be all, running, pending or delivered.');
     const result = [];
     for (const meta of await this.metadataList()) {
       const status = await this.status(meta.id);
-      result.push({ ...meta, objective: status.objective, deadlineAt: status.deadlineAt, status: status.status, workerCount: status.workerCount, phase: status.goal?.phase });
+      const handoff = taskHandoff(status);
+      if (filter === 'all' || handoff.group === filter) result.push({ ...meta, objective: status.objective, deadlineAt: status.deadlineAt, status: status.status, workerCount: status.workerCount, phase: status.goal?.phase, ...handoff });
     }
-    return result;
+    return result.sort((a,b) => Number(b.group === 'pending') - Number(a.group === 'pending') || b.createdAt-a.createdAt);
+  }
+  async notifications() {
+    const derived = [];
+    for (const meta of await this.metadataList()) derived.push(...taskNotifications(await this.status(meta.id)));
+    return this.inbox.list(derived);
+  }
+  async readNotification(id:string) { return this.inbox.mark([id],await this.notifications()); }
+  async readTaskNotifications(id:string) {
+    await this.metadata(id);
+    const notifications = await this.notifications();
+    return this.inbox.mark(notifications.filter(event => event.taskId === id).map(event => event.id),notifications);
+  }
+  async artifacts(id:string) { return artifactList(await this.status(id)); }
+  async skillCatalog(workspace:string) {
+    const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
+    return store.catalog(await Workspace.open(workspace,{create:false}),await this.discoveredSkills(workspace));
+  }
+  private async discoveredSkills(workspace:string) {return this.config.discovery === true ? (await this.discovery.context(false,workspace)).skills : [];}
+  async setSkillEnabled(workspace:string,name:string,enabled:boolean) {
+    const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
+    const discovered=await this.discoveredSkills(workspace);
+    await store.setEnabled(name,enabled,await Workspace.open(workspace,{create:false}),discovered);
+    return store.catalog(await Workspace.open(workspace,{create:false}),discovered);
+  }
+  async rollbackSkill(ref:{name:string;version:string}) {
+    await (await (this.skillStore ??= SkillStore.open(this.config.dataDir))).rollback(ref);
+    return {ok:true};
+  }
+  async captureSkill(id:string,path:string) {
+    const status = await this.status(id);
+    if (!status.goal) throw new Error('Only a verified task can save a Skill.');
+    const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
+    return store.capture(await Workspace.open(status.workspace,{create:false}),status.goal,id,path);
   }
   async recover(): Promise<void> {
     for (const meta of await this.metadataList()) {
-      if (meta.control === "active") await this.open(meta, true);
+      if (meta.control === "active") {
+        try {await this.open(meta,true);}
+        catch(error) {meta.control='paused';meta.initializationError=errorText(error);await atomicJson(this.metaFile(meta.id),meta);}
+      }
       else if (meta.control === "cancelled") await this.cancel(meta.id);
     }
+    await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; routineOccurrenceId?:string; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
+      options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
       if (typeof objective !== "string" || !objective.trim() || objective.length > 32000) throw new Error("Provide an objective between 1 and 32000 characters");
       const checks = acceptanceChecks(acceptance);
       if (options.chat && checks.length) throw new Error("Acceptance checks belong to an explicit task, not an ordinary conversation");
-      const model = validateModel(this.options.models, this.config.model);
+      const budget = options.budget ? budgetValues(options.budget) : undefined;
+      if (options.skills !== undefined && (!Array.isArray(options.skills) || options.skills.length > 16 || options.skills.some(ref => !ref || typeof ref.name !== 'string' || (ref.version !== undefined && typeof ref.version !== 'string')))) throw new Error('Provide an array of at most 16 Skill references.');
+      const id = options.id ?? randomUUID();
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error("Provide a valid task UUID.");
+      const requestedWorkspace = resolve(workspace ?? join(this.directory(id), "workspace"));
+      const creationHash = createHash("sha256").update(JSON.stringify({ objective, workspace: requestedWorkspace, acceptance: checks, prepare: Boolean(options.prepare), chat: Boolean(options.chat), budget: budget ?? null, skills:options.skills ?? null, routineOccurrenceId:options.routineOccurrenceId ?? null,notifyOnChange:options.notifyOnChange === true,remote:options.remote===true })).digest("hex");
+      if (options.id) try {
+        const saved = await this.metadata(id);
+        if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
+        await this.open(saved, saved.control === "active");
+        return saved;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const model = validateModel(this.options.models, await this.providers.selected(this.config.model));
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
-      const id = randomUUID();
-      const files = await Workspace.open(resolve(workspace ?? join(this.directory(id), "workspace")));
-      const meta: TaskMeta = { id, objective, workspace: files.root, model,
+      const files = await Workspace.open(requestedWorkspace);
+      const selection=options.remote ? [] : options.skills;
+      const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
+      const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
+        mcpPins:options.remote ? [] : await this.mcp.pins(),
+        ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
+        ...(options.remote ? {remotePolicy:'workspace' as const} : {}),
+        ...(options.routineOccurrenceId ? {routineOccurrenceId:options.routineOccurrenceId} : {}),
+        ...(options.notifyOnChange ? {routineNotifyOnChange:true as const} : {}),
         ...(this.config.subagentModel ? { subagentModel: this.config.subagentModel } : {}),
-        createdAt: Date.now(), deadlineAt: Date.now() + this.config.maxDurationMs,
+        createdAt: Date.now(), deadlineAt: Date.now() + (budget?.maxDurationMs ?? this.config.maxDurationMs),
+        ...(budget ? { maxDurationMs: budget.maxDurationMs } : {}),
         maxSubagents: this.config.maxSubagents, control: "active", schemaVersion: 3, planPolicy: "advisory", acceptance: checks,
-        ...(!this.options.legacyResources ? { resourcePolicy: "pi-skills" as const } : {}),
-        ...(this.config.discovery === true && !this.options.legacyResources ? { discovery: true, userMemory: true as const } : {}),
+        ...(!this.options.legacyResources ? { resourcePolicy: "pi-skills" as const,skillPolicy:'catalogue' as const } : {}),
+        ...(this.config.discovery === true && !this.options.legacyResources && !options.remote ? { discovery: true, userMemory: true as const, memoryTracking: true as const } : {}),
         ...(options.prepare || options.chat ? { preparation: true } : {}),
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
-        ...((options.prepare || options.chat) && this.config.learning ? { learning: true } : {}),
-        ...(this.config.maxTotalTokens === undefined ? {} : { maxTotalTokens: this.config.maxTotalTokens }),
-        maxEstimatedCostUsd: this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
+        ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
+        ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
+        maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
         maxReworks: this.config.maxReworks ?? 3, maxStalls: this.config.maxStalls ?? 2 };
+      options.signal?.throwIfAborted();
       await atomicJson(this.metaFile(id), meta);
+      if (options.signal?.aborted) { meta.control='cancelled';await atomicJson(this.metaFile(id),meta);options.signal.throwIfAborted(); }
       await this.open(meta, true);
       return meta;
     });
   }
+  async hasRequest(id: string, requestId: string): Promise<boolean> {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      const active = await this.open(meta, false);
+      const accepted = await active.harness.commit(async tx => Boolean(
+        await tx.submissionByRequest(active.root.id, "user:" + requestId) ||
+        await tx.submissionByRequest(active.root.id, requestId)
+      ), ctx);
+      if (accepted) return true;
+      return (await this.goalState(active))?.outbox?.requestId === "user:" + requestId;
+    });
+  }
+  async conversationMessages(id:string) {
+    return this.changes.run(async () => {
+      const active=await this.open(await this.metadata(id),false);
+      const result:{sequence:number;role:'user'|'assistant';text:string;timestamp:number}[]=[];
+      let cursor:Cursor|undefined;
+      do {
+        const page=await active.root.entries({order:'ascending'},200,cursor,ctx);
+        for(const entry of page.items) {
+          if (!UserEntry.is(entry) && !AssistantEntry.is(entry)) continue;
+          for(const message of entry.model ?? []) {
+            const text=message.role==='user' ? typeof message.content==='string' ? message.content : message.content.filter(block=>block.type==='text').map(block=>block.text).join('\n') : conversationAnswer(message);
+            if (text && (message.role==='user' || message.role==='assistant')) result.push({sequence:Number(entry.id),role:message.role,text,timestamp:message.timestamp});
+          }
+        }
+        cursor=page.next;
+      } while(cursor);
+      return result;
+    });
+  }
   private async open(meta: TaskMeta, run: boolean): Promise<Active> {
+
     if (this.closing) throw new Error("Runtime is shutting down");
     let active = this.active.get(meta.id);
     if (!active) {
       const workspace = await Workspace.open(meta.workspace);
       const registry = createRegistry();
+      const remote=meta.remotePolicy==='workspace';
+      const policy=remote ? remoteFilePolicy(workspace) : undefined;
       const nativeSkills = meta.resourcePolicy === "pi-skills";
-      const localContext = meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective).catch(() => undefined) : undefined;
+      const localContext = !remote && meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective).catch(() => undefined) : undefined;
       const statements = () => this.userStatements(this.active.get(meta.id)!);
-      const memory = localContext?.memory ? this.discovery.memory.extension(meta.id, localContext.memory.home, () => this.discovery.load(), meta.entrypoint === "chat" ? statements : undefined, meta.workspace) : undefined;
-      const readObserver = skillReads(localContext?.skills);
+      const memory = localContext?.memory ? this.discovery.memory.extension(meta.id, localContext.memory.home, () => this.discovery.load(), meta.entrypoint === "chat" ? statements : undefined, meta.workspace,meta.memoryTracking===true) : undefined;
+      const readObserver = skillReads(meta.skillPolicy==='catalogue' ? [] : localContext?.skills);
+      const memoryUse=meta.memoryTracking ? defineExtension({name:'local_memory_use',hooks:[{task:'pi.generation',handlers:{
+        beforeRequest:async(request,api,context)=>{
+          const current=this.active.get(meta.id);
+          if (!current || api.conversationId!==current.root.id) return;
+          const sections=new Map<string,string>();
+          for(const message of request.messages) if(message.role==='system') for(const [name,value] of Object.entries(message.sections ?? {})) {
+            if(value===null) sections.delete(name);else sections.set(name,value);
+          }
+          const texts=[...sections.values()];
+          const id=texts.map(text=>/^Memory selection: ([a-f0-9]{64})$/m.exec(text)?.[1]).find(Boolean);
+          const lookups:string[]=[];
+          for(const message of request.messages) if(message.role==='toolResult' && message.toolName==='user_memory_search') for(const block of message.content) if(block.type==='text') {
+            try {const value:unknown=JSON.parse(block.text);if(value && typeof value==='object' && 'memorySelectionId' in value && typeof value.memorySelectionId==='string' && /^[a-f0-9]{64}$/.test(value.memorySelectionId)) lookups.push(value.memorySelectionId);}
+            catch { /* Diagnostics and truncated output do not attest to a complete lookup. */ }
+          }
+          await current.harness.commit(async tx=>{
+            const state=await tx.doc(MemoryUseDoc,current.root.id),supplied=id ? state.prepared?.[id] : undefined;
+            const references=[...(supplied?.references ?? []),...lookups.flatMap(key=>state.prepared?.['search:'+key]?.references ?? [])];
+            for(const reference of references) if(!state.references.some(old=>old.factId===reference.factId && old.revision===reference.revision)) state.references.push(reference);
+            state.current=(supplied?.references ?? []).map(reference=>reference.factId+'@'+reference.revision);
+            state.summary=supplied?.summary ?? '';
+            state.initialized=true;state.updatedAt=Date.now();
+          },context);
+        },
+      } satisfies Partial<GenerationHooks>}]}) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const preparation = preparationExtension(workspace, this.defaultBudget(meta));
-      const preparationExtensions = localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -194,7 +366,8 @@ export class LocalRuntime {
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
       const chatExtensions = [conversation, ...(memory ? [memory] : []),
-        ...(this.config.web !== false ? [webExtension(workspace)] : [])];
+        ...(memoryUse ? [memoryUse] : []),
+        ...(policy ? [policy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
       const verification = verificationExtension(workspace, nativeSkills);
       const methods = meta.learning && !nativeSkills ? await (this.methodStore ??= MethodStore.open(this.config.dataDir)) : undefined;
       const skills = meta.learning && nativeSkills ? await (this.skillStore ??= SkillStore.open(this.config.dataDir)) : undefined;
@@ -205,19 +378,22 @@ export class LocalRuntime {
         return goal.costLimit !== undefined && used.estimatedCostUsd < goal.costLimit * 0.8 &&
           (goal.tokenLimit === null || used.totalTokens < goal.tokenLimit * 0.8) && Date.now() + 10_000 < this.deadline(current, goal);
       } }) : undefined;
-      const extra = (this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
-      if (meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(memory ? [memory] : []), ...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
-      const extensions = [meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly),
-        ...(nativeSkills ? [readObserver] : []),
+      const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
+      if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins)}));
+      if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
+      const coordinatorOnly = [goal, verification, ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly),
+        ...(policy ? [policy] : []),
+        ...(memoryUse ? [memoryUse] : []),
+        ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
-        ...(meta.preparation ? [verification] : []),
+        ...(meta.preparation && !remote ? [verification] : []),
         ...(learning ? [learning] : []),
-        ...(meta.schemaVersion === 3 && this.config.web !== false ? [webExtension(workspace)] : []), ...extra];
+        ...(!remote && meta.schemaVersion === 3 && this.config.web !== false ? [webExtension(workspace)] : []), ...extra];
       for (const extension of [...extensions, ...(meta.preparation ? preparationExtensions : []), ...(meta.entrypoint === "chat" ? chatExtensions : []), ...(meta.schemaVersion !== undefined ? [readonly, review] : [])]) registry.install(extension);
       const storage = await openNodeSqliteStorage(join(this.directory(meta.id), "session.sqlite"));
-      let harness: Harness;
+      let harness: Harness|undefined;
       try {
         harness = await Harness.open(storage, {
           models: this.options.models, registry,
@@ -239,8 +415,8 @@ export class LocalRuntime {
           state.checks = (meta.acceptance ?? []).map(check => ({ source: "user", check }));
           goalEvent(state, "created", meta.objective);
         });
-        await this.configureStage(active);
-      } catch (error) { await storage.close(ctx); throw error; }
+        if(!meta.initializationError) await this.configureStage(active);
+      } catch (error) { this.active.delete(meta.id);if(harness) await harness.close(ctx);else await storage.close(ctx);throw error; }
     }
     if (run && meta.control === "active") {
       const goal = await this.goalState(active);
@@ -287,7 +463,7 @@ export class LocalRuntime {
     return messages;
   }
   private defaultBudget(meta: TaskMeta): TaskBudget {
-    return { maxEstimatedCostUsd: meta.maxEstimatedCostUsd ?? 1, maxDurationMs: this.config.maxDurationMs,
+    return { maxEstimatedCostUsd: meta.maxEstimatedCostUsd ?? 1, maxDurationMs: meta.maxDurationMs ?? this.config.maxDurationMs,
       ...(meta.maxTotalTokens === undefined ? {} : { maxTotalTokens: meta.maxTotalTokens }) };
   }
   private deadline(active: Active, goal?: GoalState): number { return goal?.confirmation?.deadlineAt ?? active.meta.deadlineAt; }
@@ -296,20 +472,47 @@ export class LocalRuntime {
     const approved = goal?.confirmation ? goal.brief?.budget : undefined;
     return {
       maxEstimatedCostUsd: meta.schemaVersion === 3 ? approved?.maxEstimatedCostUsd ?? meta.maxEstimatedCostUsd ?? 1 : null,
-      maxDurationMs: approved?.maxDurationMs ?? this.config.maxDurationMs,
+      maxDurationMs: approved?.maxDurationMs ?? meta.maxDurationMs ?? this.config.maxDurationMs,
       maxTotalTokens: approved?.maxTotalTokens ?? meta.maxTotalTokens ?? (meta.schemaVersion === 3 ? null : 500_000),
     };
   }
+  private async recordMemory(active: Active, refresh = false): Promise<void> {
+    const memory = active.localContext?.memory;
+    if (!active.meta.memoryTracking || !memory) return;
+    const previous = await active.harness.commit(async tx => plain(await tx.doc(MemoryUseDoc, active.root.id)), ctx);
+    const currentReferences = previous.references.filter(reference => previous.current.includes(reference.factId + "@" + reference.revision));
+    const changedScope = currentReferences.some(reference => reference.scope === 'project' && reference.project !== memory.project && reference.project !== (memory.project ? claudeProject(memory.project) : undefined));
+    const changed = previous.initialized && (changedScope || await this.discovery.memory.referencesChanged(memory.home, currentReferences));
+    if (previous.initialized && !refresh && !changed) {
+      active.localContext!.memory={...memory,summary:previous.summary,references:currentReferences};
+    }
+    const selected=active.localContext!.memory!;
+    selected.selectionId=memorySelectionId(selected.references ?? []);
+    await active.harness.commit(async tx=>{
+      const state=await tx.doc(MemoryUseDoc,active.root.id);
+      state.prepared ??= {};
+      state.prepared[selected.selectionId!] ??= {summary:selected.summary,references:selected.references ?? []};
+    },ctx);
+  }
+  async taskMemory(id: string):Promise<{tracked:boolean;current:string[];references:MemoryReference[];updatedAt:number|null}> {
+    return this.changes.run(async () => {
+      const active = await this.open(await this.metadata(id), false);
+      if (!active.meta.memoryTracking) return { tracked: false, current: [], references: [], updatedAt: null };
+      const state = await active.harness.commit(async tx => plain(await tx.doc(MemoryUseDoc, active.root.id)), ctx);
+      return { tracked: true, current: state.current, references: state.references, updatedAt: state.updatedAt };
+    });
+  }
   private async configureStage(active: Active): Promise<void> {
+    await this.recordMemory(active);
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
-        instructions: conversationInstructions(active.meta.workspace) + (active.localContext ? localContextInstructions(active.localContext) : "") }, ctx);
+        instructions: conversationInstructions(active.meta.workspace) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
     const preparing = !!active.meta.preparation && !state?.confirmation;
     if (!preparing && active.meta.resourcePolicy === "pi-skills" && state && !state.skills) {
-      const skills = await pinSkills(active.workspace, this.directory(active.meta.id), active.skills).catch(error => ({ pins: [], loaded: [], notice: errorText(error) }));
+      const skills = await this.taskSkills(active);
       state = await this.updateGoal(active, goal => { goal.skills = skills; });
     }
     if (!preparing && active.methods && state && !state.learning) {
@@ -320,7 +523,13 @@ export class LocalRuntime {
     await active.root.configure({ extensions: preparing ? active.preparationExtensions : active.executionExtensions,
       instructions: this.instructions(active.meta, preparing) + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
         (!preparing && active.meta.resourcePolicy === "pi-skills" ? skillInstructions(state?.skills, !!active.skills) : "") +
-        (active.localContext ? localContextInstructions(active.localContext) : "") }, ctx);
+        (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
+  }
+  private async taskSkills(active:Active):Promise<SkillState> {
+    if(active.meta.skillPins) return active.meta.skillPins;
+    try {
+      return await pinSkills(active.workspace,this.directory(active.meta.id),active.skills ?? await SkillStore.existing(this.config.dataDir),active.meta.skillSelection,active.meta.skillPolicy==='catalogue' ? active.localContext?.skills : undefined);
+    } catch(error) {if(active.meta.skillSelection!==undefined) throw error;return {pins:[],loaded:[],notice:errorText(error)};}
   }
   private async finishLearning(active: Active): Promise<void> {
     if (!await this.goalState(active)) return;
@@ -421,7 +630,7 @@ export class LocalRuntime {
         state.phase = "completed"; state.reason = null; state.question = null; state.lastEvaluated = String(latest.id);
         state.verification = { completedAt: Date.now(), reviewer: null, method: "checks",
           result: { verdict: "pass", reason: "Declared artifact and acceptance checks passed; independent model review was not requested.", evidence: report.files.map(f => f.path) } };
-        goalEvent(state, "completed", "Task checks passed");
+        goalEvent(state, "completed", "Task checks passed",active.meta.workspace);
       });
       await this.finishLearning(active);
       this.options.computer?.release(active.meta.id); active.enabled = false; return;
@@ -534,7 +743,7 @@ export class LocalRuntime {
     await this.updateGoal(active, state => {
       state.phase = "completed"; state.reason = null; state.question = null; state.lastEvaluated = String(latest?.id);
       state.verification = { completedAt: Date.now(), reviewer: review.conversationId, result: verdict, method: "model" };
-      goalEvent(state, "completed", verdict.reason);
+      goalEvent(state, "completed", verdict.reason,active.meta.workspace);
     });
     await this.finishLearning(active);
     this.options.computer?.release(active.meta.id); active.enabled = false;
@@ -561,6 +770,7 @@ export class LocalRuntime {
     active.meta.control = "budget_limited";
     await atomicJson(this.metaFile(active.meta.id), active.meta);
     if (await this.goalState(active)) await this.updateGoal(active, goal => { goal.reason = reason; goalEvent(goal, "budget_limited", reason); });
+    if (active.meta.routineOccurrenceId) await this.routines.settleBudget(active.meta.routineOccurrenceId);
     await this.closeTask(active.meta.id);
   }
   async status(id: string) {
@@ -579,6 +789,7 @@ export class LocalRuntime {
       const usage = await active.harness.usage(ctx);
       const compactions = await this.compactionTotals(active, conversations);
       const workerIds = new Set(conversations.filter(c => c.owner).map(c => c.id));
+      const delegations = (await listDelegations(active.harness,meta.workspace,conversations)).map(child => ({...child,parentTaskId:meta.id}));
       const interaction = meta.entrypoint === "chat" && !goal ? "chat" as const : "goal" as const;
       const activeTools = ["running", "verifying"].includes(status) ? await active.harness.commit(async tx => {
         const tools: { id: string; name: string; worker: boolean }[] = [];
@@ -593,13 +804,13 @@ export class LocalRuntime {
         return tools;
       }, ctx) : [];
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
-        activeTools,
+        activeTools, delegations,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
         compactions: compactions.total, rootCompactions: compactions.root,
         contextUsage: { estimatedTokens: estimateContextTokens(context.messages).tokens,
           contextWindow: this.options.models.getModel(meta.model.provider, meta.model.modelId)?.contextWindow ?? null },
-        budget: { ...taskUsage(usage), tokenLimit: goal ? goal.tokenLimit : meta.entrypoint === "chat" ? meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null : null,
+        budget: { ...taskUsage(usage), priceKnown:modelCostKnown(meta.model) && (!meta.subagentModel || modelCostKnown(meta.subagentModel)), tokenLimit: goal ? goal.tokenLimit : meta.entrypoint === "chat" ? meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null : null,
           costLimit: goal ? goal.costLimit ?? null : meta.entrypoint === "chat" ? meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 : null },
         resumeBudget: this.resumeBudget(meta, goal),
         conversations, tasks: inspection.tasks, usage };
@@ -624,12 +835,14 @@ export class LocalRuntime {
       if (inspection.tasks.length || inspection.submissions.length) throw new Error("任务说明仍在保存，请稍后确认。");
       const used = taskUsage(await active.harness.usage(ctx)), budget = goal.brief.budget;
       if (used.estimatedCostUsd >= budget.maxEstimatedCostUsd || (budget.maxTotalTokens !== undefined && used.totalTokens >= budget.maxTotalTokens)) throw new Error("澄清阶段用量已达到所提议的总预算，请先调整任务说明中的预算。");
+      const skills=meta.resourcePolicy==='pi-skills' && !goal.skills ? await this.taskSkills(active) : undefined;
       const verificationInputs: NonNullable<Confirmation["verificationInputs"]> = {};
       for (const [index, criterion] of goal.brief.criteria.entries()) if (criterion.verification) {
         verificationInputs[String(index + 1)] = await hashFiles(active.workspace, criterion.verification.inputs);
       }
       await this.updateGoal(active, state => {
         const brief = plain(state.brief!);
+        if(skills) state.skills=skills;
         const at = Date.now();
         state.confirmation = { revision, digest, at, deadlineAt: at + brief.budget.maxDurationMs, requestId: `confirm:${revision}`,
           ...(Object.keys(verificationInputs).length ? { verificationInputs } : {}) };
@@ -662,7 +875,7 @@ export class LocalRuntime {
         if (reason) { await this.limit(active, reason); throw new Error(reason); }
         if (meta.entrypoint === "chat") {
           // Idle conversation time is not execution time; each user turn gets the configured time window.
-          meta.deadlineAt = Date.now() + this.config.maxDurationMs;
+          meta.deadlineAt = Date.now() + (meta.maxDurationMs ?? this.config.maxDurationMs);
           active.meta = meta;
           await atomicJson(this.metaFile(id), meta);
         } else if (Date.now() >= meta.deadlineAt) throw new Error("Task time budget has expired; resume with a fresh budget first");
@@ -676,7 +889,7 @@ export class LocalRuntime {
       if (before.outbox) await this.dispatchOutbox(active);
       if (preparing) {
         // User waiting time is not execution time; a reply starts another bounded preparation run.
-        meta.deadlineAt = Date.now() + this.config.maxDurationMs;
+        meta.deadlineAt = Date.now() + (meta.maxDurationMs ?? this.config.maxDurationMs);
         active.meta = meta;
         await atomicJson(this.metaFile(id), meta);
       }
@@ -705,9 +918,15 @@ export class LocalRuntime {
       const meta = await this.metadata(id);
       if (meta.control === "cancelled") throw new Error("Cancelled tasks cannot be resumed");
       await this.closeTask(id);
-      meta.control = "active"; meta.deadlineAt = Date.now() + this.config.maxDurationMs;
-      await atomicJson(this.metaFile(id), meta);
       const active = await this.open(meta, false);
+      if(meta.initializationError) {
+        const previous=meta.initializationError;
+        delete meta.initializationError;
+        try {await this.configureStage(active);}
+        catch(error) {meta.initializationError=previous;await this.closeTask(id);throw error;}
+      }
+      meta.control = "active"; meta.deadlineAt = Date.now() + (meta.maxDurationMs ?? this.config.maxDurationMs);
+      await atomicJson(this.metaFile(id), meta);
       if (await this.goalState(active)) {
         const used = taskUsage(await active.harness.usage(ctx));
         await this.updateGoal(active, goal => {
@@ -788,6 +1007,8 @@ export class LocalRuntime {
   }
   async close(): Promise<void> {
     this.closing = true; clearInterval(this.timer);
+    await this.routines.close();
+    await this.mcp.close();
     await this.changes.run(async () => { await Promise.all([...this.active.keys()].map(id => this.closeTask(id))); });
   }
 }

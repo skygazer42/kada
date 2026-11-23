@@ -29,11 +29,11 @@ try {
   for (;;) {
     const status = await runtime.status(task.id);
     if (!announced && await exists(join(directory, "ready-alpha")) && await exists(join(directory, "ready-beta"))) {
-      console.log(JSON.stringify({ type: "ready", taskId: task.id, ids: status.conversations.map(c => c.id) }));
+      console.log(JSON.stringify({ type: "ready", taskId: task.id, ids: status.conversations.map(c => c.id),delegations:status.delegations }));
       announced = true;
     }
     if (status.status === "completed") {
-      console.log(JSON.stringify({ type: "completed", ids: status.conversations.filter(c => c.owner || c.id === status.conversations[0]?.id).map(c => c.id) }));
+      console.log(JSON.stringify({ type: "completed", ids: status.conversations.filter(c => c.owner || c.id === status.conversations[0]?.id).map(c => c.id),delegations:status.delegations }));
       break;
     }
     if (status.status === "failed") throw new Error(JSON.stringify(status.submission));

@@ -1,0 +1,49 @@
+{
+  "at": "2026-11-23T19:22:05.898Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": true,
+  "selection": [
+    "F01",
+    "F13"
+  ],
+  "fullSuite": false,
+  "passed": false,
+  "maxRequests": 32,
+  "modelRequests": 8,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F01-F04-memory-scope-correction-forget": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    },
+    "F13-F15-mobile-reconnect-attachment-delivery": {
+      "passed": true
+    }
+  },
+  "tasks": [
+    {
+      "id": "b0d9032e-561d-4ab8-a4ca-df33b2bd04be",
+      "tokens": 3272,
+      "input": 3248,
+      "output": 24,
+      "cached": 0
+    },
+    {
+      "id": "d7740b1c-250c-4a53-82cb-5b1d3673b696",
+      "tokens": 3157,
+      "input": 3150,
+      "output": 7,
+      "cached": 0
+    },
+    {
+      "id": "198cb640-6e67-4e63-acf5-28a99020b85a",
+      "tokens": 30442,
+      "input": 9550,
+      "output": 796,
+      "cached": 20096
+    }
+  ],
+  "totalTaskTokens": 36871,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

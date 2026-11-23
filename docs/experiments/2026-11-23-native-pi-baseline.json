@@ -1,0 +1,130 @@
+{
+  "objective": "读取 inputs/source.json，只统计 active=true 的项目。按 category 汇总 amount*quantity，按分类名排序，将结果写成 result.json：categories 数组（每项 name 和 total），grandTotal 为合计。写简短中文 summary.md，包含“来源”和输入文件路径。使用本地终端实际计算并自查。不要修改输入。单独执行，不委派。",
+  "results": [
+    {
+      "arm": "pi",
+      "model": {
+        "provider": "siliconflow",
+        "modelId": "Qwen/Qwen2.5-7B-Instruct"
+      },
+      "execution": "done",
+      "passed": false,
+      "elapsedMs": 5382,
+      "reworks": 0,
+      "userContinuationMessages": 0,
+      "budget": {
+        "totalTokens": 2190,
+        "cachedTokens": 0,
+        "cacheWriteTokens": 0,
+        "inputTokens": 2115,
+        "outputTokens": 75,
+        "estimatedCostUsd": null
+      },
+      "checks": [
+        {
+          "label": "artifact: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, lstat '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\result.json'"
+        },
+        {
+          "label": "artifact: summary.md",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, lstat '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\summary.md'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\result.json'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\result.json'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\result.json'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\result.json'"
+        },
+        {
+          "label": "file_contains: summary.md",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\pi\\workspace\\summary.md'"
+        },
+        {
+          "label": "file_contains: inputs/source.json",
+          "passed": true,
+          "detail": "Passed against current file contents"
+        }
+      ]
+    },
+    {
+      "arm": "extension",
+      "model": {
+        "provider": "siliconflow",
+        "modelId": "Qwen/Qwen2.5-7B-Instruct"
+      },
+      "execution": "budget_limited",
+      "passed": false,
+      "elapsedMs": 113967,
+      "reworks": 1,
+      "userContinuationMessages": 0,
+      "budget": {
+        "totalTokens": 107787,
+        "cachedTokens": 48960,
+        "cacheWriteTokens": 0,
+        "inputTokens": 54802,
+        "outputTokens": 4025,
+        "estimatedCostUsd": null
+      },
+      "checks": [
+        {
+          "label": "artifact: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, lstat '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\result.json'"
+        },
+        {
+          "label": "artifact: summary.md",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, lstat '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\summary.md'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\result.json'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\result.json'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\result.json'"
+        },
+        {
+          "label": "json_value: result.json",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\result.json'"
+        },
+        {
+          "label": "file_contains: summary.md",
+          "passed": false,
+          "detail": "ENOENT: no such file or directory, open '<fixture>\\state\\live-tests\\compare-2140a8ff-b3a7-4373-821b-addd59638ab7\\extension\\workspace\\summary.md'"
+        },
+        {
+          "label": "file_contains: inputs/source.json",
+          "passed": true,
+          "detail": "Passed against current file contents"
+        }
+      ]
+    }
+  ],
+  "note": "Single real terminal case. This does not establish general superiority or a completion rate."
+}

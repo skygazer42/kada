@@ -12,7 +12,7 @@ type Message = TaskStatus["messages"][number];
 export type ChatEvent = { kind: "info" | "answer" | "error"; text: string };
 
 function answerKey(message: Message, text: string): string { return `${message.timestamp}:${text}`; }
-const HELP = `直接输入消息：普通问答直接回复，需要实际交付时再提出任务说明与预算。\n\n/new [消息]       新建对话，原任务继续在后台运行\n/confirm          确认刚展示的任务说明与预算\n/run 目标         已有明确授权，沿用配置预算直接执行\n/tasks            列出最近的对话与任务\n/attach 任务ID    接回已有对话或任务\n/status           查看状态、预算、核验范围和进度\n/pause            暂停当前对话或任务\n/resume           恢复；显式补充一份配置/已确认预算，不代替目标确认\n/cancel           取消当前对话或任务\n/help             显示帮助\n/quit             退出聊天，后台任务继续运行`;
+const HELP = `直接输入消息：普通问答直接回复，需要实际交付时再提出任务说明与预算。\n\n/new [消息]       新建对话，原任务继续在后台运行\n/confirm          确认刚展示的任务说明与预算\n/run 目标         已有明确授权，沿用配置预算直接执行\n/memory list      查看当前项目记忆与来源\n/memory edit ID 内容 纠正一条记忆\n/memory forget ID 遗忘一条记忆\n/memory used      查看当前会话使用的记忆版本\n/tasks            列出最近的对话与任务\n/attach 任务ID    接回已有对话或任务\n/status           查看状态、预算、核验范围和进度\n/pause            暂停当前对话或任务\n/resume           恢复；显式补充一份配置/已确认预算，不代替目标确认\n/cancel           取消当前对话或任务\n/help             显示帮助\n/quit             退出聊天，后台任务继续运行`;
 
 /** Conversation selection and delivery are independent of terminal rendering. */
 export class ChatSession {
@@ -34,6 +34,7 @@ export class ChatSession {
       if (last) this.emit({ kind: "answer", text: last.text! });
     }
     await this.poll();
+    await this.client.request(`/v1/tasks/${id}/notifications/read`,'POST',{});
   }
   /** false means exit the client; the daemon and tasks are left running. */
   async handle(line: string): Promise<boolean> {
@@ -44,7 +45,7 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
-      if (command === "/help") { this.info(HELP); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (command === "/run") {
         if (!argument) throw new Error("用法：/run 已明确授权的目标（沿用当前配置预算）");
@@ -61,12 +62,73 @@ export class ChatSession {
         await this.attach(argument);
         return true;
       }
+      if (command === "/memory") {
+        const [action = "list", memoryId, ...words] = (argument ?? "").split(/\s+/).filter(Boolean);
+        if (action === "used") {
+          if (!this.taskId) throw new Error("先用 /attach 选择任务，再查看记忆引用。");
+          const used = await this.client.request<{ current: string[]; references: { factId: string; revision: string; text: string; evidence: { path: string; quote: string }[] }[] }>("/v1/tasks/" + this.taskId + "/memory");
+          this.info(used.references.length ? used.references.map(reference =>
+            (used.current.includes(reference.factId + "@" + reference.revision) ? "[当前背景] " : "[历史背景] ") +
+            reference.factId + " " + reference.text + "\n  来源：" + reference.evidence.map(item => item.path).join("、")).join("\n") : "当前会话尚未引入记忆背景。");
+          return true;
+        }
+        const workspace = this.taskId ? (await this.client.request<TaskStatus>("/v1/tasks/" + this.taskId)).workspace : this.workspace ?? process.cwd();
+        const query = "?workspace=" + encodeURIComponent(workspace);
+        const view = await this.client.request<{ facts: { id: string; text: string; revision: string; scope: string; evidence: { path: string; quote: string }[] }[] }>("/v1/environment/memory" + query);
+        if (action === "list") {
+          this.info(view.facts.length ? view.facts.map(fact => fact.id + " [" + fact.scope + "] " + fact.text + "\n  来源：" +
+            fact.evidence.map(item => item.path + "\n  摘录：" + item.quote).join("\n")).join("\n") : "当前项目尚无有效记忆。");
+          return true;
+        }
+        const fact = view.facts.find(item => item.id === memoryId);
+        if (!fact) throw new Error("请从 /memory list 选择当前项目的记忆 ID。");
+        if (action !== "edit" && action !== "forget") throw new Error("用法：/memory list、/memory edit ID 新内容、/memory forget ID、/memory used");
+        const text = words.join(" ");
+        if (action === "edit" && !text) throw new Error("在记忆 ID 后输入纠正后的内容。");
+        await this.client.request("/v1/environment/memory/" + fact.id + (action === "forget" ? "/forget" : "") + query,
+          action === "forget" ? "POST" : "PATCH", {
+            expectedRevision: fact.revision, requestId: randomUUID(), ...(action === "edit" ? { text } : {}),
+          });
+        this.info(action === "forget" ? "已遗忘该记忆，后续检索和自动背景停止采用它。原始文件和历史对话可在各自入口管理。" : "已保存纠正后的记忆，来源和历史版本可追溯。");
+        return true;
+      }
       if (command === "/tasks") {
-        const tasks = (await this.client.request<(TaskMeta & { status: string })[]>("/v1/tasks")).slice(0, 10);
+        const tasks = (await this.client.request<(TaskMeta & { status: string; summary?:string })[]>("/v1/tasks?filter="+encodeURIComponent(argument ?? 'all'))).slice(0, 10);
         if (!tasks.length) this.info("还没有对话，直接输入消息即可开始。");
         else for (const task of tasks) {
-          this.info(`${task.id}  [${task.status}]  ${task.objective.slice(0, 100).replace(/\s+/g, " ")}`);
+          this.info(`${task.id}  [${task.status}]  ${task.objective.slice(0, 100).replace(/\s+/g, " ")}${task.summary ? '\n  '+task.summary : ''}`);
         }
+        return true;
+      }
+      if (command === '/inbox' || command === '/read') {
+        if (command === '/read') {
+          if (!argument) throw new Error('用法：/read 通知ID');
+          await this.client.request('/v1/notifications/'+encodeURIComponent(argument)+'/read','POST',{});
+          this.info('通知已读。');
+        } else {
+          const items = await this.client.request<{id:string;taskId?:string;detail:string;readAt:number|null}[]>('/v1/notifications');
+          this.info(items.length ? items.map(item => `${item.readAt === null ? '[未读]' : '[已读]'} ${item.id}\n${item.detail}${item.taskId ? '\n/attach '+item.taskId : ''}`).join('\n\n') : '暂无通知。');
+        }
+        return true;
+      }
+      if (command === '/files' || command === '/open') {
+        if (!this.taskId) throw new Error('先用 /attach 选择任务。');
+        if (command === '/open') {
+          const index = Number(argument);
+          if (!argument || !Number.isSafeInteger(index) || index < 1) throw new Error('用法：/open 文件编号（从 1 开始）');
+          await this.client.request(`/v1/tasks/${this.taskId}/artifacts/${index-1}/open`,'POST',{});
+          this.info('已打开产物或所在文件夹。');
+        } else {
+          const files = await this.client.request<{index:number;path:string;state:string;reason?:string}[]>(`/v1/tasks/${this.taskId}/artifacts`);
+          this.info(files.length ? files.map(file => `${file.index+1}. [${file.state}] ${file.path}${file.reason ? '\n  '+file.reason : ''}`).join('\n') : '当前任务尚未提交产物。');
+        }
+        return true;
+      }
+      if (command === '/remind') {
+        const [at,...words] = (argument ?? '').split(/\s+/);
+        if (!at || !/(Z|[+-]\d{2}:\d{2})$/i.test(at) || !words.length) throw new Error('用法：/remind 2026-12-01T17:00:00-05:00 提醒内容');
+        const rule = await this.client.request<{id:string;nextRunAt:string}>('/v1/routines','POST',{action:'notify',objective:words.join(' '),schedule:{kind:'once',at}});
+        this.info(`提醒已保存：${rule.id}\n到期：${rule.nextRunAt}`);
         return true;
       }
       if (["/status", "/pause", "/resume", "/cancel"].includes(command!)) {

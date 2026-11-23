@@ -1,0 +1,55 @@
+{
+  "at": "2026-11-23T20:09:43.865Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": true,
+  "selection": [
+    "F01",
+    "F13"
+  ],
+  "fullSuite": false,
+  "passed": true,
+  "maxRequests": 32,
+  "modelRequests": 15,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F01-F04-memory-scope-correction-forget": {
+      "passed": true
+    },
+    "F13-F15-mobile-reconnect-attachment-delivery": {
+      "passed": true
+    }
+  },
+  "tasks": [
+    {
+      "id": "3086010b-0d8b-48d8-adcb-aec492c93e42",
+      "tokens": 6732,
+      "input": 3571,
+      "output": 89,
+      "cached": 3072
+    },
+    {
+      "id": "9c0f77d0-e559-459e-8eb4-4c67f64de4c4",
+      "tokens": 6624,
+      "input": 3589,
+      "output": 91,
+      "cached": 2944
+    },
+    {
+      "id": "4fde7a11-e157-4339-9a8f-5e106f85eb80",
+      "tokens": 9916,
+      "input": 3762,
+      "output": 138,
+      "cached": 6016
+    },
+    {
+      "id": "975785b8-a73d-4d74-beef-3db409b4a165",
+      "tokens": 24593,
+      "input": 8653,
+      "output": 964,
+      "cached": 14976
+    }
+  ],
+  "totalTaskTokens": 47865,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

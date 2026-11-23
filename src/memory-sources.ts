@@ -16,6 +16,7 @@ export async function memoryProject(workspace?: string): Promise<string | undefi
   if (!actual || !(await stat(actual).catch(() => undefined))?.isDirectory()) return;
   let dir = actual;
   while (true) {
+    if ((await stat(join(dir, ".kada-project")).catch(() => undefined))?.isFile()) return dir;
     if (await stat(join(dir, ".git")).catch(() => undefined)) return dir;
     const parent = dirname(dir); if (parent === dir) return actual;
     dir = parent;

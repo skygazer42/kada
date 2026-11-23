@@ -1,0 +1,82 @@
+{
+  "at": "2026-11-23T19:13:44.851Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": true,
+  "passed": false,
+  "maxRequests": 32,
+  "modelRequests": 26,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F01-F04-memory-scope-correction-forget": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    },
+    "F05-F06-handoff-and-read-notification": {
+      "passed": true
+    },
+    "F11-F12-reminder-and-change-aware-routine": {
+      "passed": true
+    },
+    "F13-F15-mobile-reconnect-attachment-delivery": {
+      "passed": false,
+      "detail": "state_timeout"
+    },
+    "F17-two-owned-workers-return-verified-files": {
+      "passed": true
+    }
+  },
+  "tasks": [
+    {
+      "id": "9099e4e0-4b04-4928-8485-c1b2f07ff2f2",
+      "tokens": 3238,
+      "input": 3226,
+      "output": 12,
+      "cached": 0
+    },
+    {
+      "id": "9f91a195-dea2-44a0-aa05-1e67b1828756",
+      "tokens": 3181,
+      "input": 3170,
+      "output": 11,
+      "cached": 0
+    },
+    {
+      "id": "7a716e40-ffb5-4224-bd70-bd8349beb805",
+      "tokens": 4614,
+      "input": 4517,
+      "output": 97,
+      "cached": 0
+    },
+    {
+      "id": "11dbac55-3ea8-4723-960d-b5b330551d4a",
+      "tokens": 9322,
+      "input": 4643,
+      "output": 199,
+      "cached": 4480
+    },
+    {
+      "id": "8de047b7-d621-49f8-b6c6-81b8c7ab591a",
+      "tokens": 9264,
+      "input": 4655,
+      "output": 129,
+      "cached": 4480
+    },
+    {
+      "id": "283747ea-d356-4368-b098-26dfcb784660",
+      "tokens": 14796,
+      "input": 3692,
+      "output": 1120,
+      "cached": 9984
+    },
+    {
+      "id": "8f2eaa42-d36e-4fc6-bb39-6e015a68dac7",
+      "tokens": 49463,
+      "input": 16635,
+      "output": 1212,
+      "cached": 31616
+    }
+  ],
+  "totalTaskTokens": 93878,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

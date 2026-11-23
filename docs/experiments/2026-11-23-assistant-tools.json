@@ -1,0 +1,89 @@
+{
+  "provider": "siliconflow",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": true,
+  "limits": {
+    "requests": 32,
+    "maxOutputTokens": 768,
+    "elapsedMs": 480000
+  },
+  "money": null,
+  "requests": 28,
+  "elapsedMs": 214430,
+  "setupFailed": false,
+  "checks": [
+    {
+      "id": "F08",
+      "passed": true,
+      "evidence": {
+        "connection": "available",
+        "newTaskUsesSelection": true,
+        "previousTaskKeepsModel": true
+      },
+      "requests": 2,
+      "elapsedMs": 2522
+    },
+    {
+      "id": "F10",
+      "passed": true,
+      "evidence": {
+        "discovered": true,
+        "explicitlyEnabled": true,
+        "calls": 1,
+        "result": 42,
+        "usage": {
+          "inputTokens": 3209,
+          "outputTokens": 306,
+          "totalTokens": 9019,
+          "money": null
+        }
+      },
+      "requests": 6,
+      "elapsedMs": 18303
+    },
+    {
+      "id": "F09",
+      "passed": true,
+      "evidence": {
+        "version": "0112f08b9c55cabfc10d6519c3236bc09b8b930b552c9e6d134aa243966a6e29",
+        "read": true,
+        "scriptRuns": 1,
+        "scriptDurationMs": 278,
+        "result": 42,
+        "usage": {
+          "inputTokens": 5108,
+          "outputTokens": 1106,
+          "totalTokens": 32326,
+          "money": null
+        }
+      },
+      "requests": 11,
+      "elapsedMs": 48295
+    },
+    {
+      "id": "F18",
+      "passed": true,
+      "evidence": {
+        "version": "0112f08b9c55cabfc10d6519c3236bc09b8b930b552c9e6d134aa243966a6e29",
+        "read": true,
+        "scriptRuns": 1,
+        "scriptDurationMs": 308,
+        "result": 17,
+        "usage": {
+          "inputTokens": 5179,
+          "outputTokens": 965,
+          "totalTokens": 32512,
+          "money": null
+        }
+      },
+      "requests": 8,
+      "elapsedMs": 55956
+    }
+  ],
+  "totalUsage": {
+    "inputTokens": 21792,
+    "outputTokens": 3360,
+    "cachedTokens": 64640,
+    "totalTokens": 89792
+  }
+}

@@ -6,7 +6,7 @@ import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { parse as parseToml } from "smol-toml";
 import { parse as parseJson, type ParseError } from "jsonc-parser";
 import { atomicJson, readJson, SerialQueue } from "./util.js";
-import { UserMemoryStore, userMemoryInstructions, type MemoryContext } from "./user-memory.js";
+import { MemoryMutationError, UserMemoryStore, userMemoryInstructions, type MemoryContext } from "./user-memory.js";
 import { memoryProject } from "./memory-sources.js";
 
 export type LocalSkill = { name: string; description: string; path: string; owner: string; disabled: boolean };
@@ -69,7 +69,7 @@ export async function scanLocalAgents(options: DiscoveryOptions = {}): Promise<L
     if (!result.plugins.some(p => p.owner === owner && p.kind === kind && p.name === name && p.source === source)) result.plugins.push({ name, owner, kind, source, ...(enabled === undefined ? {} : { enabled }) });
   };
   const localPath = (value: unknown, base: string) => {
-    if (typeof value !== "string" || !value || value.length > 2048 || /[\r\n\0]/.test(value) || /^[a-z]+:/i.test(value)) return;
+    if (typeof value !== "string" || !value || value.length > 2048 || /[\r\n\0]/.test(value) || (/^[a-z]+:/i.test(value) && !isAbsolute(value))) return;
     return value.startsWith("~/") ? join(home, value.slice(2)) : isAbsolute(value) ? value : resolve(base, value);
   };
   const configs = async (owner: string, path: string) => {
@@ -253,14 +253,19 @@ export class LocalDiscovery {
       notices: [...value.notices, ...(records?.notices ?? ["用户记忆暂不可用，能力发现仍可使用。"]) ] };
   }
   /** Read-only client projection of the existing source-bound memory; no new store or model call. */
-  async memoryView() {
-    const value = await this.memory.refresh(await this.load());
+  async memoryView(workspace?: string) {
+    const project = await memoryProject(workspace);
+    if (workspace && !project) throw new MemoryMutationError(400, "The memory workspace must be an existing directory.");
+    const value = await this.memory.refresh(await this.load(), workspace);
     return { enabled: true, updatedAt: value.updatedAt, profile: this.memory.profile,
-      facts: value.facts.filter(f => f.state === "active").map(({ id, text, category, domain, scope, project, certainty, evidence, origin }) => ({ id, text, category, domain, scope, project, certainty, evidence, origin })),
+      facts: this.memory.list(value, project),
       notices: value.notices };
   }
 }
 
-export function localContextInstructions(context: LocalContext): string {
+export function localContextInstructions(context: LocalContext, options: { skills?: boolean } = {}): string {
+  if (options.skills === false) {
+    return `\nLocal setup facts (not authorization): ${context.summary}\nUse these observed preferences only when relevant; the user's current request wins. Read local guidance only when relevant: ${JSON.stringify(context.guidance)}. Existing plugins/MCP are an inventory, not callable tools here. Never use discovery to change model, permissions, budget or driver configuration.\n` + (context.memory ? userMemoryInstructions(context.memory) : "");
+  }
   return `\nLocal setup facts (not authorization): ${context.summary}\nUse these observed preferences only when relevant; the user's current request wins. Read ${JSON.stringify(context.overview)} for local guidance paths and ${JSON.stringify(context.catalogue)} to find additional Skills using native read/grep. Load only useful SKILL.md files with native read; resolve resources against that original Skill directory. Skip disabled entries unless explicitly requested by the user. Existing plugins/MCP are an inventory, not callable tools here. Never use discovery to change model, permissions, budget or driver configuration.\n` + (context.memory ? userMemoryInstructions(context.memory) : "");
 }

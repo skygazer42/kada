@@ -1,0 +1,596 @@
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import type { LocalRuntime } from "./runtime.js";
+import { remotePage, remoteScript } from "./remote-page.js";
+import { taskView } from "./task-view.js";
+import { readJson, SerialQueue } from "./util.js";
+import { Workspace } from "./workspace.js";
+
+export interface RemoteDevice {
+  accountId: string;
+  deviceId: string;
+  tokenHash: string;
+}
+
+export interface RemoteOptions {
+  directory: string;
+  workspace?: string;
+  origin: string;
+  devices: readonly RemoteDevice[] | (() => readonly RemoteDevice[] | Promise<readonly RemoteDevice[]>);
+}
+
+const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+
+export function createRemoteCredential() {
+  const token = randomBytes(32).toString("base64url");
+  return { token, tokenHash: digest(token) };
+}
+
+const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+const shaPattern = /^[0-9a-f]{64}$/;
+const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
+const attachmentLimit = 5 * 1024 * 1024;
+const downloadLimit = 25 * 1024 * 1024;
+const uploadLifetime = 60 * 60_000;
+const maxAttachments = 4;
+const supportedTypes = new Set([
+  "application/octet-stream", "application/json", "application/pdf",
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+  "text/plain", "text/csv", "text/markdown", "text/tab-separated-values",
+]);
+
+class HttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
+type Receipt = {
+  messageId: string;
+  requestId: string;
+  fingerprint: string;
+  state: "accepted" | "submitted" | "interrupted";
+};
+
+type Upload = { id: string; name: string; type: string; bytes: number; sha256: string; expiresAt: number; used?: true };
+type Scope = { channel: "web"; accountId: string; deviceId: string };
+type Conversation = Scope & {
+  conversationId: string;
+  taskId: string;
+  title: string;
+  updatedAt: number;
+  receipts: Receipt[];
+  uploads: Upload[];
+};
+
+type TaskStatus = Awaited<ReturnType<LocalRuntime["status"]>>;
+
+function remoteOrigin(input: string): URL {
+  const url = new URL(input);
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    url.username || url.password || url.pathname !== "/" || url.search || url.hash
+  ) {
+    throw new Error("The remote portal needs an HTTPS origin or an HTTP loopback origin.");
+  }
+  return url;
+}
+
+function send(response: ServerResponse, status: number, value: unknown) {
+  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(value));
+}
+
+async function body(request: IncomingMessage, limit: number): Promise<Buffer> {
+  if (Number(request.headers["content-length"]) > limit) {
+    request.resume();
+    throw new HttpError(413, "The request exceeds the size limit.");
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>) {
+    size += chunk.length;
+    if (size > limit) {
+      request.resume();
+      throw new HttpError(413, "The request exceeds the size limit.");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, size);
+}
+
+async function json(request: IncomingMessage): Promise<Record<string, unknown>> {
+  if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
+    throw new HttpError(415, "Expected application/json.");
+  }
+  const bytes = await body(request, 64 * 1024);
+  try {
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  } catch {
+    // The caller receives the same error for a malformed or non-object body.
+  }
+  throw new HttpError(400, "Expected a JSON object.");
+}
+
+function attachmentName(value: unknown): string {
+  let name = "";
+  try { if (typeof value === "string") name = decodeURIComponent(value); } catch { /* invalid header */ }
+  if (
+    !name || Buffer.byteLength(name) > 160 || /[\x00-\x1f\x7f<>:"/\\|?*]/u.test(name) ||
+    /^[ .]|[ .]$/.test(name) || /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:[ .]|$)/iu.test(name)
+  ) throw new HttpError(400, "The filename is invalid.");
+  return name;
+}
+
+function validateType(type: string, bytes: Buffer) {
+  if (!supportedTypes.has(type)) throw new HttpError(415, "This attachment type is unavailable.");
+  if (type === "application/octet-stream") return;
+  if (type.startsWith("text/") || type === "application/json") {
+    try {
+      const value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (value.includes("\0")) throw new Error("binary input");
+      if (type === "application/json" && value) JSON.parse(value);
+      return;
+    } catch {
+      throw new HttpError(415, "The file does not match its declared text type.");
+    }
+  }
+  const signature = {
+    "application/pdf": "255044462d",
+    "image/png": "89504e470d0a1a0a",
+    "image/jpeg": "ffd8ff",
+    "image/gif": "47494638",
+    "image/webp": "52494646",
+  }[type];
+  if (
+    !signature || !bytes.subarray(0, signature.length / 2).equals(Buffer.from(signature, "hex")) ||
+    (type === "image/webp" && bytes.toString("ascii", 8, 12) !== "WEBP")
+  ) throw new HttpError(415, "The file does not match its declared type.");
+}
+
+function isMissing(error: unknown) {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+async function readConversation(path: string): Promise<Conversation | undefined> {
+  try { return await readJson<Conversation>(path); }
+  catch (error) { if (!isMissing(error)) throw error; }
+}
+
+async function writeDurable(path: string, bytes: string | Buffer) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = join(dirname(path), ".kada-" + randomUUID());
+  const file = await open(temporary, "wx", 0o600);
+  try {
+    try {
+      await file.writeFile(bytes);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+function saveConversation(path: string, conversation: Conversation) {
+  return writeDurable(path, JSON.stringify(conversation));
+}
+
+function belongs(conversation: Conversation, scope: Scope) {
+  return conversation.channel === scope.channel &&
+    conversation.accountId === scope.accountId && conversation.deviceId === scope.deviceId;
+}
+
+function requireConversation(conversation: Conversation | undefined, scope: Scope): Conversation {
+  if (!conversation || !belongs(conversation, scope)) throw new HttpError(404, "Conversation not found.");
+  return conversation;
+}
+
+function matchesSnapshot(
+  current: { path: string; bytes: number; sha256: string; entries?: number },
+  saved: { path: string; bytes: number; sha256: string; entries?: number },
+) {
+  return current.path === saved.path && current.bytes === saved.bytes &&
+    current.sha256 === saved.sha256 && current.entries === saved.entries;
+}
+
+function verifiedArtifacts(status: TaskStatus, conversation: Conversation) {
+  const view = taskView(status);
+  const proof = status.goal?.mechanical;
+  if (!view.delivery || !proof?.passed) return [];
+  return view.delivery.artifacts.flatMap((artifact, index) => {
+    const path = resolve(status.workspace, artifact);
+    const file = proof.files.find((snapshot) => snapshot.path === path);
+    const directory = proof.directories?.find((snapshot) => snapshot.path === path);
+    const snapshot = file ?? directory;
+    if (!snapshot) return [];
+    const binding = digest(JSON.stringify({ revision: status.goal!.revision, candidate: status.goal!.candidate,
+      proof, verification: status.goal!.verification, path, snapshot }));
+    return [{
+      path: relative(status.workspace, path),
+      name: basename(path),
+      kind: directory ? "directory" as const : "file" as const,
+      bytes: snapshot.bytes,
+      sha256: snapshot.sha256,
+      href: "/remote/api/conversations/" + conversation.conversationId + "/artifacts/" + index + "/" + binding,
+      snapshot,
+    }];
+  });
+}
+
+/** Run before daemon recovery: historical remote tasks must never resume with local capabilities. */
+export async function quarantineLegacyRemoteTasks(runtime: LocalRuntime, directory: string): Promise<void> {
+  const root = join(directory, "conversations");
+  let accounts;
+  try { accounts = await readdir(root, { withFileTypes: true }); }
+  catch (error) { if (isMissing(error)) return; throw error; }
+  for (const account of accounts) {
+    if (!account.isDirectory() || !shaPattern.test(account.name)) continue;
+    for (const file of await readdir(join(root, account.name), { withFileTypes: true })) {
+      if (!file.isFile() || !/^[0-9a-f]{64}\.json$/.test(file.name)) continue;
+      const conversation = await readConversation(join(root, account.name, file.name));
+      if (!conversation || conversation.channel !== "web") continue;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(conversation.taskId)) {
+        throw new Error("The saved remote conversation has an invalid task ID.");
+      }
+      const meta = await runtime.metadata(conversation.taskId).catch((error: unknown) => { if (!isMissing(error)) throw error; });
+      if (meta?.control === "active" && meta.remotePolicy !== "workspace") await runtime.pause(conversation.taskId);
+    }
+  }
+}
+
+export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOptions) {
+  const origin = remoteOrigin(options.origin);
+  const base = options.workspace ?? join(options.directory, "workspaces");
+  const queues = new Map<string, { queue: SerialQueue; references: number }>();
+  const dispatching = new Set<string>();
+
+  const accountPath = (scope: Scope) => join(options.directory, "conversations", digest(scope.accountId));
+  const recordPath = (scope: Scope, id: string) => join(accountPath(scope), digest(id) + ".json");
+  const uploadPath = (id: string) => join(options.directory, "uploads", id);
+
+  async function exclusive<T>(path: string, action: () => Promise<T>) {
+    const entry = queues.get(path) ?? { queue: new SerialQueue(), references: 0 };
+    queues.set(path, entry);
+    entry.references++;
+    try { return await entry.queue.run(action); }
+    finally { if (--entry.references === 0) queues.delete(path); }
+  }
+
+  async function authenticate(request: IncomingMessage): Promise<Scope> {
+    const token = request.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+    if (!token || !tokenPattern.test(token)) throw new HttpError(401, "Enter this device’s pairing token.");
+    const supplied = Buffer.from(digest(token), "hex");
+    const devices = typeof options.devices === "function" ? await options.devices() : options.devices;
+    const device = devices.find((item) => shaPattern.test(item.tokenHash) &&
+      timingSafeEqual(supplied, Buffer.from(item.tokenHash, "hex")));
+    if (!device || !idPattern.test(device.accountId) || !idPattern.test(device.deviceId)) {
+      throw new HttpError(401, "Enter this device’s pairing token.");
+    }
+    return { channel: "web", accountId: device.accountId, deviceId: device.deviceId };
+  }
+
+  function freshConversation(scope: Scope, conversationId: string): Conversation {
+    return { ...scope, conversationId, taskId: randomUUID(), title: "", updatedAt: Date.now(), receipts: [], uploads: [] };
+  }
+
+  async function privateWorkspace(conversation: Conversation, create: boolean) {
+    const parent = await Workspace.open(base, { create });
+    const root = await parent.path(conversation.taskId);
+    const workspace = await Workspace.open(root, { create });
+    const marker = await workspace.path(".kada-project");
+    try {
+      const file = await open(marker, "wx", 0o600);
+      await file.close();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!(await lstat(marker)).isFile()) throw new HttpError(409, "The remote workspace’s project boundary is unavailable.");
+    }
+    return workspace;
+  }
+
+  async function taskStatus(conversation: Conversation): Promise<TaskStatus | undefined> {
+    if (!conversation.receipts.length) return;
+    try {
+      const workspace = await privateWorkspace(conversation, false);
+      const meta = await runtime.metadata(conversation.taskId);
+      if (meta.remotePolicy !== "workspace") throw new HttpError(409, "This conversation predates remote workspace isolation. Start a new conversation.");
+      if (meta.workspace !== workspace.root) throw new HttpError(409, "The original workspace is unavailable.");
+      return await runtime.status(conversation.taskId);
+    }
+    catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+  }
+
+  async function receiptView(conversation: Conversation, receipt: Receipt, status?: TaskStatus) {
+    let state = receipt.state;
+    if (state === "submitted" && !status) {
+      state = "interrupted";
+    } else if (state !== "submitted" && !dispatching.has(receipt.requestId)) {
+      const first = conversation.receipts[0]?.requestId === receipt.requestId;
+      const submitted = status && (first
+        ? status.messages.some((message) => message.role === "user")
+        : await runtime.hasRequest(conversation.taskId, receipt.requestId));
+      state = submitted ? "submitted" : "interrupted";
+    }
+    return {
+      channel: conversation.channel, accountId: conversation.accountId, deviceId: conversation.deviceId,
+      conversationId: conversation.conversationId, taskId: conversation.taskId,
+      messageId: receipt.messageId, requestId: receipt.requestId, state,
+    };
+  }
+
+  async function list(scope: Scope) {
+    let names: string[];
+    try { names = await readdir(accountPath(scope)); }
+    catch (error) { if (isMissing(error)) return []; throw error; }
+    const rows = await Promise.all(names.filter((name) => shaPattern.test(name.slice(0, -5)) && name.endsWith(".json"))
+      .map((name) => readConversation(join(accountPath(scope), name))));
+    return rows.filter((row): row is Conversation => Boolean(row?.receipts.length && belongs(row, scope)))
+      .sort((a, b) => b.updatedAt - a.updatedAt || a.conversationId.localeCompare(b.conversationId))
+      .map(({ conversationId, taskId, title, updatedAt }) => ({ conversationId, taskId, title, updatedAt }));
+  }
+
+  async function history(conversation: Conversation) {
+    const status = await taskStatus(conversation);
+    const view = status ? taskView(status) : undefined;
+    const messages = status ? await runtime.conversationMessages(conversation.taskId) : [];
+    const delivery = status && view?.delivery ? {
+      ...view.delivery,
+      artifacts: verifiedArtifacts(status, conversation).map(({ snapshot: _snapshot, ...artifact }) => artifact),
+    } : null;
+    return {
+      channel: conversation.channel, accountId: conversation.accountId, deviceId: conversation.deviceId,
+      conversationId: conversation.conversationId, taskId: conversation.taskId, title: conversation.title,
+      messages, receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
+      task: view ? {
+        status: view.status, reason: view.reason, question: view.question, brief: view.brief,
+        briefDigest: view.briefDigest, confirmed: view.confirmed, progress: view.progress, delivery, budget:view.budget,
+      } : null,
+    };
+  }
+
+  async function upload(request: IncomingMessage, scope: Scope, conversationId: string, path: string) {
+    const name = attachmentName(request.headers["x-kada-filename"]);
+    const type = request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() ?? "";
+    const sha256 = request.headers["x-kada-sha256"];
+    if (typeof sha256 !== "string" || !shaPattern.test(sha256)) throw new HttpError(400, "A SHA-256 is required.");
+    const bytes = await body(request, attachmentLimit);
+    validateType(type, bytes);
+    if (digest(bytes) !== sha256) throw new HttpError(422, "The attachment hash does not match.");
+    return exclusive(path, async () => {
+      const prior = await readConversation(path);
+      const conversation = prior ? requireConversation(prior, scope) : freshConversation(scope, conversationId);
+      const now = Date.now();
+      const pending = conversation.uploads.filter((item) => !item.used && item.expiresAt > now);
+      const existing = pending.find((item) => item.name === name && item.type === type && item.sha256 === sha256);
+      if (existing) return existing;
+      if (pending.length >= maxAttachments * 4) {
+        throw new HttpError(409, "This conversation has too many pending attachments. They expire after one hour.");
+      }
+      const expired = conversation.uploads.filter((item) => !pending.includes(item));
+      conversation.uploads = pending;
+      const item: Upload = { id: randomUUID(), name, type, sha256, bytes: bytes.length, expiresAt: now + uploadLifetime };
+      try {
+        await writeDurable(uploadPath(item.id), bytes);
+        conversation.uploads.push(item);
+        await saveConversation(path, conversation);
+      } catch (error) {
+        await rm(uploadPath(item.id), { force: true });
+        throw error;
+      }
+      await Promise.all(expired.map((old) => rm(uploadPath(old.id), { force: true })));
+      return item;
+    });
+  }
+
+  async function stageAttachments(workspace: Workspace, attachments: Upload[]) {
+    const paths: string[] = [];
+    for (const attachment of attachments) {
+      const bytes = await readFile(uploadPath(attachment.id)).catch((error: unknown) => {
+        if (!isMissing(error)) throw error;
+        throw new HttpError(422, "An attachment is no longer available.");
+      });
+      if (bytes.length !== attachment.bytes || digest(bytes) !== attachment.sha256) {
+        throw new HttpError(422, "The attachment’s saved bytes do not match.");
+      }
+      const rel = "attachments/" + attachment.id + "/" + attachment.name;
+      const target = await workspace.path(rel);
+      await mkdir(dirname(target), { recursive: true });
+      const checked = await workspace.path(rel);
+      await writeDurable(checked, bytes);
+      const copied = await workspace.inspect(rel);
+      if (copied.bytes !== attachment.bytes || copied.sha256 !== attachment.sha256) {
+        throw new HttpError(422, "The attachment workspace copy does not match.");
+      }
+      paths.push(rel);
+    }
+    return paths;
+  }
+
+  async function submit(request: IncomingMessage, scope: Scope, conversationId: string, path: string) {
+    const value = await json(request);
+    const { messageId, text, attachmentIds = [] } = value;
+    if (
+      typeof messageId !== "string" || !idPattern.test(messageId) || typeof text !== "string" ||
+      !Array.isArray(attachmentIds) || attachmentIds.length > maxAttachments ||
+      attachmentIds.some((id) => typeof id !== "string" || !idPattern.test(id)) ||
+      new Set(attachmentIds).size !== attachmentIds.length || (!text.trim() && !attachmentIds.length)
+    ) throw new HttpError(400, "Enter a message or choose up to four attachments.");
+    const fingerprint = digest(JSON.stringify([text, attachmentIds]));
+    return exclusive(path, async () => {
+      const prior = await readConversation(path);
+      const conversation = prior ? requireConversation(prior, scope) : freshConversation(scope, conversationId);
+      const existing = conversation.receipts.find((item) => item.messageId === messageId);
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) throw new HttpError(409, "This message ID already has different content.");
+        return { duplicate: true, receipt: await receiptView(conversation, existing, await taskStatus(conversation)) };
+      }
+      const first = !conversation.receipts.length;
+      const task = await taskStatus(conversation);
+      if (!first && !task) throw new HttpError(409, "The original task is unavailable. Start a new conversation.");
+      const attachments = attachmentIds.map((id) => {
+        const item = conversation.uploads.find((upload) => upload.id === id);
+        if (!item || item.used || item.expiresAt <= Date.now()) {
+          throw new HttpError(422, "An attachment expired, was already used, or belongs to a different conversation.");
+        }
+        return item;
+      });
+      const workspace = await privateWorkspace(conversation, true);
+      if (task && task.workspace !== workspace.root) throw new HttpError(409, "The original workspace is unavailable.");
+      const files = await stageAttachments(workspace, attachments);
+      const prompt = files.length ? text + "\n\nAttached files in this workspace:\n" + files.map((file) => "- " + file).join("\n") : text;
+      const receipt: Receipt = { messageId, requestId: randomUUID(), fingerprint, state: "accepted" };
+      conversation.receipts.push(receipt);
+      if (first) conversation.title = (text.trim() || attachments[0]?.name || "Conversation").split(/\r?\n/)[0]!.slice(0, 88);
+      conversation.updatedAt = Date.now();
+      for (const attachment of attachments) attachment.used = true;
+      dispatching.add(receipt.requestId);
+      try {
+        await saveConversation(path, conversation);
+        try {
+          if (first) await runtime.create(prompt, workspace.root, undefined, { chat: true, prepare: false, remote: true, id: conversation.taskId });
+          else await runtime.followUp(conversation.taskId, prompt, receipt.requestId);
+          receipt.state = "submitted";
+        } catch {
+          receipt.state = "interrupted";
+        }
+        await saveConversation(path, conversation);
+      } finally {
+        dispatching.delete(receipt.requestId);
+        if (receipt.state !== "accepted") await Promise.all(attachments.map((item) => rm(uploadPath(item.id), { force: true })));
+      }
+      return { duplicate: false, receipt: await receiptView(conversation, receipt, await taskStatus(conversation)) };
+    });
+  }
+
+  async function download(response: ServerResponse, conversation: Conversation, href: string, filename: string | null) {
+    const status = await taskStatus(conversation);
+    const artifact = status ? verifiedArtifacts(status, conversation).find((item) => item.href === href) : undefined;
+    if (!status || !artifact) throw new HttpError(404, "Verified artifact not found.");
+    const workspace = await Workspace.open(status.workspace);
+    const tree = artifact.kind === "directory"
+      ? await workspace.inspectTree(artifact.path).catch(() => undefined) : undefined;
+    const current = tree?.root ?? (artifact.kind === "file" ? await workspace.inspect(artifact.path).catch(() => undefined) : undefined);
+    if (!current || !matchesSnapshot(current, artifact.snapshot)) {
+      throw new HttpError(409, "This artifact changed after verification.");
+    }
+    if (tree && filename === null) {
+      return send(response, 200, {
+        name: artifact.name,
+        files: tree.files.map((file) => ({
+          path: relative(artifact.snapshot.path, file.path),
+          bytes: file.bytes, sha256: file.sha256,
+          href: href + "?file=" + encodeURIComponent(relative(artifact.snapshot.path, file.path)),
+        })),
+      });
+    }
+    const file = tree ? tree.files.find((item) => relative(artifact.snapshot.path, item.path) === filename)
+      : filename === null ? artifact.snapshot : undefined;
+    if (!file) throw new HttpError(404, "Verified artifact not found.");
+    if (file.bytes > downloadLimit) throw new HttpError(413, "This artifact exceeds the download size limit.");
+    const selected = await open(await workspace.path(file.path), "r").catch(() => undefined);
+    if (!selected) throw new HttpError(409, "This artifact changed after verification.");
+    let bytes: Buffer;
+    try {
+      const stat = await selected.stat();
+      if (!stat.isFile() || stat.size !== file.bytes) throw new HttpError(409, "This artifact changed after verification.");
+      const buffer = Buffer.alloc(file.bytes + 1);
+      let size = 0;
+      while (size < buffer.length) {
+        const { bytesRead } = await selected.read(buffer, size, buffer.length - size, size);
+        if (!bytesRead) break;
+        size += bytesRead;
+      }
+      bytes = buffer.subarray(0, size);
+    } finally { await selected.close(); }
+    if (bytes.length !== file.bytes || digest(bytes) !== file.sha256) {
+      throw new HttpError(409, "This artifact changed after verification.");
+    }
+    response.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": "attachment; filename*=UTF-8''" + encodeURIComponent(basename(file.path)).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16)),
+      "Content-Length": file.bytes,
+      "X-Kada-SHA256": file.sha256,
+    });
+    response.end(bytes);
+  }
+
+  return async function handleRemote(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+    const url = URL.parse(request.url ?? "/", origin);
+    if (!url) return false;
+    const route = url.pathname;
+    if (route !== "/remote" && !route.startsWith("/remote/")) return false;
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("Content-Security-Policy",
+      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+    try {
+      if (url.origin !== origin.origin || request.headers.host?.toLowerCase() !== origin.host ||
+        request.headers["sec-fetch-site"] === "cross-site" ||
+        (request.headers.origin !== undefined && request.headers.origin !== origin.origin)) {
+        throw new HttpError(403, "This portal must be accessed from its configured origin.");
+      }
+      const method = request.method;
+      if (method === "GET" && (route === "/remote" || route === "/remote/" || route === "/remote/app.js")) {
+        const script = route.endsWith(".js");
+        response.writeHead(200, { "Content-Type": script ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
+        response.end(script ? remoteScript : remotePage);
+        return true;
+      }
+      const scope = await authenticate(request);
+      if (method === "GET" && route === "/remote/api/session") send(response, 200, scope);
+      else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
+      else {
+        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
+        const conversationId = match?.[1];
+        if (!conversationId || !idPattern.test(conversationId)) throw new HttpError(404, "Remote endpoint not found.");
+        const action = match?.[2];
+        const path = recordPath(scope, conversationId);
+        if (method === "POST" && action === "messages") {
+          const result = await submit(request, scope, conversationId, path);
+          send(response, result.duplicate ? 200 : 202, result.receipt);
+        } else if (method === "POST" && action === "uploads") {
+          send(response, 201, await upload(request, scope, conversationId, path));
+        } else {
+          const prior = await readConversation(path);
+          const messageId = url.searchParams.get("messageId");
+          if (method === "GET" && !action && messageId !== null) {
+            if (!idPattern.test(messageId)) throw new HttpError(400, "Invalid message ID.");
+            const row = prior ? requireConversation(prior, scope) : undefined;
+            const receipt = row?.receipts.find((item) => item.messageId === messageId);
+            send(response, 200, row && receipt ? await receiptView(row, receipt, await taskStatus(row)) : {
+              ...scope, conversationId, messageId, state: "unknown",
+            });
+          } else {
+            const row = requireConversation(prior, scope);
+            if (method === "GET" && !action) send(response, 200, await history(row));
+            else if (method === "GET" && action?.startsWith("artifacts/")) {
+              await download(response, row, route, url.searchParams.get("file"));
+            } else if (method === "POST" && action === "confirm") {
+              const { revision, digest: briefDigest } = await json(request);
+              if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1 ||
+                typeof briefDigest !== "string" || !shaPattern.test(briefDigest)) throw new HttpError(400, "Invalid brief revision.");
+              if (!await taskStatus(row)) throw new HttpError(409, "The original task is unavailable. Start a new conversation.");
+              try { await runtime.confirm(row.taskId, revision, briefDigest); }
+              catch { throw new HttpError(409, "The brief changed or cannot be confirmed. Review the current brief."); }
+              send(response, 200, { confirmed: true });
+            } else throw new HttpError(404, "Remote endpoint not found.");
+          }
+        }
+      }
+    } catch (error) {
+      if (response.destroyed) return true;
+      if (response.headersSent) response.destroy();
+      else if (error instanceof HttpError) send(response, error.status, { error: error.message });
+      else send(response, 500, { error: "The portal could not complete this request." });
+    }
+    return true;
+  };
+}

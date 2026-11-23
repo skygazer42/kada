@@ -24,7 +24,7 @@ export function createClient(config: Config): HarnessClient {
       const token = (await readFile(join(config.dataDir, "token"), "utf8")).trim();
       const response = await fetch(`${base}${path}`, {
         method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(15_000),
+        body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(path === '/v1/computer/takeover' ? 70_000 : 35_000),
       });
       const result: unknown = await response.json();
       if (!response.ok) throw new Error((result as { error?: string }).error ?? `HTTP ${response.status}`);

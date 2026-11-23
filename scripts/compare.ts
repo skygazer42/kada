@@ -7,7 +7,7 @@ import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { loadConfig } from "../src/config.js";
-import { cloudModels, validateModel } from "../src/models.js";
+import { cloudModels, modelCostKnown, validateModel } from "../src/models.js";
 import { localEnvironment, localExecution, taskCompaction } from "../src/execution.js";
 import { taskUsage } from "../src/budget.js";
 import { LocalRuntime } from "../src/runtime.js";
@@ -49,7 +49,7 @@ for (const arm of ["pi", "extension"] as const) {
       usage = await harness.usage(ctx);
     } finally { clock.abort(); await harness.close(ctx); }
   } else {
-    const runtime = new LocalRuntime({ ...config, dataDir, web: false, review: false, maxDurationMs: 180_000, maxEstimatedCostUsd: 0.1, maxTotalTokens: undefined }, { models });
+    const runtime = new LocalRuntime({ ...config, dataDir, web: false, review: false, maxDurationMs: 180_000, maxEstimatedCostUsd: 0.1, maxTotalTokens: config.maxTotalTokens ?? 100_000 }, { models });
     try {
       const task = await runtime.create(objective, workspace, caseChecks);
       for (;;) {
@@ -60,7 +60,8 @@ for (const arm of ["pi", "extension"] as const) {
     } finally { await runtime.close(); }
   }
   const report = await checkArtifacts(await Workspace.open(workspace), ["result.json", "summary.md"], caseChecks);
-  const record = { arm, model, execution, passed: report.passed && ["done", "completed"].includes(execution!), elapsedMs: Date.now() - startedAt, reworks, userContinuationMessages: 0, budget: taskUsage(usage!), checks: report.results };
+  const spent=taskUsage(usage!);
+  const record = { arm, model, execution, passed: report.passed && ["done", "completed"].includes(execution!), elapsedMs: Date.now() - startedAt, reworks, userContinuationMessages: 0, budget: {...spent,estimatedCostUsd:modelCostKnown(model) ? spent.estimatedCostUsd : null}, checks: report.results };
   results.push(record); console.log(JSON.stringify(record));
 }
 await writeFile(join(directory, "comparison.json"), JSON.stringify({ objective, results, note: "Single real terminal case. This does not establish general superiority or a completion rate." }, null, 2));

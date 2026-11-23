@@ -29,6 +29,8 @@ export interface Config {
   maxReworks?: number;
   maxStalls?: number;
   computer?: ComputerConfig;
+  /** Canonical origin of an already configured HTTPS reverse proxy. */
+  remoteOrigin?: string;
 }
 
 export function positiveInt(value: unknown, name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -77,6 +79,11 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     computer = c;
   }
   if (raw.dataDir !== undefined && typeof raw.dataDir !== "string") throw new Error("dataDir must be a string");
+  if (raw.remoteOrigin !== undefined) {
+    if (typeof raw.remoteOrigin !== 'string') throw new Error('remoteOrigin must be an HTTPS origin.');
+    const origin = new URL(raw.remoteOrigin);
+    if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('remoteOrigin must be an HTTPS origin.');
+  }
   const maxEstimatedCostUsd = raw.maxEstimatedCostUsd ?? 1;
   if (typeof maxEstimatedCostUsd !== "number" || !Number.isFinite(maxEstimatedCostUsd) || maxEstimatedCostUsd <= 0) throw new Error("maxEstimatedCostUsd must be a positive number");
   return {
@@ -95,5 +102,6 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     maxReworks: raw.maxReworks === 0 ? 0 : positiveInt(raw.maxReworks, "maxReworks", 3, 20),
     maxStalls: positiveInt(raw.maxStalls, "maxStalls", 2, 20),
     computer,
+    ...(typeof raw.remoteOrigin === 'string' ? {remoteOrigin:new URL(raw.remoteOrigin).origin} : {}),
   };
 }

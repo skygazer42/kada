@@ -1,0 +1,79 @@
+{
+  "provider": "siliconflow",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": true,
+  "limits": {
+    "requests": 32,
+    "maxOutputTokens": 768,
+    "elapsedMs": 480000
+  },
+  "money": null,
+  "fixture": ".harness/live-assistant-tools-aD2p2R",
+  "requests": 32,
+  "elapsedMs": 239634,
+  "setupFailed": false,
+  "checks": [
+    {
+      "id": "F08",
+      "passed": true,
+      "evidence": {
+        "connection": "available",
+        "newTaskUsesSelection": true,
+        "previousTaskKeepsModel": true
+      },
+      "requests": 2,
+      "elapsedMs": 2715
+    },
+    {
+      "id": "F10",
+      "passed": true,
+      "evidence": {
+        "discovered": true,
+        "explicitlyEnabled": true,
+        "calls": 1,
+        "result": 42,
+        "usage": {
+          "inputTokens": 3024,
+          "outputTokens": 216,
+          "totalTokens": 5928,
+          "money": null
+        }
+      },
+      "requests": 5,
+      "elapsedMs": 13579
+    },
+    {
+      "id": "F09",
+      "passed": true,
+      "evidence": {
+        "version": "0112f08b9c55cabfc10d6519c3236bc09b8b930b552c9e6d134aa243966a6e29",
+        "read": true,
+        "scriptRuns": 1,
+        "scriptDurationMs": 321,
+        "result": 42,
+        "usage": {
+          "inputTokens": 5096,
+          "outputTokens": 909,
+          "totalTokens": 32117,
+          "money": null
+        }
+      },
+      "requests": 15,
+      "elapsedMs": 39612
+    },
+    {
+      "id": "F18",
+      "passed": false,
+      "reason": "Independent Skill reuse or output verification failed.",
+      "stage": "await_completion",
+      "requests": 9,
+      "elapsedMs": 43468
+    }
+  ],
+  "totalUsage": {
+    "inputTokens": 23000,
+    "outputTokens": 3447,
+    "cachedTokens": 73600,
+    "totalTokens": 100047
+  }
+}

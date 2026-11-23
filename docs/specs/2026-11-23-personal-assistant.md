@@ -1,6 +1,6 @@
 # Kada Fork 个人助手功能 Spec
 
-版本 v0.1，状态为 proposed，日期 2026-11-23。当前实现基线为 Fork 的 `6e6abcc`。F01—F18 是待实施需求，硅基流动基础烟测的实际结果列在末节。
+版本 v0.2，状态为 implementing，日期 2026-11-23。实现基线为 Fork 的 `6e6abcc`，功能方案提交为 `2a93e8f`。F01—F18 的代码与测试正按本 Spec 落实；真实驱动 U02 仍待选型。下文源码参考保留固定快照，使用入口见[个人助手使用说明](../assistant-usage.md)。
 
 ## 1. 目标与实现约束
 
@@ -280,8 +280,8 @@ Kada 落点为 SkillStore.capture/rollback、pinSkills、settleSkills。
 | 提议接口 | 请求与结果 |
 | --- | --- |
 | `GET /v1/environment/memory?workspace=...` | 返回适用事实、版本和来源 |
-| `PATCH /v1/environment/memory/:id` | `{text, expectedRevision, requestId}`，成功返回新版本，冲突返回 409 |
-| `POST /v1/environment/memory/:id/forget` | `{expectedRevision, requestId}`，返回遗忘范围及结果 |
+| `PATCH /v1/environment/memory/:id?workspace=...` | `{text, expectedRevision, requestId}`，成功返回新版本，冲突返回 409 |
+| `POST /v1/environment/memory/:id/forget?workspace=...` | `{expectedRevision, requestId}`，返回遗忘范围及结果 |
 | `GET /v1/tasks/:id/memory` | 返回该会话实际采用的引用及来源版本 |
 
 同一 requestId 的相同操作返回原结果，同一 ID 被用于不同内容时返回冲突。历史 schema 的读取、原有认证和确认边界需有兼容测试。
@@ -357,3 +357,11 @@ npm run check:commit
 7. P7 完成 S01/S02，保留新输入复用的原始质量检查和完整成本。
 
 每阶段交付都包含实现、原入口演示、测试结果和仍待验证的条件，再进入下一阶段。
+
+## 7. 本轮实施状态
+
+F01—F15、F17、F18 已接入终端和本地 API，并有确定性验收及硅基流动合成场景记录。F16 已有接管/回交实现和 U01 假驱动验证；U02 仍按 AGENTS.md 等待用户选择真实驱动。逐功能入口、测试、失败尝试与范围裁定见[实施验证记录](../experiments/2026-11-23-assistant-validation.md)。
+
+P5 的首个渠道选为响应式 Web，远程首版限定工作区文件工具；原生 Shell、命令核验、宿主 MCP、全局记忆、Skills 与电脑能力不自动继承。手机历史使用持久 Pi EntryId，产物链接绑定交付版本及证明。完整远程执行能力等待现成隔离宿主。
+
+真实模型验证发现普通聊天语言规则与保存的语言偏好有冲突，已在同一入口修正并复测。方法复用记录含失败尝试，不证明自动学习或长期任务成本改善。原生 Pi 的单例对照两侧均未交付，不能用作总体完成率结论。实体手机网络、真实电脑、macOS 编译/GUI 和小时级试验保留为未验证项。

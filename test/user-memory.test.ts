@@ -239,7 +239,7 @@ test('metadata-only historical discovery tasks keep their context and tools on r
 test('large Codex memory keeps all useful excerpts and versioned redacted snapshots', async () => {
   const f = await fixture();
   try {
-    const sourcePath = '.codex/memories/MEMORY.md';
+    const sourcePath = join('.codex','memories','MEMORY.md');
     const original = '# 工作\n\n' + Array.from({ length: 240 }, (_, i) => `工作条目 ${i}：${'长期事实与上下文'.repeat(40)}。`).join('\n\n') + '\n\napi_key=SECRET_SNAPSHOT_SENTINEL\n';
     assert(Buffer.byteLength(original) > 65536);
     await f.put(sourcePath, original); await f.discovery.view();
@@ -300,7 +300,7 @@ test('Claude topic files only match the corresponding encoded workspace and proj
     assert(matching.memory!.summary.includes('CLAUDE_ALPHA'));
     const other = await f.discovery.context(true, b, 'CLAUDE_ALPHA 构建');
     assert(!other.memory!.summary.includes('CLAUDE_ALPHA'));
-    const source = (await f.read()).sources.find(s => s.path.endsWith('/topic.md'))!;
+    const source = (await f.read()).sources.find(s => s.path.endsWith(join('memory','topic.md')))!;
     const ext = f.discovery.memory.extension('task-1', f.home, () => f.discovery.load(), undefined, b);
     const api = { taskId: 'other-project', commit: async (fn: any) => fn({ doc: async () => ({ objective: '', userMessages: [] }) }) };
     await assert.rejects((ext.tools![0]!.execute as any)({ facts: [fact(source.id, 'CLAUDE_ALPHA 特定构建规则。', { scope: 'project', certainty: 'inferred' })] }, api, {}), /different project/);

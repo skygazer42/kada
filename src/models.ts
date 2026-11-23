@@ -1,9 +1,40 @@
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Models, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createModels, createProvider, envApiKeyAuth, fauxAssistantMessage, fauxProvider, fauxToolCall, type Model, type Models, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ModelRef } from "./config.js";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 
-export function cloudModels(): Models { return builtinModels(); }
+const siliconFlowModel: Model<"openai-completions"> = {
+  id: "Qwen/Qwen2.5-7B-Instruct",
+  name: "Qwen2.5 7B Instruct",
+  api: "openai-completions",
+  provider: "siliconflow",
+  baseUrl: "https://api.siliconflow.cn/v1",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 32_768,
+  maxTokens: 4_096,
+  compat: { maxTokensField: "max_tokens", supportsStore: false, supportsDeveloperRole: false },
+};
+
+export function modelCostKnown(ref: ModelRef): boolean {
+  return ref.provider !== "siliconflow";
+}
+
+export function cloudModels(): Models {
+  const models = builtinModels();
+  models.setProvider(createProvider({
+    id: siliconFlowModel.provider,
+    name: "SiliconFlow",
+    baseUrl: siliconFlowModel.baseUrl,
+    auth: { apiKey: envApiKeyAuth("SiliconFlow API key", ["SILICONFLOW_API_KEY"]) },
+    // shortcut: keep the conservative 32k window until provider model metadata is configured.
+    models: [siliconFlowModel,{...siliconFlowModel,id:'deepseek-ai/DeepSeek-V3.2',name:'DeepSeek V3.2'}],
+    api: openAICompletionsApi(),
+  }));
+  return models;
+}
 export function validateModel(models: Models, ref: ModelRef | undefined): ModelRef {
   if (!ref) throw new Error("No model configured. Set MODEL_PROVIDER and MODEL_ID, or create harness.config.json. Use the models command to list providers and model IDs.");
   if (!models.getModel(ref.provider, ref.modelId)) throw new Error(`Unknown model ${ref.provider}/${ref.modelId}. Use the models command to list the installed Pi catalog.`);

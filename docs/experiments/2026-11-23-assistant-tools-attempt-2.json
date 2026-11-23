@@ -1,0 +1,73 @@
+{
+  "provider": "siliconflow",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": true,
+  "limits": {
+    "requests": 20,
+    "maxOutputTokens": 512,
+    "elapsedMs": 240000
+  },
+  "money": null,
+  "fixture": ".harness/live-assistant-tools-pAUWPd",
+  "requests": 20,
+  "elapsedMs": 204868,
+  "setupFailed": false,
+  "checks": [
+    {
+      "id": "F08",
+      "passed": true,
+      "evidence": {
+        "connection": "available",
+        "newTaskUsesSelection": true,
+        "previousTaskKeepsModel": true
+      },
+      "requests": 2,
+      "elapsedMs": 2683
+    },
+    {
+      "id": "F10",
+      "passed": true,
+      "evidence": {
+        "discovered": true,
+        "explicitlyEnabled": true,
+        "calls": 1,
+        "result": 42,
+        "usage": {
+          "inputTokens": 3212,
+          "outputTokens": 303,
+          "totalTokens": 9019,
+          "money": null
+        }
+      },
+      "requests": 6,
+      "elapsedMs": 19330
+    },
+    {
+      "id": "F09",
+      "passed": true,
+      "evidence": {
+        "version": "0112f08b9c55cabfc10d6519c3236bc09b8b930b552c9e6d134aa243966a6e29",
+        "read": true,
+        "scriptRuns": 1,
+        "scriptDurationMs": 280,
+        "result": 42,
+        "usage": {
+          "inputTokens": 4930,
+          "outputTokens": 806,
+          "totalTokens": 31848,
+          "money": null
+        }
+      },
+      "requests": 10,
+      "elapsedMs": 39414
+    },
+    {
+      "id": "F18",
+      "passed": false,
+      "reason": "Independent Skill reuse or output verification failed.",
+      "stage": "await_completion",
+      "requests": 1,
+      "elapsedMs": 4513
+    }
+  ]
+}
