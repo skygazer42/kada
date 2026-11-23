@@ -1,0 +1,27 @@
+{
+  "passed": true,
+  "endpoint": "https://api.siliconflow.cn/v1",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "modelRequests": 4,
+  "maxOutputTokensPerRequest": 256,
+  "tests": {
+    "catalog": true,
+    "piToolRoundTrip": true,
+    "kadaConversationAfterRestart": true,
+    "duplicateFollowUp": true
+  },
+  "tokens": {
+    "toolInput": 286,
+    "toolOutput": 16,
+    "chatTotal": 3573
+  },
+  "estimatedCostUsd": null,
+  "pricingKnown": false,
+  "realModel": true,
+  "os": "win32",
+  "testedAt": "2026-11-23T16:33:01.4605695Z",
+  "sourceBaseCommit": "6e6abcc4a67962c9fc37286eafee65eae8384910",
+  "testScriptSha256": "4a887dedc4dc57e0a36c46cfc1e2310701869386b800ab9af018cdeadbbf458f",
+  "piVersion": "1.4.0",
+  "nodeVersion": "v24.20.0"
+}

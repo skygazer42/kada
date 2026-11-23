@@ -19,6 +19,7 @@
     "test:pet": "tsx scripts/test-pet.ts",
     "test:learning": "tsx scripts/learning/run.ts",
     "test:live": "tsx scripts/live-smoke.ts",
+    "test:live:siliconflow": "tsx scripts/live-siliconflow-smoke.ts",
     "test:live:web": "tsx scripts/live-web-smoke.ts",
     "test:live:intake": "tsx scripts/live-intake-smoke.ts",
     "test:compare": "tsx scripts/compare.ts",
