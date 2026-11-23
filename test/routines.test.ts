@@ -8,6 +8,9 @@ import { setImmediate } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { LocalRoutines, nextRoutineTime, type RoutineInput, type RoutineOccurrence } from "../src/routines.js";
+import {LocalRuntime} from '../src/runtime.js';
+import {createModels} from '@earendil-works/pi-ai';
+import {mkdir} from 'node:fs/promises';
 
 const start = Date.parse("2026-11-23T00:00:00Z");
 const minute = 60_000;
@@ -222,6 +225,11 @@ test("R03 deduplicates submissions and applies budget exhaustion to the active r
     assert.equal(paused.status, "paused");
     assert.equal(paused.nextRunAt, undefined);
     assert.equal(paused.lastOccurrence?.status, "budget_exhausted");
+    const budgetHistory=await routines.history('standup');
+    assert.deepEqual(budgetHistory.map(row=>row.status),['claimed','started','budget_exhausted']);
+    assert.deepEqual(budgetHistory[0]!.budget,input.budget);
+    await routines.settleBudget(calls[0].id);
+    assert.deepEqual(await routines.history('standup'),budgetHistory);
     const revised = await routines.update("standup", {
       ...input, schedule: { kind: "daily", time: "00:02", timeZone: "UTC" },
     });
@@ -264,6 +272,7 @@ test("R03 replays only the latest missed slot and persists a skipped slot", asyn
     assert.deepEqual(calls.map((call) => call.id), ["run/1/" + latest]);
     const skipped = (await routines.list()).find((row) => row.id === "skip");
     assert.deepEqual(skipped?.lastOccurrence, { id: "skip/1/" + latest, scheduledAt: latest, status: "skipped" });
+    assert.deepEqual((await routines.history('skip')).map(row=>[row.id,row.status]),[['skip/1/'+latest,'skipped']]);
   } finally {
     await routines.close();
   }
@@ -277,4 +286,128 @@ test("R04 chooses the first valid instant in a gap and the earlier instant in a 
   const first = Date.parse("2026-11-01T08:30:00Z");
   assert.equal(nextRoutineTime(fold, Date.parse("2026-11-01T07:00:00Z")), first);
   assert.equal(nextRoutineTime(fold, first), Date.parse("2026-11-08T09:30:00Z"));
+});
+
+test('R04 routine views and receipts explain a daylight-saving adjustment',async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock(),calls:RoutineOccurrence[]=[];
+  clock.advanceTo(Date.parse('2026-03-08T08:00:00Z'));
+  const routines=new LocalRoutines({dataDir,...clock,execute:async occurrence=>{calls.push(occurrence);return {status:'notified'};}});
+  try {
+    const spring=await routines.create({id:'spring',action:'notify',objective:'Synthetic DST reminder',schedule:{kind:'daily',time:'02:30',timeZone:'America/Los_Angeles'}});
+    assert.equal(spring.nextTiming?.adjustment,'gap_forward');
+    assert.equal(spring.nextTiming?.requestedTime,'02:30');
+    assert.equal(spring.nextTiming?.localTime,'03:00');
+    assert.match(spring.nextTiming?.explanation ?? '',/02:30.*03:00/);
+    const due=Date.parse(spring.nextRunAt!);
+    await until(()=>clock.waitingAt(due));clock.advanceTo(due);
+    await until(async()=>(await routines.list())[0]?.lastOccurrence?.status==='notified');
+    assert.equal(calls[0]?.timing?.adjustment,'gap_forward');
+    assert.deepEqual((await routines.list())[0]?.lastOccurrence?.timing,calls[0]?.timing);
+    await routines.cancel('spring');
+    clock.advanceTo(Date.parse('2026-11-01T07:00:00Z'));
+    const fall=await routines.create({id:'fall',action:'notify',objective:'Synthetic fold reminder',schedule:{kind:'weekly',weekday:0,time:'01:30',timeZone:'America/Los_Angeles'}});
+    assert.equal(fall.nextTiming?.adjustment,'fold_earlier');
+    assert.equal(fall.nextRunAt,'2026-11-01T08:30:00.000Z');
+    assert.match(fall.nextTiming?.explanation ?? '',/第一次/);
+  } finally {await routines.close();}
+});
+
+test('R03 occurrence history retains old failures and rule revisions after later runs and restart',async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock();let calls=0;
+  const options={dataDir,...clock,execute:async()=>{calls++;if(calls===1) throw new Error('Synthetic first failure');return {status:'notified'} as const;}};
+  let routines=new LocalRoutines(options);
+  try {
+    const input={id:'history',action:'notify' as const,objective:'First objective',schedule:{kind:'daily' as const,time:'00:01',timeZone:'UTC'}};
+    await routines.create(input);await until(()=>clock.waitingAt(first));clock.advanceTo(first);
+    await until(async()=>(await routines.list())[0]?.lastOccurrence?.status==='failed');
+    const updated=await routines.update('history',{...input,objective:'Second objective'});
+    const next=Date.parse(updated.nextRunAt!);await until(()=>clock.waitingAt(next));clock.advanceTo(next);
+    await until(async()=>(await routines.list())[0]?.lastOccurrence?.status==='notified');
+    const before=await routines.history('history');
+    assert.deepEqual(before.filter(row=>row.status!=='claimed').map(row=>[row.revision,row.objective,row.status]),[[1,'First objective','failed'],[2,'Second objective','notified']]);
+    assert(before[1]!.sequence>before[0]!.sequence);
+    await routines.close();routines=new LocalRoutines(options);await routines.recover();
+    assert.deepEqual(await routines.history('history'),before);
+    await routines.cancel('history');assert.deepEqual(await routines.history('history'),before);
+    assert.equal(calls,2);await assert.rejects(routines.history('missing'),{status:404});
+  } finally {await routines.close();}
+});
+
+test('R03 an old occurrence budget event survives rule edits and cancellation without changing the new rule',async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock(),calls:RoutineOccurrence[]=[];
+  const routines=new LocalRoutines({dataDir,...clock,execute:async occurrence=>{calls.push(occurrence);return {taskId:occurrence.taskId};}});
+  try {
+    const input:RoutineInput={id:'old-budget',action:'task',objective:'First',schedule:{kind:'daily',time:'00:01',timeZone:'UTC'},budget:{maxEstimatedCostUsd:1,maxDurationMs:1000},budgetPolicy:'pause'};
+    await routines.create(input);await until(()=>clock.waitingAt(first));clock.advanceTo(first);await until(async()=>(await routines.list())[0]?.lastOccurrence?.status==='started');
+    const revised=await routines.update('old-budget',{...input,objective:'Second'});
+    await routines.settleBudget(calls[0]!.id);
+    assert((await routines.history('old-budget')).some(row=>row.revision===1 && row.status==='budget_exhausted' && row.objective==='First'));
+    assert.equal((await routines.list())[0]!.status,'scheduled');
+    const due=Date.parse(revised.nextRunAt!);await until(()=>clock.waitingAt(due));clock.advanceTo(due);await until(()=>calls.length===2);
+    await routines.cancel('old-budget');await routines.settleBudget(calls[1]!.id);
+    assert((await routines.history('old-budget')).some(row=>row.revision===2 && row.status==='budget_exhausted'));
+    assert.equal((await routines.list())[0]!.status,'cancelled');
+  } finally {await routines.close();}
+});
+
+test('R03 repeated late budget updates retain one event after the latest slot has advanced',async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock(),calls:RoutineOccurrence[]=[];
+  const routines=new LocalRoutines({dataDir,...clock,execute:async occurrence=>{calls.push(occurrence);return {taskId:occurrence.taskId};}});
+  try {
+    await routines.create({id:'late-budget',action:'task',objective:'First',schedule:{kind:'daily',time:'00:01',timeZone:'UTC'},budget:{maxEstimatedCostUsd:1,maxDurationMs:1000},budgetPolicy:'skip'});
+    for(const at of [first,first+86_400_000]) {await until(()=>clock.waitingAt(at));clock.advanceTo(at);await until(async()=>(await routines.list())[0]?.lastOccurrence?.scheduledAt===iso(at));}
+    await routines.settleBudget(calls[0]!.id);await routines.settleBudget(calls[0]!.id);
+    assert.equal((await routines.history('late-budget')).filter(row=>row.id===calls[0]!.id && row.status==='budget_exhausted').length,1);
+    assert.equal((await routines.list())[0]!.lastOccurrence!.id,calls[1]!.id);
+  } finally {await routines.close();}
+});
+
+test('R03 cancellation during an unacknowledged action retains its uncertain claim',async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock();let entered=false;
+  let release!:()=>void;const acknowledgement=new Promise<void>(done=>{release=done;});
+  const routines=new LocalRoutines({dataDir,...clock,execute:async()=>{entered=true;await acknowledgement;return {status:'notified'};}});
+  try {
+    await routines.create(reminder('uncertain',first));await until(()=>clock.waitingAt(first));clock.advanceTo(first);await until(()=>entered);
+    const cancelling=routines.cancel('uncertain');await until(async()=>(await routines.list())[0]?.status==='cancelled');release();await cancelling;
+    const history=await routines.history('uncertain');
+    assert.equal(history.length,1);assert.equal(history[0]!.status,'claimed');
+    assert.equal((await routines.list())[0]!.status,'cancelled');
+  } finally {release();await routines.close();}
+});
+
+test('R03 daemon recovery settles a persisted task budget stop before waking another occurrence',async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock(),calls:RoutineOccurrence[]=[];
+  const options={dataDir,...clock,execute:async(occurrence:RoutineOccurrence)=>{calls.push(occurrence);return {taskId:occurrence.taskId};}};
+  const initial=new LocalRoutines(options);
+  await initial.create({id:'recovery-budget',action:'task',objective:'Synthetic recovery',schedule:{kind:'daily',time:'00:01',timeZone:'UTC'},budgetPolicy:'pause',missedPolicy:'run_once',budget:{maxEstimatedCostUsd:1,maxDurationMs:1000}});
+  await until(()=>clock.waitingAt(first));clock.advanceTo(first);await until(async()=>(await initial.list())[0]?.lastOccurrence?.status==='started');await initial.close();
+  const occurrence=calls[0]!;const taskDir=join(dataDir,'tasks',occurrence.taskId);await mkdir(taskDir,{recursive:true});
+  await writeFile(join(taskDir,'task.json'),JSON.stringify({id:occurrence.taskId,objective:occurrence.objective,workspace:join(dataDir,'workspace'),model:{provider:'fixture',modelId:'unused'},createdAt:first,deadlineAt:first+1000,maxSubagents:1,control:'budget_limited',routineOccurrenceId:occurrence.id}));
+  clock.advanceTo(first+86_400_000);
+  const runtime=new LocalRuntime({dataDir,port:4317,maxSubagents:1,maxDurationMs:1000,discovery:false,web:false},{models:createModels()});
+  const restored=new LocalRoutines(options);Object.defineProperty(runtime,'routines',{value:restored});
+  try {
+    await runtime.recover();
+    assert.equal((await restored.list())[0]!.status,'paused');
+    assert.equal((await restored.history('recovery-budget')).filter(row=>row.status==='budget_exhausted').length,1);
+    assert.equal(calls.length,1);
+  } finally {await runtime.close();}
+});
+
+test('R03 occurrence history crosses native Pi entry pages without losing identities', {timeout:30000},async t=>{
+  const dataDir=await tempDir(t),clock=fakeClock();let calls=0;
+  const routines=new LocalRoutines({dataDir,...clock,execute:async()=>{calls++;return {status:'notified'};}});
+  try {
+    await routines.create({id:'pages',action:'notify',objective:'Synthetic paged history',schedule:{kind:'daily',time:'00:01',timeZone:'UTC'}});
+    for(let day=0;day<105;day++) {
+      const at=first+day*86_400_000;await until(()=>clock.waitingAt(at));clock.advanceTo(at);
+      await until(async()=>(await routines.list())[0]?.lastOccurrence?.scheduledAt===iso(at));
+    }
+    const history=await routines.history('pages');
+    assert.equal(calls,105);assert.equal(history.length,210);
+    assert.equal(new Set(history.map(row=>row.sequence)).size,210);
+    assert.equal(new Set(history.map(row=>row.id)).size,105);
+    assert(history.every((row,index)=>index===0||row.sequence>history[index-1]!.sequence));
+    assert.deepEqual(await routines.history('pages'),history);
+  } finally {await routines.close();}
 });

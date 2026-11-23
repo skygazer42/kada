@@ -228,7 +228,9 @@ export class LocalRuntime {
     return store.capture(await Workspace.open(status.workspace,{create:false}),status.goal,id,path);
   }
   async recover(): Promise<void> {
-    for (const meta of await this.metadataList()) {
+    const metadata=await this.metadataList();
+    for(const meta of metadata) if(meta.control==='budget_limited' && meta.routineOccurrenceId) await this.routines.settleBudget(meta.routineOccurrenceId);
+    for (const meta of metadata) {
       if (meta.control === "active") {
         try {await this.open(meta,true);}
         catch(error) {meta.control='paused';meta.initializationError=errorText(error);await atomicJson(this.metaFile(meta.id),meta);}

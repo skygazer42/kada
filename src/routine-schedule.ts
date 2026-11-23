@@ -59,10 +59,14 @@ function wallTime(clock: Intl.DateTimeFormat, at: number): number {
   return Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second"));
 }
 
-function instantAt(clock: Intl.DateTimeFormat, wall: number): number {
-  const instants = [wall - dayMs, wall, wall + dayMs]
+function nearbyInstants(clock: Intl.DateTimeFormat, wall: number): number[] {
+  return [...new Set([wall - dayMs, wall, wall + dayMs]
     .map((at) => wall - (wallTime(clock, at) - at))
-    .sort((a, b) => a - b);
+    .sort((a, b) => a - b))];
+}
+
+function instantAt(clock: Intl.DateTimeFormat, wall: number): number {
+  const instants=nearbyInstants(clock,wall);
   const exact = instants.find((at) => wallTime(clock, at) === wall);
   if (exact !== undefined) return exact;
 
@@ -107,4 +111,25 @@ export function latestRoutineTime(schedule: RoutineSchedule, through: number): n
   if (schedule.kind !== "once") return recurringTime(schedule, through, -1);
   const at = Date.parse(schedule.at);
   return at <= through ? at : undefined;
+}
+
+export type RoutineTiming = {
+  timeZone: string;
+  localDate: string;
+  requestedTime: string;
+  localTime: string;
+  adjustment: 'gap_forward' | 'fold_earlier' | null;
+  explanation: string | null;
+};
+
+/** Describe the same instant calculation used by Pi timers, without adding timer state. */
+export function routineTiming(schedule: RoutineSchedule, at: number): RoutineTiming | undefined {
+  if(schedule.kind==='once') return;
+  const clock=wallClock(schedule.timeZone),local=new Date(wallTime(clock,at));
+  const localDate=local.toISOString().slice(0,10),localTime=local.toISOString().slice(11,16);
+  const requested=Date.parse(localDate+'T'+schedule.time+':00Z');
+  const repeated=nearbyInstants(clock,requested).filter(instant=>wallTime(clock,instant)===requested).length>1;
+  const adjustment=localTime!==schedule.time ? 'gap_forward' : repeated ? 'fold_earlier' : null;
+  const explanation=adjustment==='gap_forward' ? `当地 ${schedule.time} 不存在，已顺延至 ${localTime}。` : adjustment==='fold_earlier' ? `当地 ${schedule.time} 重复出现，采用第一次。` : null;
+  return {timeZone:schedule.timeZone,localDate,requestedTime:schedule.time,localTime,adjustment,explanation};
 }

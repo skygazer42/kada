@@ -298,6 +298,8 @@ Kada 落点为 SkillStore.capture/rollback、pinSkills、settleSkills。
 
 夏令时测试使用 America/Los_Angeles。不存在的本地时刻顺延到当天首个有效时刻并显示调整；重复的本地时刻采用第一次出现，并按本地日期和规则版本认领一次。离线错过按保存的补跑政策处理。
 
+`nextTiming` 展示计划与实际本地时刻和调整原因，发生项回执保留所采用的调整。`GET /v1/routines/:id/occurrences` 与 `routines history ID` 从 Pi 持久条目回查记录；`claimed` 是未确认认领，不能等同实际启动或完成。旧版本的预算停止保留原政策用于追溯，但不改变新规则。
+
 ### 3.4 远程与协作
 
 远程请求身份组合为 `channel, accountId, conversationId, messageId`，映射到当前 taskId/requestId。状态查询、问题回复和附件均核对这一归属。nanoMuse 的受理后宿主重启会报告 interrupted，Codync 的部分普通回合可发起原会话恢复，Kada 按已有 Pi 状态和实际结果选择接回动作。

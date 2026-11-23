@@ -3,10 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTask, Harness, type ConversationId } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineExtension, defineTask, Harness, type ConversationId, type Cursor, type Tx } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { acceptanceChecks, type AcceptanceCheck } from "./checks.js";
-import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, type RoutineSchedule } from "./routine-schedule.js";
+import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, routineTiming, type RoutineTiming, type RoutineSchedule } from "./routine-schedule.js";
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -42,6 +42,7 @@ export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPoli
   revision: number;
   scheduledAt: string;
   taskId: string;
+  timing?: RoutineTiming;
 };
 
 export type RoutineExecution =
@@ -49,15 +50,49 @@ export type RoutineExecution =
   | { status: "notified" | "budget_exhausted" };
 
 type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt"> & {
-  status: "notified" | "started" | "budget_exhausted" | "skipped" | "failed";
+  status: "claimed" | "notified" | "started" | "budget_exhausted" | "skipped" | "failed";
   taskId?: string;
+  timing?: RoutineTiming;
 };
+
+export type RoutineOccurrenceRecord = Receipt & {
+  routineId: string;
+  revision: number;
+  action: RoutineInput['action'];
+  objective: string;
+  missedPolicy: 'run_once' | 'skip';
+  budgetPolicy: 'pause' | 'skip';
+  budget?: RoutineBudget;
+  recordedAt: number;
+};
+const occurrenceEntryKind='local.routine.occurrence';
+
+async function recordOccurrence(tx:Tx,conversationId:ConversationId,rule:StoredRoutine,receipt:Receipt,recordedAt:number) {
+  const data:RoutineOccurrenceRecord={...receipt,routineId:rule.id,revision:rule.revision,action:rule.action,objective:rule.objective,
+    missedPolicy:rule.missedPolicy,budgetPolicy:rule.budgetPolicy,...(rule.budget ? {budget:rule.budget} : {}),recordedAt};
+  await tx.appendEntry(conversationId,{kind:occurrenceEntryKind,data});
+}
+
+async function recordedOccurrence(tx:Tx,conversationId:ConversationId,id:string) {
+  let record:RoutineOccurrenceRecord|undefined,cursor:Cursor|undefined;
+  do {
+    const page=await tx.scanEntries({conversationId,order:'descending'},200,cursor);
+    for(const entry of page.items) if(entry.kind===occurrenceEntryKind && entry.data && typeof entry.data==='object' && !Array.isArray(entry.data) && entry.data.id===id) {
+      const value=entry.data as RoutineOccurrenceRecord;
+      record ??= value;
+      if(value.status==='budget_exhausted') return {record,budgetRecorded:true};
+    }
+    cursor=page.next;
+  } while(cursor);
+  return {record,budgetRecorded:false};
+}
 
 export type Routine = RoutineDefinition & {
   id: string;
   revision: number;
   status: "scheduled" | "paused" | "completed" | "cancelled";
   nextRunAt?: string;
+  nextTiming?: RoutineTiming;
   lastOccurrence?: Receipt;
 };
 
@@ -99,7 +134,8 @@ function snapshot<T>(value: T): T {
 }
 
 function toRoutine({ timerId: _timer, claim: _claim, ...routine }: StoredRoutine): Routine {
-  return { ...routine, notifyOnChange: routine.notifyOnChange ?? false };
+  const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
+  return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
 
 function inputId(value: string | undefined): string {
@@ -174,18 +210,24 @@ function firstTime(schedule: RoutineSchedule, now: number): number {
   return at;
 }
 
-function occurrenceFor(rule: StoredRoutine, at: number): RoutineOccurrence {
-  const scheduledAt = new Date(at).toISOString();
-  const id = [rule.id, rule.revision, scheduledAt].join("/");
+function taskIdFor(id:string) {
   const bytes = createHash("sha256").update("kada/routine/" + id).digest().subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x80;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
-  const taskId = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+}
+
+function occurrenceFor(rule: StoredRoutine, at: number): RoutineOccurrence {
+  const scheduledAt = new Date(at).toISOString();
+  const id = [rule.id, rule.revision, scheduledAt].join("/");
+  const taskId=taskIdFor(id);
   const { action, objective, workspace, acceptance, budget, budgetPolicy, notifyOnChange } = rule;
+  const timing=routineTiming(rule.schedule,at);
   return {
     id, routineId: rule.id, revision: rule.revision, scheduledAt, taskId, action, objective, acceptance, budgetPolicy,
     notifyOnChange: notifyOnChange ?? false,
+    ...(timing?.adjustment ? {timing} : {}),
     ...(workspace ? { workspace } : {}),
     ...(budget ? { budget } : {}),
   };
@@ -240,22 +282,26 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           const missed = at < openedAt || (latest !== undefined && latest > at);
           const due = occurrenceFor(rule, latest === undefined ? at : Math.max(at, latest));
           if (missed && rule.missedPolicy === "skip") {
-            const advanced = advance(rule, { id: due.id, scheduledAt: due.scheduledAt, status: "skipped" }, now);
+            const skipped:Receipt={id:due.id,scheduledAt:due.scheduledAt,status:'skipped',...(due.timing ? {timing:due.timing} : {})};
+            await recordOccurrence(tx,runtime.conversationId,rule,skipped,now);
+            const advanced = advance(rule,skipped,now);
             rules[key] = advanced.rule;
             return advanced.state;
           }
+          await recordOccurrence(tx,runtime.conversationId,rule,{id:due.id,scheduledAt:due.scheduledAt,status:'claimed',...(due.action==='task' ? {taskId:due.taskId} : {}),...(due.timing ? {timing:due.timing} : {})},now);
           rules[key] = { ...rule, claim: due };
           occurrence = due;
         }, ctx);
         if (!occurrence || runtime.signal.aborted) return;
 
         const { id, scheduledAt } = occurrence;
+        const timing=occurrence.timing ? {timing:occurrence.timing} : {};
         let receipt: Receipt;
         try {
           const result = await options.execute(occurrence, runtime.signal);
-          receipt = { id, scheduledAt, status: result.status ?? "started", ...("taskId" in result ? { taskId: result.taskId } : {}) };
+          receipt = { id, scheduledAt, status: result.status ?? "started",...timing, ...("taskId" in result ? { taskId: result.taskId } : {}) };
         } catch {
-          receipt = { id, scheduledAt, status: "failed" };
+          receipt = { id, scheduledAt, status: "failed",...timing };
         }
         if (runtime.signal.aborted) return;
 
@@ -264,6 +310,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           const rule = snapshot(rules[key]);
           if (!rule || rule.revision !== revision || rule.claim?.id !== id || rule.status !== "scheduled") return completed;
           const known = rule.lastOccurrence;
+          if(known?.id!==id || known.status!=='budget_exhausted') await recordOccurrence(tx,runtime.conversationId,rule,receipt,runtime.now());
           const advanced = advance(rule, known?.id === id && known.status === "budget_exhausted" ? known : receipt, runtime.now());
           rules[key] = advanced.rule;
           return advanced.state;
@@ -285,7 +332,8 @@ export class LocalRoutines {
   }
 
   async recover(): Promise<void> {
-    await this.open();
+    const {harness}=await this.open();
+    harness.resume();
   }
 
   private open(): Promise<Session> {
@@ -305,7 +353,6 @@ export class LocalRoutines {
       ...(this.options.setTimer ? { setTimer: this.options.setTimer } : {}),
     }, context);
     const root = await harness.root(context);
-    harness.resume();
     return { harness, conversationId: root.id, timer };
   }
 
@@ -341,6 +388,23 @@ export class LocalRoutines {
       const { rules } = await tx.doc(routinesDoc);
       return Object.values(snapshot(rules)).map(toRoutine);
     }, context);
+  }
+
+  async history(id:string):Promise<(RoutineOccurrenceRecord & {sequence:number})[]> {
+    const key=keyFor(inputId(id));
+    const {harness,conversationId}=await this.open();
+    await harness.commit(async tx=>{if(!(await tx.doc(routinesDoc)).rules[key]) throw new RoutineError(404,'Routine not found.');},context);
+    const root=(await harness.conversation(conversationId,context))!;
+    const records:(RoutineOccurrenceRecord & {sequence:number})[]=[];
+    let cursor:Cursor|undefined;
+    do {
+      const page=await root.entries({order:'ascending'},200,cursor,context);
+      for(const entry of page.items) if(entry.kind===occurrenceEntryKind && entry.data && typeof entry.data==='object' && !Array.isArray(entry.data) && entry.data.routineId===id) {
+        records.push({...entry.data as RoutineOccurrenceRecord,sequence:Number(entry.id)});
+      }
+      cursor=page.next;
+    } while(cursor);
+    return records;
   }
 
   async update(id: string, input: RoutineInput): Promise<Routine> {
@@ -394,15 +458,22 @@ export class LocalRoutines {
     const [id, revision, scheduledAt, extra] = occurrenceId.split("/");
     if (!id || !revision || !scheduledAt || extra !== undefined || !Number.isFinite(Date.parse(scheduledAt))) return;
     const key = keyFor(id);
-    const { harness } = await this.open();
+    const { harness,conversationId } = await this.open();
     const previousTimer = await harness.commit(async (tx) => {
       const { rules } = await tx.doc(routinesDoc);
       const rule = snapshot(rules[key]);
-      if (!rule || String(rule.revision) !== revision || rule.action !== "task" || rule.status === "cancelled") return;
-      const previous = rule.lastOccurrence;
-      if (rule.claim?.id !== occurrenceId && (!previous || previous.scheduledAt < scheduledAt)) return;
-      if (previous?.id === occurrenceId && previous.status === "budget_exhausted") return;
-      const lastOccurrence: Receipt = { ...previous, id: occurrenceId, scheduledAt, status: "budget_exhausted", taskId: occurrenceFor(rule, Date.parse(scheduledAt)).taskId };
+      const known=await recordedOccurrence(tx,conversationId,occurrenceId);
+      if(known.budgetRecorded) return;
+      let origin=known.record;
+      if(!origin && rule && String(rule.revision)===revision && rule.action==='task' && (rule.claim?.id===occurrenceId || rule.lastOccurrence?.id===occurrenceId)) {
+        const occurrence=occurrenceFor(rule,Date.parse(scheduledAt));
+        origin={id:occurrenceId,scheduledAt,status:'claimed',taskId:occurrence.taskId,...(occurrence.timing ? {timing:occurrence.timing} : {}),routineId:rule.id,revision:rule.revision,action:rule.action,objective:rule.objective,missedPolicy:rule.missedPolicy,budgetPolicy:rule.budgetPolicy,...(rule.budget ? {budget:rule.budget} : {}),recordedAt:this.now()};
+      }
+      if(!origin || origin.action!=='task') return;
+      const lastOccurrence:Receipt={id:occurrenceId,scheduledAt,status:'budget_exhausted',taskId:origin.taskId ?? taskIdFor(occurrenceId),...(origin.timing ? {timing:origin.timing} : {})};
+      await tx.appendEntry(conversationId,{kind:occurrenceEntryKind,data:{...origin,...lastOccurrence,recordedAt:this.now()}});
+      if(!rule || String(rule.revision)!==revision || rule.action!=='task' || rule.status==='cancelled') return;
+      const previous=rule.lastOccurrence;
       const next = !previous || previous.scheduledAt <= scheduledAt ? { ...rule, lastOccurrence } : rule;
       if (rule.budgetPolicy === "pause") {
         rules[key] = endSchedule(next, "paused");
@@ -412,7 +483,6 @@ export class LocalRoutines {
       return undefined;
     }, context);
     if (previousTimer) await harness.abortTask(previousTimer, context);
-    harness.resume();
   }
 
   async close(): Promise<void> {

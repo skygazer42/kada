@@ -1,14 +1,14 @@
 {
   "date": "2026-11-23",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "branch": "codex/assistant-plan",
   "status": "implemented-with-required-real-driver-test-pending",
   "referenceLinks": 37,
   "verification": {
     "assistant": {
       "command": "npm run test:assistant",
-      "tests": 89,
-      "passed": 89,
+      "tests": 96,
+      "passed": 96,
       "failed": 0,
       "skipped": 0
     },
@@ -34,11 +34,29 @@
       ],
       "pairSendReconnectSameConversation": true,
       "synthetic": true
+    },
+    "routineHistory": {
+      "nativePiEntries": true,
+      "paginationEntries": 210,
+      "revisionAndCancellationAudit": true,
+      "lateBudgetDeduplicated": true,
+      "budgetRecoveryBeforeWake": true
+    },
+    "routineTiming": {
+      "springGapExplained": true,
+      "foldChoiceExplained": true,
+      "receiptRetainsAdjustment": true
+    },
+    "nativeFileOpen": {
+      "artifactTaskApi": true,
+      "emptyFileChinesePath": true,
+      "notepadWindowTitleObserved": true,
+      "directoryWindowObserved": false
     }
   },
   "acceptance": {
     "M": "M01-M08 passed",
-    "H": "H01-H06 target/API checks passed; native GUI open not manually exercised",
+    "H": "H01-H06 target/API checks passed; a Chinese empty file opened in Notepad; folder window and macOS GUI remain unverified",
     "C": "C01-C06 passed",
     "R": "R01-R04 passed, including process kill, sleeping process and queued cancellation",
     "D": "D01-D06 passed, including compaction, ownership and stale links",

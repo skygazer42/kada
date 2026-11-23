@@ -115,12 +115,16 @@ test('settings, scoped phone pairing and durable reminders work through the auth
     assert.equal((await remote()).status,401);
     const rule = await client.request<{id:string}>('/v1/routines','POST',{action:'notify',objective:'Synthetic reminder',schedule:{kind:'once',at:new Date(Date.now()+250).toISOString()}});
     await until(() => server.runtime.notifications(), events => events.some(event => event.routineId === rule.id));
+    const historyPath='/v1/routines/'+rule.id+'/occurrences';
+    const history=await client.request<{routineId:string;status:string;sequence:number}[]>(historyPath);
+    assert.equal(history.length,2);assert.equal(history[0]!.routineId,rule.id);assert.deepEqual(history.map(row=>row.status),['claimed','notified']);
     const before = await server.runtime.notifications();
     await server.close();
     server = await serve(settings,{models:f.models});
     assert.deepEqual(await server.runtime.notifications(),before);
     assert.deepEqual((await server.runtime.status(next.id)).model,ref);
     assert.equal((await client.request<{id:string}[]>('/v1/routines'))[0]!.id,rule.id);
+    assert.deepEqual(await client.request(historyPath),history);
   } finally { await server.close(); await f.close(); }
 });
 

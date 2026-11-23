@@ -83,11 +83,14 @@ npm run harness -- mcp disable local-tools
 ```powershell
 npm run harness -- routines add routine.json
 npm run harness -- routines list
+npm run harness -- routines history 规则ID
 npm run harness -- routines update 规则ID routine.json
 npm run harness -- routines cancel 规则ID
 ```
 
 `weekday` 以周日为 0。每日/每周默认跳过离线错过项，单次默认补跑一次。`run_once` 只补最新一项。夏令时缺失时刻顺延，重复时刻选第一次。`notifyOnChange` 比较已验收产物的哈希；相同产物不重复通知，失败和待答仍展示。规则中的 task 操作就是对该目标及预算的明确授权。
+
+列表的 `nextTiming` 显示计划本地时间、实际本地时间及夏令时调整说明；发生项回执保留已采用的调整。`history` 读取 Pi 的持久条目，保留旧规则版本的认领、失败、跳过和预算停止记录。`claimed` 表示已认领但尚无确认结果，不能当作任务已经启动或成功；取消/中断后应按 `taskId` 查询实际状态。任务产物和用量仍从原任务读取。更早版本只有最近回执，没有的历史不会被补造。
 
 ## 手机 Web 入口
 
