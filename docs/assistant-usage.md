@@ -1,6 +1,6 @@
 # 个人助手使用入口
 
-实现范围和逐功能参考代码见[功能 Spec](specs/2026-11-23-personal-assistant.md)。当前通过 Fork 功能分支迭代。真实电脑驱动保持关闭，跨设备访问需要现成 HTTPS 代理。
+实现范围和逐功能参考代码见[功能 Spec](specs/2026-11-23-personal-assistant.md)。当前通过 Fork 功能分支迭代。用户已选择 agent-browser 验证本地网页；日常配置仍按需启用，跨设备访问需要现成 HTTPS 代理。
 
 ## 终端与交接
 
@@ -114,7 +114,16 @@ npm run harness -- computer takeover
 npm run harness -- computer return
 ```
 
-未选驱动时 status 显示 disabled。接管会立即阻止新动作并等待当前调用结束；`takingOver`、`busy` 和 `uncertain` 分别显示等待、当前操作及结果不明。回交或重连后重新获得租约并观察。真实驱动选型与 U02 保持待办。
+未配置驱动时 status 显示 disabled。接管会立即阻止新动作并等待当前调用结束；`takingOver`、`busy` 和 `uncertain` 分别显示等待、当前操作及结果不明。回交或重连后重新获得租约并观察。
+
+首个真实驱动选择为已安装的 agent-browser 0.38.1，仅用于本地测试网页。它的原生 MCP 端点在本机调用超时，因此提供 `scripts/agent-browser-stdio.ts` 薄适配，仍由现成 CLI 执行浏览器操作。会话、页面和截图路径固定，不提供任意 JavaScript 或 Shell。当前 CLI 不支持安全传递以 `-` 开头的填写值，适配会明确拒绝。
+
+```powershell
+npm run test:computer:browser -- --command C:/path/to/agent-browser-win32-x64.exe
+npm run test:computer:browser -- --live --command C:/path/to/agent-browser-win32-x64.exe
+```
+
+测试自建合成本地页面和临时配置，不改日常 daemon。第一条用脚本化模型驱动真实浏览器；第二条使用硅基流动，默认 DeepSeek-V3.2，凭据沿用前文的环境变量或终端无回显输入。验证会调用原接管 API、通过独立操作端修改页面、强制中断并重连驱动，然后让同一 Pi 任务重新观察并交付 JSON。这里的操作端由测试自动模拟，并非人工操作记录。
 
 任务状态与 `/v1/tasks/:id/view` 的 `delegations` 显示按需创建的 Pi 子会话职责、状态、结果目录与用量。父任务取消会终止所属工作，子任务无法提交父目标。任务总用量已经包含子会话，无需再次累加。
 
@@ -130,3 +139,5 @@ npm run test:live:assistant:memory
 ```
 
 在线脚本使用合成数据，可在终端无回显输入硅基流动凭据。`SILICONFLOW_MODEL` 可以指定账户目录实际提供的模型；在线验证的临时目录和失败尝试均与用户项目分开。独立断言核对工具次数、产物字节、记忆引用和实际执行记录。小模型的复杂工具执行失败保留在实验记录中，测试通过不代表长期任务完成率或成本已经改善。
+
+全量测试逐文件执行，保留进程隔离，减少 SQLite、子进程恢复与短计时场景之间的资源争用。Windows 若 `python3` 是商店占位命令，先将 `CASE_PYTHON` 指向已安装的实际 Python 3.12；无需修改系统权限。Office 案例依赖 `scripts/cases/requirements.txt`。

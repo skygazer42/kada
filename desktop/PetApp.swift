@@ -123,13 +123,30 @@ import UniformTypeIdentifiers
         }
     }
     func select(_ id: String) async {
+        guard !busy else { return }
         generation += 1
-        selectedID = id
-        restoringSelectedTask = false
-        task = nil; draft = ""; editing = false; error = nil; attachments = []; lastAttention = ""; resumePrompt = false; showingMemory = false
-        UserDefaults.standard.set(id, forKey: api.configuration.defaultsKey)
-        await refresh()
-        showBubble?(true)
+        let revision = generation
+        do {
+            let value = try await api.task(id)
+            guard generation == revision else { return }
+            if selectedID != id {
+                selectedID = id
+                draft = ""; editing = false; attachments = []; resumePrompt = false
+                UserDefaults.standard.set(id, forKey: api.configuration.defaultsKey)
+            }
+            task = value
+            restoringSelectedTask = false
+            failures = 0
+            lastAttention = value.attentionKey
+            error = nil
+            showingMemory = false
+            showBubble?(true)
+            let _: PetOK = try await api.request("/v1/tasks/\(id)/notifications/read", method: "POST", body: [:])
+        } catch {
+            guard generation == revision else { return }
+            self.error = error.localizedDescription
+            showBubble?(true)
+        }
     }
     func newGoal() {
         generation += 1; selectedID = nil; lastAttention = ""; restoringSelectedTask = false
@@ -693,20 +710,12 @@ private final class PetPanel: NSPanel {
         add(menu, "新对话", #selector(newGoal))
         add(menu, "本机 Agent 与 Skills…", #selector(openEnvironment))
         add(menu, "用户记忆…", #selector(openUserMemory))
-        let recent = NSMenu(title: "最近对话与任务")
-        let recentItem = NSMenuItem(title: "最近对话与任务", action: nil, keyEquivalent: ""); recentItem.submenu = recent; menu.addItem(recentItem)
-        recent.addItem(withTitle: "正在读取…", action: nil, keyEquivalent: "")
-        Task {
-            do {
-                let tasks: [PetTaskItem] = try await model.api.request("/v1/tasks")
-                recent.removeAllItems()
-                if tasks.isEmpty { recent.addItem(withTitle: "还没有对话", action: nil, keyEquivalent: "") }
-                for task in tasks.prefix(8) {
-                    let prefix = task.status == "completed" ? "✓ " : ""
-                    let item = NSMenuItem(title: prefix + String(task.objective.prefix(38)).replacingOccurrences(of: "\n", with: " "), action: #selector(attachTask(_:)), keyEquivalent: "")
-                    item.target = self; item.representedObject = task.id; recent.addItem(item)
-                }
-            } catch { recent.removeAllItems(); recent.addItem(withTitle: "暂时无法读取", action: nil, keyEquivalent: "") }
+        let pending = NSMenu(title: "待处理任务")
+        let recent = NSMenu(title: "最近对话与其他任务")
+        for submenu in [pending, recent] {
+            let item = NSMenuItem(title: submenu.title, action: nil, keyEquivalent: "")
+            item.submenu = submenu
+            menu.addItem(item)
         }
         if model.task != nil {
             if model.mode == .working { add(menu, "暂停当前任务", #selector(pauseTask)) }
@@ -716,7 +725,32 @@ private final class PetPanel: NSPanel {
         add(menu, "重新连接", #selector(reconnect))
         menu.addItem(.separator()); add(menu, "隐藏\(model.appearance.name)", #selector(hidePet)); add(menu, "退出\(model.appearance.name)（后台继续）", #selector(quit))
         nativeMenu = menu
-        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        let location = NSEvent.mouseLocation
+        Task {
+            do {
+                let tasks: [PetTaskItem] = try await model.api.request("/v1/tasks")
+                fillTaskMenu(pending, tasks: tasks.filter { $0.group == "pending" }, empty: "没有待处理任务")
+                fillTaskMenu(recent, tasks: Array(tasks.filter { $0.group != "pending" }.prefix(8)), empty: "还没有其他任务或对话")
+            } catch {
+                for submenu in [pending, recent] { submenu.addItem(withTitle: "暂时无法读取", action: nil, keyEquivalent: "") }
+            }
+            guard nativeMenu === menu else { return }
+            menu.popUp(positioning: nil, at: location, in: nil)
+        }
+    }
+    private func fillTaskMenu(_ menu: NSMenu, tasks: [PetTaskItem], empty: String) {
+        if tasks.isEmpty { menu.addItem(withTitle: empty, action: nil, keyEquivalent: "") }
+        for task in tasks {
+            let objective = String(task.objective.prefix(28)).replacingOccurrences(of: "\n", with: " ")
+            let summary = String(task.summary.prefix(24)).replacingOccurrences(of: "\n", with: " ")
+            var title = "\(task.statusLabel) · \(objective)"
+            if task.group == "pending" && task.summary != task.status { title += " · \(summary)" }
+            let item = NSMenuItem(title: title, action: #selector(attachTask(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = task.id
+            item.toolTip = task.summary == task.status ? task.objective : "\(task.objective)\n\(task.summary)"
+            menu.addItem(item)
+        }
     }
     private func add(_ menu: NSMenu, _ title: String, _ selector: Selector) { let item = NSMenuItem(title: title, action: selector, keyEquivalent: ""); item.target = self; menu.addItem(item) }
     @objc private func openBubble() { show(focus: true) }
@@ -808,7 +842,24 @@ private final class PetPanel: NSPanel {
             model.draft = "把资料整理成一份中文摘要，交付 report.md，保留原文件。"
             model.submit()
             try await waitUntil { self.model.mode == .clarify && !self.model.busy }
-            guard bubble.isVisible else { throw PetError.message("Clarification must be shown automatically") }
+            guard bubble.isVisible, let pendingID = model.task?.id else { throw PetError.message("Clarification must be shown automatically") }
+            let tasks: [PetTaskItem] = try await model.api.request("/v1/tasks")
+            let pending = NSMenu()
+            fillTaskMenu(pending, tasks: tasks.filter { $0.group == "pending" }, empty: "没有待处理任务")
+            guard let row = pending.items.first(where: { $0.representedObject as? String == pendingID }),
+                  row.title.contains("待补充"), row.title.contains("这份摘要给谁看") else {
+                throw PetError.message("The pending menu must show the original task and its clarification question")
+            }
+            model.draft = "草稿保留"
+            await model.select(pendingID)
+            struct SmokeNotification: Decodable { let taskId: String?; let readAt: Double? }
+            let notifications: [SmokeNotification] = try await model.api.request("/v1/notifications")
+            let taskNotifications = notifications.filter { $0.taskId == pendingID }
+            guard model.task?.id == pendingID, model.draft == "草稿保留",
+                  !taskNotifications.isEmpty, taskNotifications.allSatisfy({ $0.readAt != nil }) else {
+                throw PetError.message("Reattaching pending work must retain the draft and mark the original task notifications read")
+            }
+            model.draft = ""
             inputChecks += try await verifyInputContinuity()
             try snapshot(directory + "/02-question.png")
             model.draft = "面向项目同事，控制在一页，保留来源。"

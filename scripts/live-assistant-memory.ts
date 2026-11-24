@@ -3,23 +3,25 @@ import { createInterface } from 'node:readline';
 import { mkdir,readFile,writeFile } from 'node:fs/promises';
 import { join,resolve } from 'node:path';
 import { createServer } from 'node:net';
+import { Agent, request } from 'node:http';
 import { createHash,randomUUID } from 'node:crypto';
 import { createModels,createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { cloudModels } from '../src/models.js';
 import { serve } from '../src/server.js';
-import { createClient } from '../src/client.js';
+import { createClient, type TaskStatus } from '../src/client.js';
+import { ChatSession } from '../src/chat.js';
 import { conversationAnswer } from '../src/conversation.js';
 import { until } from '../test/helpers.js';
 
 let apiKey = process.env.SILICONFLOW_API_KEY ?? '';
 if (!apiKey) {
-  assert(process.stdin.isTTY,'Set SILICONFLOW_API_KEY or use a terminal.');
-  process.stdin.setRawMode(true);
+  assert(process.stdin.isTTY || process.argv.includes('--credential-stdin'),'Set SILICONFLOW_API_KEY or use a terminal.');
+  if (process.stdin.isTTY) process.stdin.setRawMode(true);
   const input = createInterface({input:process.stdin,terminal:false});
   console.log('READY_FOR_CREDENTIAL');
   apiKey = await new Promise<string>(done => input.once('line',done));
-  input.close();process.stdin.setRawMode(false);process.stdin.pause();
+  input.close();if (process.stdin.isTTY) process.stdin.setRawMode(false);process.stdin.pause();
 }
 assert(apiKey.trim(),'A credential is required.');
 const modelId = process.env.SILICONFLOW_MODEL ?? 'Qwen/Qwen2.5-7B-Instruct';
@@ -34,14 +36,19 @@ if (!original) {
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
 let requests=0;
+let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
   assert(requests < 32,'Live request limit reached.');requests++;
   return {...input,maxTokens:Math.min(input?.maxTokens ?? 1536,1536),signal:AbortSignal.any([deadline,...(input?.signal ? [input.signal] : [])])};
 };
+function observe<T>(stream: T): T {
+  onModelRequest?.();
+  return stream;
+}
 const models = createModels();
 models.setProvider(createProvider({id:'siliconflow',models:[model],baseUrl:model.baseUrl,
   auth:{apiKey:{name:'SiliconFlow live validation',resolve:async()=>({auth:{apiKey}})}},
-  api:{stream:(selected,context,config)=>native.stream(selected,context,options(config)),streamSimple:(selected,context,config)=>native.streamSimple(selected,context,options(config))}}));
+  api:{stream:(selected,context,config)=>observe(native.stream(selected,context,options(config))),streamSimple:(selected,context,config)=>observe(native.streamSimple(selected,context,options(config)))}}));
 const directory = resolve('.harness/live-assistant-memory',randomUUID());
 const home = join(directory,'home'),alpha=join(directory,'alpha'),beta=join(directory,'beta');
 await Promise.all([home,join(directory,'.git'),join(alpha,'.git'),join(beta,'.git')].map(path=>mkdir(path,{recursive:true})));
@@ -53,6 +60,7 @@ const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow'
 let server=await serve(config,{models,discovery:{home,timezone:'America/New_York'}});
 const client=createClient(config);
 const results:Record<string,{passed:boolean;detail?:string}>={};
+const evidence: Record<string, unknown> = {};
 const tasks=new Set<string>();
 const selectedCases=(process.env.KADA_LIVE_CASES ?? '').split(',').filter(Boolean);
 async function check(name:string,work:()=>Promise<void>) {
@@ -68,11 +76,9 @@ async function chat(workspace:string,prompt:string) {
   assert.equal(status.goal,undefined);
   return {status,answer:status.messages.map(conversationAnswer).filter(text=>text!==undefined).at(-1) ?? '',memory:await server.runtime.taskMemory(task.id)};
 }
-let initialId:string|undefined;
 try {
   await check('F01-F04-memory-scope-correction-forget',async()=>{
     const first=await chat(alpha,'请按日报 language 偏好用一句话问候我；调用 user_memory_search 选择 work 域查询“内部代号”，然后包括查到的代号。不要修改记忆。');
-    initialId=first.status.id;
     assert.match(first.answer,/[\u4e00-\u9fff]/,'chinese_project_reply');assert.match(first.answer,/COMET_7391/,'project_code_injected');
     const second=await chat(beta,'请按日报 language 偏好用一句话问候我。不要修改记忆。');
     assert.match(second.answer,/[A-Za-z]/,'english_project_reply');assert(!second.answer.includes('COMET_7391'),'cross_project_code_excluded');
@@ -90,15 +96,100 @@ try {
     const previous=await server.runtime.taskMemory(first.status.id);
     assert(previous.references.some(reference=>reference.factId===fact.id && reference.revision===fact.revision));
   });
-  await check('F05-F06-handoff-and-read-notification',async()=>{
-    const task=await server.runtime.create('You must call task_blocked with reason "Synthetic missing input" and question "Which filename?". Do not guess a filename.',alpha);tasks.add(task.id);
-    await until(()=>server.runtime.status(task.id),status=>status.status==='waiting_user',90_000);
-    assert((await server.runtime.list('pending')).some(item=>item.id===task.id && item.summary.includes('Which filename')));
-    const notification=(await server.runtime.notifications()).find(item=>item.taskId===task.id)!;assert(notification);
-    await server.runtime.readNotification(notification.id);
+  await check('F05-F07-concurrent-handoff-notifications-and-artifacts',async()=>{
+    const create = async (workspace:string, objective:string, acceptance:unknown[] = []) => {
+      const task = await client.request<{id:string}>('/v1/tasks','POST',{confirmed:true,workspace,objective,acceptance});
+      tasks.add(task.id);
+      return task;
+    };
+    const artifacts = { 'result.json': '{"total":42,"currency":"USD"}', 'summary.md': '# Summary\nTotal: USD 42' };
+    const [waiting, delivery] = await Promise.all([
+      create(alpha,'Call task_blocked with reason "Synthetic missing input" and question "Which filename?". Do not guess a filename.'),
+      create(beta,`Use the write tool twice to create these two files with the exact content in this JSON map: ${JSON.stringify(artifacts)}. Then call task_submit with summary "Total verified", artifacts ["result.json", "summary.md"], and no additional criteria. Do not modify other files.`,[
+        {type:'json_value',path:'result.json',pointer:'/total',equals:42},
+        {type:'json_value',path:'result.json',pointer:'/currency',equals:'USD'},
+        {type:'file_contains',path:'summary.md',text:'Total: USD 42'},
+      ]),
+    ]);
+    const [pending, delivered] = await Promise.all([
+      until(()=>server.runtime.status(waiting.id),status=>status.status==='waiting_user',90_000),
+      until(()=>server.runtime.status(delivery.id),status=>status.status==='completed',90_000),
+    ]);
+    assert.equal(pending.goal?.question,'Which filename?');
+    const notifications = await server.runtime.notifications();
+    const waitingEvents = notifications.filter(item=>item.taskId===waiting.id);
+    const deliveryEvents = notifications.filter(item=>item.taskId===delivery.id);
+    assert.equal(waitingEvents.filter(item=>item.event==='waiting_user').length,1);
+    assert.equal(deliveryEvents.filter(item=>item.event==='completed').length,1);
+    const files = await client.request<{path:string;sha256:string;bytes:number;state:string}[]>(`/v1/tasks/${delivery.id}/artifacts`);
+    assert.equal(files.length,2);
+    for (const [name,expected] of Object.entries(artifacts)) {
+      const path = join(delivered.workspace,name);
+      const bytes = await readFile(path);
+      assert.deepEqual(bytes,Buffer.from(expected),`exact artifact bytes: ${name}`);
+      assert(files.some(file=>file.path===path && file.state==='verified' && file.bytes===bytes.length && file.sha256===createHash('sha256').update(bytes).digest('hex')));
+    }
     await server.close();server=await serve(config,{models,discovery:{home,timezone:'America/New_York'}});
-    assert((await server.runtime.notifications()).find(item=>item.id===notification.id)!.readAt!==null);
-    if(initialId) assert.equal((await server.runtime.status(initialId)).id,initialId);
+    const terminalOutput: string[] = [];
+    const terminal = new ChatSession(createClient(config),event=>terminalOutput.push(event.text));
+    await terminal.handle('/tasks pending');
+    assert(terminalOutput.some(line=>line.includes(waiting.id) && line.includes('Which filename?')));
+    assert(!terminalOutput.some(line=>line.includes(delivery.id)));
+    await terminal.handle(`/attach ${waiting.id}`);
+    assert.equal(terminal.taskId,waiting.id);
+    assert(terminalOutput.some(line=>line.includes('Which filename?')));
+    await terminal.handle(`/attach ${delivery.id}`);
+    await terminal.handle('/files');
+    assert.equal(terminal.taskId,delivery.id);
+    assert(files.every(file=>terminalOutput.some(line=>line.includes(file.path))));
+    const reopened = await server.runtime.notifications();
+    assert([...waitingEvents,...deliveryEvents].every(event=>reopened.some(row=>row.id===event.id && row.readAt!==null)));
+    evidence.handoff = {pendingTaskId:waiting.id,deliveredTaskId:delivery.id,reopenedOriginalTasks:true,readNotificationsRetained:true,
+      artifacts:Object.entries(artifacts).map(([name,content])=>({name,bytes:Buffer.byteLength(content),sha256:createHash('sha256').update(content).digest('hex')}))};
+  });
+  await check('F14-in-flight-client-disconnect',async()=>{
+    const paired = await client.request<{token:string}>('/v1/remote/devices','POST',{accountId:'live-reconnect',deviceId:'live-phone'});
+    const headers = {Authorization:'Bearer '+paired.token,'Content-Type':'application/json'};
+    const base = `http://127.0.0.1:${port}/remote/api/conversations/live-disconnect`;
+    const messageId = 'during-model';
+    const expected = 'RECONNECT_421';
+    const payload = JSON.stringify({messageId,text:`This is a plain greeting test. Reply with only ${expected}. No tools or tasks.`});
+    const agent = new Agent({keepAlive:true});
+    const before = requests;
+    let destroyed = false;
+    try {
+      await new Promise<void>((done,reject)=>{
+        const outgoing = request(base+'/messages',{method:'POST',agent,headers:{...headers,'Content-Length':Buffer.byteLength(payload)},signal:AbortSignal.timeout(25_000)},response=>response.resume());
+        outgoing.on('error',error=>{if (!destroyed) reject(error);});
+        onModelRequest = () => {
+          const active = outgoing.socket;
+          if (!active || active.destroyed) { reject(new Error('No live remote client connection')); return; }
+          destroyed = true;
+          agent.destroy();
+          done();
+        };
+        outgoing.end(payload);
+      });
+    } finally {
+      onModelRequest = undefined;
+      agent.destroy();
+    }
+    assert(destroyed);
+    const retry = await fetch(base+'/messages',{method:'POST',headers,body:payload,signal:deadline});
+    assert.equal(retry.status,200,'submission is already owned by the original request');
+    const originalReceipt = await retry.json();
+    tasks.add(originalReceipt.taskId);
+    const recovered = await (await fetch(base+'?messageId='+messageId,{headers,signal:deadline})).json();
+    assert.equal(recovered.requestId,originalReceipt.requestId);
+    assert.equal(recovered.taskId,originalReceipt.taskId);
+    const status = await until(()=>client.request<TaskStatus>(`/v1/tasks/${recovered.taskId}`),item=>item.status==='answered',90_000);
+    const history = await (await fetch(base,{headers,signal:deadline})).json();
+    assert.equal(history.taskId,recovered.taskId);
+    assert.equal(history.receipts.length,1);
+    assert.equal(history.messages.filter((message:{role:string;text:string})=>message.role==='assistant' && message.text.trim()===expected).length,1);
+    assert.equal(new Set(history.messages.map((message:{sequence:number})=>message.sequence)).size,history.messages.length);
+    assert.equal(requests-before,1,'reconnect must not generate a second response');
+    evidence.disconnect = {taskId:status.id,requestId:recovered.requestId,clientClosedDuringRequest:true,modelRequests:requests-before,assistantReplies:1};
   });
   await check('F11-F12-reminder-and-change-aware-routine',async()=>{
     const parsed=await models.complete(model,{messages:[{role:'user',timestamp:Date.now(),content:'Return ONLY strict JSON: {"kind":"once","at":"2026-12-01T17:00:00-05:00"}. This is a synthetic reminder at 5pm New York on December 1, 2026. No markdown.'}]},{maxTokens:100});
@@ -151,8 +242,10 @@ try {
   const usage=[];
   for(const id of tasks) {try {const state=await server.runtime.status(id);usage.push({id,tokens:state.budget.totalTokens,input:state.budget.inputTokens,output:state.budget.outputTokens,cached:state.budget.cachedTokens});} catch { /* A failed admission has no task ledger. */ }}
   await server.close();
-  const report={at:new Date().toISOString(),model:modelId,customCatalog:!original,selection:selectedCases,fullSuite:selectedCases.length===0,passed:Object.values(results).every(result=>result.passed),maxRequests:32,modelRequests:requests,maxOutputTokensPerRequest:1536,estimatedCostUsd:null,results,tasks:usage,totalTaskTokens:usage.reduce((sum,item)=>sum+item.tokens,0),note:'Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate.'};
-  await mkdir(resolve('docs/experiments'),{recursive:true});await writeFile(resolve('docs/experiments/2026-11-23-assistant-memory'+(selectedCases.length ? '-focused' : '')+'.json'),JSON.stringify(report,null,2)+'\n');
+  const report={at:new Date().toISOString(),model:modelId,customCatalog:!original,selection:selectedCases,fullSuite:selectedCases.length===0,passed:Object.values(results).every(result=>result.passed),maxRequests:32,modelRequests:requests,maxOutputTokensPerRequest:1536,estimatedCostUsd:null,results,evidence,tasks:usage,totalTaskTokens:usage.reduce((sum,item)=>sum+item.tokens,0),note:'Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate.'};
+  await mkdir(resolve('docs/experiments'),{recursive:true});
+  await writeFile(join(directory,'result.json'),JSON.stringify(report,null,2)+'\n');
+  console.log(`Evidence: ${join(directory,'result.json')}`);
   console.log(JSON.stringify({passed:report.passed,requests,totalTaskTokens:report.totalTaskTokens}));
   if(!report.passed) process.exitCode=1;
 }

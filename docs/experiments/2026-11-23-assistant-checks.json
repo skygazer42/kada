@@ -1,14 +1,21 @@
 {
   "date": "2026-11-23",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "branch": "codex/assistant-plan",
-  "status": "implemented-with-required-real-driver-test-pending",
+  "status": "implemented-with-native-macos-and-hour-scale-validation-pending",
   "referenceLinks": 37,
   "verification": {
     "assistant": {
       "command": "npm run test:assistant",
-      "tests": 96,
-      "passed": 96,
+      "tests": 98,
+      "passed": 98,
+      "failed": 0,
+      "skipped": 0
+    },
+    "windowsFull": {
+      "command": "npm run check",
+      "tests": 204,
+      "passed": 204,
       "failed": 0,
       "skipped": 0
     },
@@ -51,17 +58,17 @@
       "artifactTaskApi": true,
       "emptyFileChinesePath": true,
       "notepadWindowTitleObserved": true,
-      "directoryWindowObserved": false
+      "directoryWindowObserved": true
     }
   },
   "acceptance": {
     "M": "M01-M08 passed",
-    "H": "H01-H06 target/API checks passed; a Chinese empty file opened in Notepad; folder window and macOS GUI remain unverified",
+    "H": "H01-H06 passed, including Windows Notepad and Explorer windows; macOS GUI remains unverified",
     "C": "C01-C06 passed",
     "R": "R01-R04 passed, including process kill, sleeping process and queued cancellation",
     "D": "D01-D06 passed, including compaction, ownership and stale links",
     "U01": "fake driver passed",
-    "U02": "pending user selection of an existing driver",
+    "U02": "passed on the selected agent-browser local page, with takeover, return, and transport interruption recovery verified",
     "A": "A01-A02 passed",
     "S": "S01-S02 passed"
   },
@@ -71,14 +78,20 @@
     "remote": "2026-11-23-assistant-remote-final.json",
     "handoffRoutinesDelegation": "2026-11-23-assistant-memory-attempt-2.json",
     "nativePiComparison": "2026-11-23-native-pi-baseline.json",
+    "memoryHandoffComparison": "2026-11-23-memory-handoff-comparison.json",
+    "concurrentHandoff": "2026-11-23-assistant-live-handoff.json",
+    "disconnectDuringModelRequest": "2026-11-23-assistant-live-disconnect.json",
+    "computerHandoff": "2026-11-23-computer-browser-live.json",
+    "computerReconnect": "2026-11-23-computer-browser.json",
     "amountUsd": null,
     "containsEarlierFailedAttempts": true
   },
   "limitations": [
-    "Real computer driver remains disabled pending selection",
+    "The selected browser driver was verified on a synthetic local page. Normal computer configuration is opt-in.",
     "macOS build/GUI and physical-phone HTTPS access unverified",
-    "Parallel Windows whole-repo run observed 149 pass/16 fail/1 cancelled/4 skipped; some path assertions subsequently repaired and individually passed",
-    "One Qwen 7B baseline case failed both arms; no completion-rate or cost improvement claim",
+    "Earlier parallel Windows tests failed; the current serial full suite passes",
+    "The two recorded model comparisons each failed delivery in both arms; completion-rate and cost benefits are unproven",
+    "Naturally hour-scale successful execution is unverified",
     "Usage is checked at request boundaries and may overshoot within an admitted request"
   ]
 }

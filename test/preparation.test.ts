@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { setTimeout } from "node:timers/promises";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type ToolResultMessage, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, UsageDoc, type JsonObject } from "@earendil-works/pi-durable";
@@ -106,16 +105,20 @@ test("waiting, pause and reopen do not imply consent or consume the execution ti
   const f = await scriptedFixture(c => {
     if (hasTool(c, "task_prepare")) { preparations++; return call("task_prepare", proposal({ budget: { maxEstimatedCostUsd: .25, maxDurationMs: 20000 } })); }
     return call("task_submit", { summary: "Inspected answer.", artifacts: [], criteria: [{ id: 1, status: "passed", evidence: "已阅读最终答复" }] });
-  }, { maxDurationMs: 80 });
+  });
   let reopened: LocalRuntime | undefined;
   try {
     const task = await f.runtime.create("Draft a task.", f.workspace, [], { prepare: true });
     const before = await until(() => f.runtime.status(task.id), s => s.status === "awaiting_confirmation");
     await f.runtime.close();
-    await setTimeout(120);
+    const metaPath = join(f.directory, "tasks", task.id, "task.json"), expiredAt = Date.now() - 1;
+    const saved = JSON.parse(await readFile(metaPath, "utf8"));
+    await writeFile(metaPath, JSON.stringify({ ...saved, deadlineAt: expiredAt }));
     reopened = new LocalRuntime(f.settings, { models: f.models });
     await reopened.recover();
-    assert.equal((await reopened.status(task.id)).status, "awaiting_confirmation");
+    const recovered = await reopened.status(task.id);
+    assert.equal(recovered.status, "awaiting_confirmation");
+    assert.equal(recovered.deadlineAt, expiredAt, "waiting does not expire the task or silently refill its saved timer");
     assert.equal(preparations, 1);
     await reopened.pause(task.id);
     await assert.rejects(reopened.confirm(task.id, 1, before.briefDigest!), /paused/);

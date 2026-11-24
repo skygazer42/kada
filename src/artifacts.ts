@@ -50,7 +50,7 @@ export function openLocalPath(path: string, kind: 'file' | 'directory', reveal =
     : process.platform === 'darwin' ? [...(folder && kind === 'file' ? ['-R'] : []),path]
     : [folder && kind === 'file' ? dirname(path) : path];
   return new Promise<void>((resolve,reject) => {
-    const child = spawn(command,args,{detached:true,stdio:'ignore',windowsHide:true});
+    const child = spawn(command,args,{detached:true,stdio:'ignore'});
     child.once('error',reject);
     child.once('spawn',() => { child.unref(); resolve(); });
   });

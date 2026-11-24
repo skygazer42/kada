@@ -83,8 +83,10 @@ test('credential lines, private keys, conversations, out-of-home links, binary a
     await f.put('.codex/auth.json', 'PRIVATE_AUTH_SENTINEL');
     await f.put('USER.md', 'x'.repeat(65537));
     await f.put('MEMORY.md', 'binary\0source');
-    const outside = join(f.directory, 'AGENTS.md'); await writeFile(outside, 'OUTSIDE_SOURCE_SENTINEL');
-    await symlink(outside, join(f.home, 'AGENTS.md'));
+    const outside = join(f.directory, 'outside-memory'); await mkdir(outside);
+    await writeFile(join(outside, 'MEMORY.md'), 'OUTSIDE_SOURCE_SENTINEL');
+    if (process.platform === 'win32') await symlink(outside, join(f.home, '.codex/memories'), 'junction');
+    else await symlink(join(outside, 'MEMORY.md'), join(f.home, 'AGENTS.md'));
     await f.discovery.view();
     const all = JSON.stringify(await f.read()) + await readFile(join(f.data, 'local-context/user-evidence.md'), 'utf8');
     for (const marker of ['PRIVATE_CREDENTIAL_SENTINEL', 'PRIVATE_JSON_CREDENTIAL_SENTINEL', 'PRIVATE_KEY_BODY_SENTINEL', 'PRIVATE_CONVERSATION_SENTINEL', 'PRIVATE_AUTH_SENTINEL', 'OUTSIDE_SOURCE_SENTINEL', 'binary']) assert(!all.includes(marker), marker);

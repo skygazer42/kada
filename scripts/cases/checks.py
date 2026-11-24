@@ -86,7 +86,7 @@ def grade(case,root):
   def replay():
    with tempfile.TemporaryDirectory(prefix='reconcile-probe-')as t:
     p=Path(t);shutil.copytree(root/'inputs',p/'new inputs');src=p/'new inputs';orders=rows(src/'orders.csv');orders=[x for x in orders if x['order_id']!='0001'];orders.append(dict(order_id='0000',currency='JPY',ordered_cents='0',status='active'))
-    with (src/'orders.csv').open('w',newline='')as f:w=csv.DictWriter(f,fieldnames=list(orders[0]));w.writeheader();w.writerows(orders)
+    with (src/'orders.csv').open('w',encoding='utf-8',newline='')as f:w=csv.DictWriter(f,fieldnames=list(orders[0]));w.writeheader();w.writerows(orders)
     out=p/'new output';subprocess.run([sys.executable,str(d/'reconcile.py'),str(src),str(out)],check=True,capture_output=True,timeout=15)
     e,t,e2=reconciliation(src);equal(rows(out/'reconcile.csv'),e);equal(rows(out/'currency_totals.csv'),t);equal(rows(out/'exceptions.csv'),e2)
   check('parameterized rerun with deleted order/new zero currency',replay)
@@ -145,12 +145,12 @@ def grade(case,root):
    with tempfile.TemporaryDirectory(prefix='handover-probe-')as t:
     p=Path(t);shutil.copytree(root/'inputs',p/'new inputs');src=p/'new inputs';out=p/'output';script=d/'package.py'
     def run():subprocess.run([sys.executable,str(script),str(src),str(out)],check=True,capture_output=True,timeout=15)
-    run();first=(out/'bundle.zip').read_bytes();run();equal((out/'bundle.zip').read_bytes(),first);(src/'public/team 0/item 0.md').unlink();(src/'public/new zero.txt').write_text('');run();contents(src,out)
+    run();first=(out/'bundle.zip').read_bytes();run();equal((out/'bundle.zip').read_bytes(),first);(src/'public/team 0/item 0.md').unlink();(src/'public/new zero.txt').write_text('',encoding='utf-8');run();contents(src,out)
   check('repeatable ZIP and incremental new/deleted sources',replay)
  elif case=='code_import':check('strict transactions, revisions, null/zero/false and SQL IDs',lambda:import_checks(root))
  else:
   def node_checks():
-   p=subprocess.run(['node',str(HERE/'code-checks.mjs'),case,str(root)],capture_output=True,text=True,timeout=15)
+   p=subprocess.run(['node',str(HERE/'code-checks.mjs'),case,str(root)],capture_output=True,text=True,encoding='utf-8',timeout=15)
    assert p.returncode==0,(p.stdout+p.stderr)[-2400:]
   check('independent async/path/cache probes',node_checks)
  return dict(passed=all(x['passed']for x in checks),checks=checks)

@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-23",
+  "driver": "agent-browser 0.38.1",
+  "nativeMcp": {
+    "discovery": true,
+    "aboutBlankToolCall": "Request timed out at 15000 ms",
+    "localPageToolCall": "Request timed out at 30000 ms"
+  },
+  "cliLocalPage": {
+    "open": true,
+    "snapshot": true
+  },
+  "resolution": "Use the installed CLI through a bounded SDK stdio adapter for the selected synthetic localhost page.",
+  "noDriverInstalled": true,
+  "modelRequests": 0,
+  "monetaryCostUsd": null
+}

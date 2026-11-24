@@ -10,7 +10,7 @@ test("workspace rejects parent traversal and symlink escape for both reads and w
   try {
     const files = await Workspace.open(join(directory, "workspace"));
     await writeFile(join(directory, "outside.txt"), "private");
-    await symlink(directory, join(files.root, "escape"));
+    await symlink(directory, join(files.root, "escape"), process.platform === "win32" ? "junction" : "dir");
     await assert.rejects(() => files.read("../outside.txt"), /outside/);
     await assert.rejects(() => files.read("escape/outside.txt"), /Symlinks/);
     await assert.rejects(() => files.write("escape/new/file.txt", "bad"), /Symlinks/);

@@ -1,0 +1,50 @@
+{
+  "at": "2026-11-24T02:50:27.124Z",
+  "mode": "scripted-model",
+  "realDriver": true,
+  "localPageOnly": true,
+  "fixture": "computer-browser-JHCWoa",
+  "limits": {
+    "modelRequests": 16,
+    "maxOutputTokens": 768,
+    "elapsedMs": 360000
+  },
+  "modelRequests": 0,
+  "usage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cachedTokens": 0,
+    "totalTokens": 0,
+    "estimatedCostUsd": null
+  },
+  "stage": "independent-verification",
+  "proof": {
+    "driverKind": "installed agent-browser CLI",
+    "cliVersion": "agent-browser 0.38.1",
+    "driver": {
+      "name": "kada-agent-browser-cli",
+      "version": "1.0.0"
+    },
+    "model": {
+      "provider": "computer-browser-fixture",
+      "modelId": "scripted"
+    },
+    "agentActionsBlockedDuringTakeover": true,
+    "operator": "automated host-side operator using the selected real MCP driver",
+    "driverTransportForcedInterruption": true,
+    "sameTaskAfterDriverReconnect": true,
+    "oldLeaseRejectedAfterReturn": true,
+    "pageAndFileMatch": true,
+    "applicationUpdates": [
+      "operator-step",
+      "assistant-final"
+    ],
+    "taskId": "9d7cc356-fb40-490a-ab0a-c7083eedb9e1",
+    "successfulSnapshots": 3,
+    "freshObservationSawOperatorChange": true,
+    "taskTokens": 36961,
+    "finalSnapshotIncludesVerifiedResult": true,
+    "completed": true,
+    "browserClosedWithWorkloadAborted": true
+  }
+}

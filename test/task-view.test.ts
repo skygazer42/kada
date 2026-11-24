@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { serve } from "../src/server.js";
@@ -120,4 +120,71 @@ test("task progress follows live Pi tools and saved steps across terminal reatta
       assert.deepEqual(recovered.progress, stopped.progress);
     } finally { await reopened.close(); }
   } finally { released = true; await server.close(); await f.close(); }
+});
+
+test("owner task view and terminal show pinned Skill reads, script outcomes, and total consumption", async () => {
+  const skillFile = Promise.withResolvers<string>();
+  const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  const f = await scriptedFixture(async context => {
+    const results = context.messages.filter(message => message.role === "toolResult");
+    if (!results.some(result => result.toolName === "read")) return call("read", { path: await skillFile.promise });
+    const runs = results.filter(result => result.toolName === "run_skill_script");
+    if (runs.length < 2) return call("run_skill_script", {
+      name: "archive-fixture", path: "archive.mjs", args: [runs.length ? "retry" : "PRIVATE_FAILED_INPUT"],
+    });
+    return call("task_submit", { summary: "Archive checked", artifacts: [] });
+  });
+  const socket = createServer();
+  await new Promise<void>(done => socket.listen(0, "127.0.0.1", done));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(done => socket.close(() => done()));
+  const config = { ...f.settings, port };
+  const server = await serve(config, { models: f.models });
+  const client = createClient(config);
+  try {
+    for (const name of ["archive-fixture", "unused-fixture"]) {
+      const source = join(f.workspace, ".pi", "skills", name);
+      await mkdir(source, { recursive: true });
+      await writeFile(join(source, "SKILL.md"), `---\nname: ${name}\ndescription: Synthetic archive method.\n---\nRun archive.mjs.\n`);
+      await writeFile(join(source, "archive.mjs"), 'console.log("PRIVATE_SCRIPT_OUTPUT");\nprocess.exit(process.argv[2] === "retry" ? 0 : 1);\n');
+    }
+    const task = await server.runtime.create("Run the archive method", f.workspace, [], {
+      skills: [{ name: "archive-fixture" }, { name: "unused-fixture" }],
+    });
+    const pins = task.skillPins!.pins;
+    skillFile.resolve(pins[0]!.filePath);
+    const status = await until(() => server.runtime.status(task.id), value => ["completed", "failed", "blocked"].includes(value.status));
+    assert.equal(status.status, "completed", status.goal?.reason ?? undefined);
+    const executions = status.goal?.skills?.executions;
+    assert.deepEqual(executions?.map(execution => execution.ok), [false, true]);
+
+    const view = await client.request<TaskView>(`/v1/tasks/${task.id}/view`);
+    assert.deepEqual(view.skills, {
+      pins: pins.map(({ name, version }, index) => ({ name, version, read: index === 0 })),
+      executions, saved: null, externalReadCount: 0,
+    });
+    assert.deepEqual(view.consumption, {
+      inputTokens: status.budget.inputTokens, cachedTokens: status.budget.cachedTokens,
+      cacheWriteTokens: status.budget.cacheWriteTokens, outputTokens: status.budget.outputTokens,
+      compactions: status.compactions, reworks: status.goal?.reworks,
+    });
+    assert.equal(view.budget.totalTokens, status.budget.totalTokens);
+    assert.equal(view.budget.estimatedCostUsd, status.budget.estimatedCostUsd);
+    assert(!JSON.stringify(view.skills).includes("filePath"));
+    assert(!JSON.stringify(view.skills).includes("PRIVATE_"));
+
+    const events: ChatEvent[] = [];
+    const terminal = new ChatSession(client, event => events.push(event));
+    await terminal.handle(`/attach ${task.id}`);
+    events.length = 0;
+    await terminal.handle("/status");
+    const output = events.map(event => event.text).join("\n");
+    assert(output.includes(`已读取 ${pins[0]!.name}@${pins[0]!.version}`));
+    assert(output.includes(`未读取 ${pins[1]!.name}@${pins[1]!.version}`));
+    assert(output.includes(`执行失败 ${pins[0]!.name}@${pins[0]!.version} archive.mjs`));
+    assert(output.includes(`执行成功 ${pins[0]!.name}@${pins[0]!.version} archive.mjs`));
+    assert(output.includes(`累计 token：${status.budget.totalTokens}`));
+    assert(!output.includes(pins[0]!.filePath));
+    assert(!output.includes("PRIVATE_"));
+  } finally { await server.close(); await f.close(); }
 });

@@ -67,7 +67,7 @@ def prepare(case,root):
   inputs=['acceptance','project/tests/'+('test_importer.py'if case=='code_import'else'main.test.mjs'),'project/package.json','inputs','TASK.md'];outputs=['project/src','deliverables']
  else:inputs=['acceptance','inputs','TASK.md'];outputs=['deliverables']
  # The agent gets visible smoke checks; full semantic criteria/probes remain outside its workspace.
- visible=Path(__file__).with_name('visible.py').read_text();put(root,'acceptance/check.py',f'CASE={case!r}\n'+visible)
+ visible=Path(__file__).with_name('visible.py').read_text(encoding='utf-8');put(root,'acceptance/check.py',f'CASE={case!r}\n'+visible)
  objective=req+'\n\n这是资料、权限、交付和额度已确认的开发验证任务，不需要等待确认或询问继续。只在当前工作区修改约定产物；可按需读取共同人工方法、已提供的Skill清单/原始目录和现有Python/Node依赖。不要安装包、联网、启用驱动或读取其它运行、评估器、配置、凭据。模型与主/子相同，最多1个子Agent，无独立评审。原始'+','.join(inputs)+'必须原样。固定命令python3 acceptance/check.py；在task_verify用criterionId=1，最后task_submit覆盖标准1并引用proof。总额度USD0.08，时限5分钟。可用python3、Node、已安装的openpyxl和python-docx；不要复制预期答案或放宽检查。'
  put(root,'TASK.md',objective)
  spec={'id':case,'objective':objective,'inputs':inputs,'outputs':outputs,'command':'python3 acceptance/check.py'};put(root,'.case.json',json.dumps(spec,ensure_ascii=False,indent=2))

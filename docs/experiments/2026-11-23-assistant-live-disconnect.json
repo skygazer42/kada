@@ -1,0 +1,58 @@
+{
+  "at": "2026-11-24T04:00:39.236Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "F05",
+    "F14"
+  ],
+  "fullSuite": false,
+  "passed": false,
+  "maxRequests": 32,
+  "modelRequests": 7,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F05-F07-concurrent-handoff-notifications-and-artifacts": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    },
+    "F14-in-flight-client-disconnect": {
+      "passed": true
+    }
+  },
+  "evidence": {
+    "disconnect": {
+      "taskId": "4d227829-a969-47dc-afdd-d06e876aca6d",
+      "requestId": "b13ef103-33c2-4f34-9818-fb0cd65b1fed",
+      "clientClosedDuringRequest": true,
+      "modelRequests": 1,
+      "assistantReplies": 1
+    }
+  },
+  "tasks": [
+    {
+      "id": "68479f9f-9f91-4e34-aefb-e4dd4de714a1",
+      "tokens": 4585,
+      "input": 4453,
+      "output": 132,
+      "cached": 0
+    },
+    {
+      "id": "739c4a91-2d84-4b19-91ec-5b2387eb6fbd",
+      "tokens": 24091,
+      "input": 5193,
+      "output": 338,
+      "cached": 18560
+    },
+    {
+      "id": "4d227829-a969-47dc-afdd-d06e876aca6d",
+      "tokens": 1952,
+      "input": 1947,
+      "output": 5,
+      "cached": 0
+    }
+  ],
+  "totalTaskTokens": 30628,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

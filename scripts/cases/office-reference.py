@@ -59,9 +59,9 @@ with zipfile.ZipFile(out/'bundle.zip','w',compression=zipfile.ZIP_DEFLATED)as z:
 (out/'summary.md').write_text('客户资料交接包。源文件保留，私有及草稿文件排除，空文件/目录保留，按类别和内容哈希去重；映射涵盖全部输入文件。',encoding='utf-8')
 '''
 if CASE=='office_reconcile':
- (d/'reconcile.py').write_text(RECONCILE);subprocess.run([sys.executable,str(d/'reconcile.py'),str(root/'inputs'),str(d)],check=True)
+ (d/'reconcile.py').write_text(RECONCILE,encoding='utf-8');subprocess.run([sys.executable,str(d/'reconcile.py'),str(root/'inputs'),str(d)],check=True)
 elif CASE=='office_handover':
- (d/'package.py').write_text(PACKAGE);subprocess.run([sys.executable,str(d/'package.py'),str(root/'inputs'),str(d/'package')],check=True)
+ (d/'package.py').write_text(PACKAGE,encoding='utf-8');subprocess.run([sys.executable,str(d/'package.py'),str(root/'inputs'),str(d/'package')],check=True)
 elif CASE=='office_minutes':
  shutil.copy(Path(__file__).parent/'golden/brief.docx',d/'brief.docx')
  rows=[['A1','完成接口清单','林华','2026-10-28','done','notes/2026-10-26.md;updates.csv'],['A2','完成测试计划','张敏','2026-11-04','open','notes/2026-10-26.md;updates.csv'],['A3','完成法务确认','','','open','notes/2026-10-26.md'],['A4','发送旧版报价','周宁','2026-10-30','cancelled','notes/2026-10-26.md;updates.csv'],['A5','完成演示','林华','2026-11-03','open','notes/2026-10-26.md;updates.csv'],['A6','完成数据导入','周宁','2026-11-02','blocked','notes/2026-10-26.md;updates.csv']]

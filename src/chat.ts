@@ -136,7 +136,7 @@ export class ChatSession {
         if (command === "/status") {
           const status = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`);
           const goal = status.goal;
-          this.info(`${status.interaction === "chat" ? "对话" : "任务"}：${status.id}\n状态：${status.status === "completed" ? "已交付（核验范围见下）" : status.status}\n子 Agent：${status.activeWorkerCount} 个运行 / ${status.workerCount} 个累计\n输出目录：${status.workspace}\n${usageText(status)}${goal ? `\n目标修订：${goal.revision}\n自动返工：${goal.reworks}${goal.reason ? `\n原因：${goal.reason}` : ""}${goal.question ? `\n待回答：${goal.question}` : ""}` : ""}\n${verificationText(status)}${goal?.brief ? `\n${briefText(status)}${goal.confirmation ? "\n该版本已确认；预算不会因普通消息或重复确认补充。" : ""}` : ""}`);
+          this.info(`${status.interaction === "chat" ? "对话" : "任务"}：${status.id}\n状态：${status.status === "completed" ? "已交付（核验范围见下）" : status.status}\n子 Agent：${status.activeWorkerCount} 个运行 / ${status.workerCount} 个累计\n输出目录：${status.workspace}\n${usageText(status)}${goal ? `\n目标修订：${goal.revision}${goal.reason ? `\n原因：${goal.reason}` : ""}${goal.question ? `\n待回答：${goal.question}` : ""}` : ""}\n${verificationText(status)}${goal?.brief ? `\n${briefText(status)}${goal.confirmation ? "\n该版本已确认；预算不会因普通消息或重复确认补充。" : ""}` : ""}`);
           const progress = progressText(status);
           if (progress) this.info(progress);
         } else {

@@ -82,11 +82,11 @@ test("byte inspection still rejects directories, traversal and symlinks, includi
   try {
     const workspace = await Workspace.open(join(directory, "workspace"));
     await writeFile(join(directory, "outside"), "private");
-    await writeFile(join(workspace.root, "inside"), "result");
     await mkdir(join(workspace.root, "folder"));
-    await symlink("inside", join(workspace.root, "link"));
-    await symlink(directory, join(workspace.root, "escape"));
-    for (const path of ["../outside", "link", "escape/outside", "folder", "missing"]) {
+    await writeFile(join(workspace.root, "folder/inside"), "result");
+    await symlink(join(workspace.root, "folder"), join(workspace.root, "link"), process.platform === "win32" ? "junction" : "dir");
+    await symlink(directory, join(workspace.root, "escape"), process.platform === "win32" ? "junction" : "dir");
+    for (const path of ["../outside", "link/inside", "escape/outside", "folder", "missing"]) {
       await assert.rejects(() => workspace.inspect(path));
       assert.equal((await checkArtifacts(workspace, [], [{ type: "file_exists", path }])).passed, false);
     }

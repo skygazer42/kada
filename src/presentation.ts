@@ -64,17 +64,39 @@ export function verificationText(status: TaskStatus): string {
   return lines.join("\n");
 }
 
+export function skillRecords(status: TaskStatus) {
+  const skills = status.goal?.skills ?? status.skillPins;
+  const externalReadCount = status.goal?.localSkillReads?.length ?? 0;
+  if (!skills && !externalReadCount) return null;
+  const pins = skills ? skills.pins.map(({ name, version }) => ({
+    name, version, read: skills.loaded.includes(`${name}@${version}`),
+  })) : [];
+  const executions = (skills?.executions ?? []).map(({ name, version, path, sha256, ok, durationMs }) => ({
+    name, version, path, sha256, ok, durationMs,
+  }));
+  const saved = skills?.proposal ? { name: skills.proposal.name, version: skills.proposal.version } : null;
+  return { pins, executions, saved, externalReadCount };
+}
+
 export function usageText(status: TaskStatus): string {
   const budget = status.budget;
   const context = status.contextUsage;
+  const skills = skillRecords(status);
   return [
     budget.priceKnown === false ? '费用未知：此模型未配置价格，请以 token 用量和供应商账单为准。' : `估算费用：$${budget.estimatedCostUsd.toFixed(4)}${budget.costLimit === null ? "" : ` / $${budget.costLimit}`}（Pi 用量估算，非供应商账单）`,
     `累计 token：${budget.totalTokens}${budget.tokenLimit === null ? "；未设累计 token 硬限" : ` / ${budget.tokenLimit}`}`,
     `非缓存输入：${budget.inputTokens}；缓存读取：${budget.cachedTokens}；缓存写入：${budget.cacheWriteTokens ?? 0}；输出：${budget.outputTokens}`,
     context ? `主 Agent 当前上下文：约 ${context.estimatedTokens}${context.contextWindow === null ? "" : ` / ${context.contextWindow}`} token（Pi 估算；不是累计用量）` : "主 Agent 当前上下文：暂无估算。",
     `累计压缩：${status.compactions} 次（主 Agent ${status.rootCompactions ?? status.compactions} 次；总数含子 Agent/评审会话）`,
+    ...(status.goal ? [`自动返工：${status.goal.reworks} 次`] : []),
     ...(status.goal?.learning ? [`试用方法：提供${status.goal.learning.offers.length}个、读取${status.goal.learning.loaded.length}个${status.goal.learning.proposal ? "；已提出1个候选" : ""}。方法读取/提炼费用已含在本任务总额，未独立拆分。${status.goal.learning.notice ? ` ${status.goal.learning.notice}` : ""}`] : []),
-    ...(status.goal?.skills ? [`Pi Skills：提供${status.goal.skills.pins.length}个、读取${status.goal.skills.loaded.length}个${status.goal.skills.proposal ? "；保存1个本地试用" : ""}。读取不等于实际应用；全部费用已含在本任务总额，无额外反思调用。${status.goal.skills.notice ?? ""}`] : []),
-    ...(status.goal?.localSkillReads?.length ? [`外部 Skills：实际读取 ${status.goal.localSkillReads.length} 份清单版本（含准备阶段）；脚本资产仍使用原目录，读取不等于已执行或完整版本固定。费用已含任务总额。`] : []),
+    ...(skills && (skills.pins.length || skills.saved) ? [
+      "Pi Skills（全部费用已含在本任务总额）",
+      ...skills.pins.map(pin => `  ${pin.read ? "已读取" : "未读取"} ${pin.name}@${pin.version}`),
+      ...skills.executions.map(run => `  ${run.ok ? "执行成功" : "执行失败"} ${run.name}@${run.version} ${run.path}（${run.durationMs} ms）`),
+      ...(skills.saved ? [`  已保存本地试用 ${skills.saved.name}@${skills.saved.version}`] : []),
+    ] : []),
+    ...(status.goal?.skills?.notice ? [status.goal.skills.notice] : []),
+    ...(skills?.externalReadCount ? [`外部 Skills：实际读取 ${skills.externalReadCount} 份清单版本（含准备阶段）；脚本资产仍使用原目录，读取不等于已执行或完整版本固定。费用已含任务总额。`] : []),
   ].join("\n");
 }

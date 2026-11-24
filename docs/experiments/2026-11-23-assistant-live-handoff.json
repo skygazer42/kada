@@ -1,0 +1,57 @@
+{
+  "at": "2026-11-24T04:05:32.866Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "F05"
+  ],
+  "fullSuite": false,
+  "passed": true,
+  "maxRequests": 32,
+  "modelRequests": 8,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F05-F07-concurrent-handoff-notifications-and-artifacts": {
+      "passed": true
+    }
+  },
+  "evidence": {
+    "handoff": {
+      "pendingTaskId": "ce1cb9ee-8981-47d1-9b91-b9309834d0b5",
+      "deliveredTaskId": "b1fcfa5a-6d1e-4fd6-a9df-bf29e448af65",
+      "reopenedOriginalTasks": true,
+      "readNotificationsRetained": true,
+      "artifacts": [
+        {
+          "name": "result.json",
+          "bytes": 29,
+          "sha256": "50133e0e29a80bd50434c7e4080c05dee40f624b3c762a2827c6de490a956b96"
+        },
+        {
+          "name": "summary.md",
+          "bytes": 23,
+          "sha256": "152b204ee1d826cc662ba504f95ea8a494cde505c8a9e3dd82b37f49cca45390"
+        }
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "id": "ce1cb9ee-8981-47d1-9b91-b9309834d0b5",
+      "tokens": 10103,
+      "input": 5410,
+      "output": 341,
+      "cached": 4352
+    },
+    {
+      "id": "b1fcfa5a-6d1e-4fd6-a9df-bf29e448af65",
+      "tokens": 29667,
+      "input": 5434,
+      "output": 425,
+      "cached": 23808
+    }
+  ],
+  "totalTaskTokens": 39770,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

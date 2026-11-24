@@ -1,0 +1,18 @@
+{
+  "date": "2026-11-23",
+  "synthetic": true,
+  "model": "scripted Pi model, no live calls",
+  "taskId": "5dce3396-aebc-4221-9351-364b8ba5222a",
+  "throughAuthenticatedArtifactApi": true,
+  "artifactChecks": {
+    "directory": true,
+    "emptyFileBytes": 0,
+    "ChineseNames": true
+  },
+  "observedWindow": {
+    "process": "Notepad",
+    "title": "H05-08614418-空文件.txt - Notepad"
+  },
+  "directoryGuiObserved": false,
+  "computerUse": "Node REPL/sky initialization unavailable: helper setup error then trusted Node exit; no product driver enabled"
+}

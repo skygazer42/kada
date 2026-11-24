@@ -1,0 +1,46 @@
+{
+  "at": "2026-11-24T02:37:19.879Z",
+  "mode": "siliconflow",
+  "realDriver": true,
+  "localPageOnly": true,
+  "fixture": "computer-browser-M4a6JA",
+  "limits": {
+    "modelRequests": 16,
+    "maxOutputTokens": 768,
+    "elapsedMs": 360000
+  },
+  "modelRequests": 12,
+  "usage": {
+    "inputTokens": 5573,
+    "outputTokens": 791,
+    "cachedTokens": 44160,
+    "totalTokens": 50524,
+    "estimatedCostUsd": null
+  },
+  "stage": "independent-verification",
+  "proof": {
+    "driverKind": "installed agent-browser CLI",
+    "cliVersion": "agent-browser 0.38.1",
+    "driver": {
+      "name": "kada-agent-browser-cli",
+      "version": "1.0.0"
+    },
+    "model": {
+      "provider": "siliconflow",
+      "modelId": "deepseek-ai/DeepSeek-V3.2"
+    },
+    "agentActionsBlockedDuringTakeover": true,
+    "operator": "automated host-side operator using the selected real MCP driver",
+    "oldLeaseRejectedAfterReturn": true,
+    "pageAndFileMatch": true,
+    "applicationUpdates": [
+      "operator-step",
+      "assistant-final"
+    ],
+    "taskId": "47f695dd-16ad-43fe-b9ad-148b753faa21",
+    "successfulSnapshots": 3,
+    "taskTokens": 50524,
+    "finalSnapshotIncludesVerifiedResult": true,
+    "completed": true
+  }
+}

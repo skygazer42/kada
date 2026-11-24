@@ -39,7 +39,7 @@ function respond(c: TranscriptContext, options: { invalidProof?: boolean; skipPr
   if ((!offer || rejected) && !results(c, "write").length) return call("write", { path: "deliverables/normalize.mjs", content: script });
   if (!results(c, "bash").length) {
     const method = results(c, "task_method").at(-1)?.content.find(b => b.type === "text");
-    const asset = !rejected && method?.type === "text" ? method.text.split("\n").find(line => line.endsWith("/assets/normalize.mjs")) : undefined;
+    const asset = !rejected && method?.type === "text" ? method.text.split("\n").find(line => line.endsWith(join("assets", "normalize.mjs"))) : undefined;
     return call("bash", { command: `node ${asset ? "'" + asset.replaceAll("'", "'\\''") + "'" : "deliverables/normalize.mjs"} input.json deliverables/result.json` });
   }
   if (!results(c, "task_verify").length) return call("task_verify", spec);
@@ -94,7 +94,7 @@ test("a real Pi task proposes a checked script, reuses it on different inputs, a
     assert.deepEqual(after.goal!.learning!.loaded, next.goal!.learning!.loaded);
     assert.deepEqual(after.goal!.learning!.offers, next.goal!.learning!.offers, "a new global version does not replace pinned task instructions");
     assert.deepEqual(after.budget, next.budget, "reopen does not launch another learning model request or refill budget");
-    assert.equal((await stat(join(f.directory, "learned-methods"))).mode & 0o777, 0o700);
+    if (process.platform !== "win32") assert.equal((await stat(join(f.directory, "learned-methods"))).mode & 0o777, 0o700);
   } finally { await reopened?.close(); await f.close(); }
 });
 

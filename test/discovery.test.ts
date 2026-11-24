@@ -100,7 +100,7 @@ test('missing Agent configurations, malformed files, huge metadata and broken li
     assert.deepEqual((await scanLocalAgents({home:f.home})).agents,[]);
     await f.put('.codex/config.toml','unterminated = "');await f.put('.claude/settings.json','{bad');
     await f.put('.gemini/settings.json','x'.repeat(262145));await f.skill('.agents/skills/good','good');
-    await symlink(join(f.home,'missing'),join(f.home,'.agents/skills/broken'));
+    await symlink(join(f.home,'missing'),join(f.home,'.agents/skills/broken'),process.platform==='win32'?'junction':'dir');
     const value=await scanLocalAgents({home:f.home});assert(value.skills.some(s=>s.name==='good'));
     assert(value.notices.some(n=>n.startsWith('Malformed')));assert(value.notices.some(n=>n.includes('oversized')));
   }finally{await f.close();}
@@ -110,8 +110,8 @@ test('symlink aliases deduplicate and cycles cannot trigger an unbounded native 
   const f=await fixture();
   try{
     await f.skill('.agents/skills/original','one-skill');await mkdir(join(f.home,'.codex/skills'),{recursive:true});
-    await symlink(join(f.home,'.agents/skills/original'),join(f.home,'.codex/skills/alias'));
-    await mkdir(join(f.home,'.agents/skills/cycle'));await symlink(join(f.home,'.agents/skills'),join(f.home,'.agents/skills/cycle/back'));
+    await symlink(join(f.home,'.agents/skills/original'),join(f.home,'.codex/skills/alias'),process.platform==='win32'?'junction':'dir');
+    await mkdir(join(f.home,'.agents/skills/cycle'));await symlink(join(f.home,'.agents/skills'),join(f.home,'.agents/skills/cycle/back'),process.platform==='win32'?'junction':'dir');
     const result=await scanLocalAgents({home:f.home,maxEntries:100,maxMs:1000});assert.equal(result.skills.length,1);
     const limited=await scanLocalAgents({home:f.home,maxEntries:2});assert(limited.notices.some(n=>n.includes('limit')));
   }finally{await f.close();}

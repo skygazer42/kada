@@ -1,5 +1,5 @@
 import type { TaskStatus } from "./client.js";
-import { verificationText } from "./presentation.js";
+import { skillRecords, verificationText } from "./presentation.js";
 import { conversationAnswer } from "./conversation.js";
 
 /** A delivery-oriented projection; no transcript, tool output or independent task state. */
@@ -13,8 +13,14 @@ export function taskView(status: TaskStatus) {
     brief: goal?.brief ?? null, briefDigest: status.briefDigest,
     confirmed: Boolean(goal?.confirmation), question: goal?.question ?? null, reason: goal?.reason ?? status.initializationError ?? null,
     budget: { estimatedCostUsd: status.budget.estimatedCostUsd, costLimit: status.budget.costLimit,priceKnown:status.budget.priceKnown,totalTokens:status.budget.totalTokens },
+    consumption: {
+      inputTokens: status.budget.inputTokens, cachedTokens: status.budget.cachedTokens,
+      cacheWriteTokens: status.budget.cacheWriteTokens, outputTokens: status.budget.outputTokens,
+      compactions: status.compactions, reworks: goal?.reworks ?? 0,
+    },
     resumeBudget: status.resumeBudget,
     progress: { steps: goal?.plan ?? [], tools: status.activeTools },
+    skills: skillRecords(status),
     delegations:status.delegations,
     delivery: status.status === "completed" && goal?.candidate ? {
       summary: goal.candidate.summary, artifacts: goal.candidate.artifacts,

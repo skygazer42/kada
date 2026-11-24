@@ -28,11 +28,11 @@ def run(case,path):
  if case=='office_reconcile':
   p=d/'reconcile.csv'
   def bad_value():
-   with p.open(newline='')as f:r=list(csv.DictReader(f));fields=list(r[0]);r[0]['paid_cents']='999999'
-   with p.open('w',newline='')as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(r)
-  mutation('wrong paid amount',[p],bad_value);script=d/'reconcile.py';mutation('non-reusable no-op script',[script],lambda:script.write_text('pass\n'))
+   with p.open(encoding='utf-8',newline='')as f:r=list(csv.DictReader(f));fields=list(r[0]);r[0]['paid_cents']='999999'
+   with p.open('w',encoding='utf-8',newline='')as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(r)
+  mutation('wrong paid amount',[p],bad_value);script=d/'reconcile.py';mutation('non-reusable no-op script',[script],lambda:script.write_text('pass\n',encoding='utf-8'))
  elif case=='office_minutes':
-  p=d/'actions.csv';mutation('cancelled action reopened',[p],lambda:p.write_text(p.read_text().replace('cancelled','open')))
+  p=d/'actions.csv';mutation('cancelled action reopened',[p],lambda:p.write_text(p.read_text(encoding='utf-8').replace('cancelled','open'),encoding='utf-8'))
   p=d/'brief.docx';mutation('cancelled action in current table',[p],lambda:replace_zip(p,'word/document.xml',lambda b:b.replace(b'>A2<',b'>A4<')))
  elif case=='office_crm':
   p=d/'clean.xlsx'
@@ -47,7 +47,7 @@ def run(case,path):
   p=d/'package/bundle.zip'
   def leak():
    with zipfile.ZipFile(p,'a')as z:z.writestr('private.txt','CASE_PRIVATE_NEVER_COPY')
-  mutation('private material in ZIP',[p],leak);p=d/'package.py';mutation('non-incremental no-op builder',[p],lambda:p.write_text('pass\n'))
+  mutation('private material in ZIP',[p],leak);p=d/'package.py';mutation('non-incremental no-op builder',[p],lambda:p.write_text('pass\n',encoding='utf-8'))
  else:
   p=path/('project/src/importer.py'if case=='code_import'else'project/src/index.mjs')
   substitutions={'code_inventory':[('raw bytes treated as text',"bytes:bytes.length","bytes:bytes.toString('utf8').length"),('zero-byte file dropped','s.isFile()','s.isFile()&&s.size>0')],
@@ -55,16 +55,16 @@ def run(case,path):
    'code_import':[('falsey payload erased',"json.dumps(x['payload'],ensure_ascii=False)","json.dumps(x['payload'] or {},ensure_ascii=False)"),('equal revision overwrites',"old[0]>=x['revision']","old[0]>x['revision']")],
    'code_cache':[('cached body alias',"return structuredClone(previous.body)","return previous.body"),('authenticated response cached',"auth=Object.keys(h).includes('authorization')","auth=false")]}
   for label,old,new in substitutions[case]:
-   assert old in p.read_text(),label;mutation(label,[p],lambda old=old,new=new:p.write_text(p.read_text().replace(old,new)))
+   assert old in p.read_text(encoding='utf-8'),label;mutation(label,[p],lambda old=old,new=new:p.write_text(p.read_text(encoding='utf-8').replace(old,new),encoding='utf-8'))
  if case=='code_pool':
-  p=path/'project/src/index.mjs';original=p.read_text();cleanup="const cleanup=()=>signal?.removeEventListener('abort',onAbort);";assert cleanup in original
-  mutation('actual listener leak on successful completion',[p],lambda:p.write_text(original.replace(cleanup,'const cleanup=()=>{};')))
-  mutation('early failure with active workers',[p],lambda:p.write_text(original.replace('if(!active){cleanup();reject(reason);}','if(active<=1){cleanup();reject(reason);}')))
-  mutation('falsey failure reason forgotten',[p],lambda:p.write_text(original.replace('failed=true;reason=e;','failed=Boolean(e);reason=e;')))
+  p=path/'project/src/index.mjs';original=p.read_text(encoding='utf-8');cleanup="const cleanup=()=>signal?.removeEventListener('abort',onAbort);";assert cleanup in original
+  mutation('actual listener leak on successful completion',[p],lambda:p.write_text(original.replace(cleanup,'const cleanup=()=>{};'),encoding='utf-8'))
+  mutation('early failure with active workers',[p],lambda:p.write_text(original.replace('if(!active){cleanup();reject(reason);}','if(active<=1){cleanup();reject(reason);}'),encoding='utf-8'))
+  mutation('falsey failure reason forgotten',[p],lambda:p.write_text(original.replace('failed=true;reason=e;','failed=Boolean(e);reason=e;'),encoding='utf-8'))
   # Removing a listener twice is harmless: reject leaked listeners, not implementation choices.
-  p.write_text(original.replace(cleanup,"const cleanup=()=>{signal?.removeEventListener('abort',onAbort);signal?.removeEventListener('abort',onAbort);};"))
+  p.write_text(original.replace(cleanup,"const cleanup=()=>{signal?.removeEventListener('abort',onAbort);signal?.removeEventListener('abort',onAbort);};"),encoding='utf-8')
   assert grade(case,path)['passed'],'Idempotent listener cleanup incorrectly rejected'
-  p.write_text(original)
+  p.write_text(original,encoding='utf-8')
  equal=tree(path/'inputs')==before;assert equal,'Preflight changed original inputs'
  current=[(name,tree(path/name))for name in spec['inputs']];assert current==protected
  assert grade(case,path)['passed'],'Mutation restoration failed'

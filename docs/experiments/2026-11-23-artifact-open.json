@@ -1,18 +1,25 @@
 {
   "date": "2026-11-23",
   "synthetic": true,
-  "model": "scripted Pi model, no live calls",
-  "taskId": "5dce3396-aebc-4221-9351-364b8ba5222a",
+  "model": "scripted Pi model; no paid calls",
+  "taskId": "0fb9380c-2569-405d-916f-3f6948f92b6b",
   "throughAuthenticatedArtifactApi": true,
   "artifactChecks": {
     "directory": true,
     "emptyFileBytes": 0,
     "ChineseNames": true
   },
-  "observedWindow": {
-    "process": "Notepad",
-    "title": "H05-08614418-空文件.txt - Notepad"
-  },
-  "directoryGuiObserved": false,
-  "computerUse": "Node REPL/sky initialization unavailable: helper setup error then trusted Node exit; no product driver enabled"
+  "directoryGuiObserved": true,
+  "observedWindows": [
+    {
+      "app": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+      "title": "H05-54c5e5c8-空文件.txt - Notepad"
+    },
+    {
+      "app": "process:C:\\Windows\\explorer.exe",
+      "title": "H05-54c5e5c8-中文目录 - 文件资源管理器"
+    }
+  ],
+  "observation": "These exact windows were returned by sky.list_windows after the authenticated artifact API opened the paths. A later detailed capture found the folder window gone; no claim about its captured content.",
+  "fix": "User-requested app windows no longer use windowsHide:true."
 }

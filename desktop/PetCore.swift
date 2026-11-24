@@ -134,7 +134,31 @@ struct PetTask: Decodable, Equatable {
         return ["revision": brief.revision, "digest": digest]
     }
 }
-struct PetTaskItem: Decodable { let id: String; let objective: String; let status: String }
+struct PetTaskItem: Decodable {
+    let id: String
+    let objective: String
+    let status: String
+    let group: String
+    let summary: String
+
+    var statusLabel: String {
+        switch status {
+        case "awaiting_confirmation": return "待确认"
+        case "waiting_user", "clarifying": return "待补充"
+        case "paused": return "已暂停"
+        case "budget_limited": return "额度已用完"
+        case "blocked", "needs_attention": return "待处理"
+        case "failed": return "失败"
+        case "completed": return "已交付"
+        case "answered": return "已回复"
+        case "cancelled": return "已取消"
+        case "verifying": return "核验中"
+        case "pending": return "等待执行"
+        case "running": return "进行中"
+        default: return status
+        }
+    }
+}
 struct PetCreated: Decodable { let id: String }
 struct PetOK: Decodable { let ok: Bool }
 struct PetHealth: Decodable { let status: String; let version: String; var capabilities: [String]? }
