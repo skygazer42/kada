@@ -339,7 +339,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
   async function history(conversation: Conversation) {
     const status = await taskStatus(conversation);
     const view = status ? taskView(status) : undefined;
-    const messages = status ? await runtime.conversationMessages(conversation.taskId) : [];
+    const history = status ? await runtime.conversationHistory(conversation.taskId) : { messages: [], progressEvents: [] };
     const delivery = status && view?.delivery ? {
       ...view.delivery,
       artifacts: verifiedArtifacts(status, conversation).map(({ snapshot: _snapshot, ...artifact }) => artifact),
@@ -347,7 +347,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     return {
       channel: conversation.channel, accountId: conversation.accountId, deviceId: conversation.deviceId,
       conversationId: conversation.conversationId, taskId: conversation.taskId, title: conversation.title,
-      messages, receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
+      ...history, receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
       task: view ? {
         status: view.status, reason: view.reason, question: view.question, brief: view.brief,
         briefDigest: view.briefDigest, confirmed: view.confirmed, progress: view.progress, delivery, budget:view.budget,

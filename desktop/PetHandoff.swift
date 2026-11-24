@@ -394,10 +394,13 @@ struct PetBubble: View {
             DisclosureGroup(fact.sourceLabel) {
                 VStack(alignment: .leading, spacing: 12) {
                     if let project = fact.project { Text("项目：" + project).textSelection(.enabled) }
+                    if let state = fact.stateLabel { Text("状态 " + state) }
+                    if let revision = fact.revision { Text("版本 " + revision).textSelection(.enabled) }
                     ForEach(Array(fact.evidence.enumerated()), id: \.offset) { _, source in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(source.quote).lineSpacing(5)
                             Text(source.path).textSelection(.enabled)
+                            Text("SHA-256 " + source.sha256)
                             Text("观察于 " + Date(timeIntervalSince1970: source.observedAt / 1000).formatted(date: .abbreviated, time: .shortened))
                         }.textSelection(.enabled)
                     }

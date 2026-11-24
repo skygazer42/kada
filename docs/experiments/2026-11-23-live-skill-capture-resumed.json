@@ -1,0 +1,47 @@
+{
+  "id": "F18",
+  "provider": "siliconflow",
+  "modelId": "deepseek-ai/DeepSeek-V3.2",
+  "passed": true,
+  "stage": "complete",
+  "evidence": {
+    "fixture": ".harness/live-assistant-capture-cbCqHW",
+    "reuse": {
+      "result": 9,
+      "frozenCheck": true,
+      "version": "be1189ce69e0b42fdbe490fe3b33b9baf5e71968461a98b56ff7e79375c4886d",
+      "read": true,
+      "scriptDurationMs": 1247
+    }
+  },
+  "limits": {
+    "requests": 32,
+    "outputTokensPerRequest": 1024,
+    "tokensPerTask": 100000,
+    "elapsedMs": 480000
+  },
+  "modelRequests": 2,
+  "elapsedMs": 64955,
+  "usage": {
+    "inputTokens": 555,
+    "outputTokens": 271,
+    "cachedTokens": 11136,
+    "totalTokens": 11962,
+    "errors": 0
+  },
+  "money": null,
+  "tasks": {
+    "reuse": {
+      "status": "completed",
+      "compactions": 0,
+      "reworks": 0,
+      "inputTokens": 8370,
+      "outputTokens": 1534,
+      "totalTokens": 40112,
+      "toolErrors": [
+        "bash",
+        "bash"
+      ]
+    }
+  }
+}

@@ -135,11 +135,33 @@ struct PetTask: Decodable, Equatable {
     }
 }
 struct PetTaskItem: Decodable {
+    struct Budget: Decodable {
+        let totalTokens: Int
+        let estimatedCostUsd: Double?
+        let costLimit: Double?
+    }
+
     let id: String
     let objective: String
     let status: String
     let group: String
     let summary: String
+    let step: String?
+    let budget: Budget?
+    let artifacts: [String]?
+
+    var handoffDetails: String {
+        var lines = [objective]
+        if summary != status { lines.append(summary) }
+        if let step = step, step != summary { lines.append("当前步骤 " + step) }
+        if let budget = budget {
+            let cost = budget.estimatedCostUsd.map { "$" + String(format: "%.4f", $0) } ?? "费用未知"
+            let limit = budget.costLimit.map { " / $" + PetBudget.money($0) } ?? ""
+            lines.append("用量 \(budget.totalTokens) token · \(cost)\(limit)")
+        }
+        if let artifacts = artifacts, !artifacts.isEmpty { lines.append("产物 " + artifacts.joined(separator: "、")) }
+        return lines.joined(separator: "\n")
+    }
 
     var statusLabel: String {
         switch status {
@@ -177,6 +199,8 @@ struct PetMemoryFact: Decodable, Identifiable, Equatable {
     let scope: String
     let project: String?
     let certainty: String
+    let state: String?
+    let revision: String?
     let evidence: [PetMemoryCitation]
     let origin: String?
     var domainKey: String { ["general", "work", "life"].contains(domain ?? "") ? domain! : "unknown" }
@@ -185,7 +209,16 @@ struct PetMemoryFact: Decodable, Identifiable, Equatable {
     }
     var sourceLabel: String {
         let name = evidence.first.map { $0.path.hasPrefix("pi-task:") || $0.path.hasPrefix("user:") ? "你的对话" : ($0.path as NSString).lastPathComponent } ?? "来源"
-        return name + " · " + (scope == "project" ? "项目线索" : "全局线索") + (certainty == "inferred" ? " · 待核实" : "")
+        return name + " · " + (scope == "project" ? "项目线索" : "全局线索") + (certainty == "inferred" ? " · 待核实" : " · 来源明述")
+    }
+    var stateLabel: String? {
+        switch state {
+        case "active": return "有效"
+        case "stale": return "已过期"
+        case "superseded": return "已替换"
+        case "forgotten": return "已遗忘"
+        default: return state
+        }
     }
 }
 struct PetMemoryView: Decodable {
@@ -227,9 +260,15 @@ final class PetAPI {
         options.urlCache = nil
         session = URLSession(configuration: options)
     }
-    func request<T: Decodable>(_ path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> T {
+    func request<T: Decodable>(_ path: String, queryItems: [URLQueryItem] = [], method: String = "GET", body: [String: Any]? = nil) async throws -> T {
         guard (1...65535).contains(configuration.port), path.hasPrefix("/"), !path.contains(".."),
-              let url = URL(string: "http://127.0.0.1:\(configuration.port)\(path)") else { throw PetError.message("本地连接地址无效。") }
+              var components = URLComponents(string: "http://127.0.0.1:\(configuration.port)\(path)") else { throw PetError.message("本地连接地址无效。") }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+            // The daemon uses form decoding, where a literal plus represents a space.
+            components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
+        guard let url = components.url else { throw PetError.message("本地连接地址无效。") }
         var request = URLRequest(url: url)
         request.httpMethod = method
         let token: String

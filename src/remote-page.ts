@@ -77,6 +77,10 @@ export const remotePage = String.raw`<!doctype html>
         <button type="button" id="new">New chat</button>
       </div>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
+      <details id="task-history" class="panel task" hidden>
+        <summary>Task history</summary>
+        <ol id="task-events"></ol>
+      </details>
       <section id="messages" role="log" aria-label="Conversation messages"></section>
       <section id="uncertain" class="panel receipt" hidden aria-label="Message receipt"></section>
       <form id="composer" class="panel">
@@ -103,6 +107,8 @@ const signout = field("signout");
 const status = field("status");
 const conversations = field("conversation");
 const task = field("task");
+const taskHistory = field("task-history");
+const taskEvents = field("task-events");
 const messages = field("messages");
 const uncertain = field("uncertain");
 const prompt = field("prompt");
@@ -116,6 +122,7 @@ let pending = new Map();
 let busy = false;
 let refreshVersion = 0;
 let shownMessages = [];
+let lastProgressSequence = 0;
 let shownTask = "";
 let disconnected = false;
 
@@ -190,8 +197,12 @@ function choose(id) {
     conversations.value = conversationId;
   }
   shownMessages = [];
+  lastProgressSequence = 0;
   shownTask = "";
   messages.replaceChildren();
+  taskEvents.replaceChildren();
+  taskHistory.hidden = true;
+  taskHistory.open = false;
   task.hidden = true;
   refresh().catch(report);
   updateComposer();
@@ -384,6 +395,15 @@ async function refresh() {
     element("p", message.text, article);
   }
   shownMessages = snapshot;
+  for (const event of view.progressEvents || []) {
+    if (event.sequence <= lastProgressSequence) continue;
+    const row = element("li", event.label + " · ", taskEvents);
+    const occurred = new Date(event.timestamp);
+    const time = element("time", occurred.toLocaleString(), row);
+    time.dateTime = occurred.toISOString();
+    lastProgressSequence = event.sequence;
+    taskHistory.hidden = false;
+  }
   const taskSnapshot = JSON.stringify(view.task);
   if (taskSnapshot !== shownTask) {
     shownTask = taskSnapshot;

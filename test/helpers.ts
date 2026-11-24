@@ -1,7 +1,11 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { demoModels } from "../src/models.js";
 import { LocalRuntime, type RuntimeOptions } from "../src/runtime.js";
 import { prepareDemo } from "../src/demo.js";
@@ -52,6 +56,54 @@ export async function until<T>(read: () => Promise<T>, done: (value: T) => boole
     if (Date.now() > end) throw new Error(`Timed out waiting for condition. Last value: ${JSON.stringify(value).slice(0, 4000)}`);
     await setTimeout(25);
   }
+}
+
+const recoveryWorkerTimeoutMs = 45_000;
+export const recoveryTestTimeoutMs = 2 * recoveryWorkerTimeoutMs + 10_000;
+
+export function startRecoveryWorker(fixture: URL, phase: "create" | "recover", ...args: string[]) {
+  const path = fileURLToPath(fixture);
+  const child = spawn(process.execPath, ["--import", "tsx", path, phase, ...args], {
+    stdio: ["ignore", "pipe", "pipe"], timeout: recoveryWorkerTimeoutMs, killSignal: "SIGKILL",
+  });
+  const stdout: string[] = [];
+  let stderr = "";
+  let spawnError: Error | undefined;
+  const readyLine = Promise.withResolvers<string | undefined>();
+  createInterface({ input: child.stdout }).on("line", line => {
+    stdout.push(line);
+    if (line.startsWith('{"type":"ready"')) readyLine.resolve(line);
+  });
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+  child.once("error", error => { spawnError = error; });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+    child.once("close", (code, signal) => {
+      readyLine.resolve(undefined);
+      resolve({ code, signal });
+    });
+  });
+  const diagnostics = async () => {
+    const { code, signal } = await closed;
+    return `${phase} worker ${path} exited with ${signal ?? code} (timeout ${recoveryWorkerTimeoutMs}ms)\n${spawnError ?? ""}\nstdout: ${stdout.join("\n")}\nstderr: ${stderr}`;
+  };
+  return {
+    async ready() {
+      const line = await readyLine.promise;
+      if (line === undefined) assert.fail(`Worker did not become ready. ${await diagnostics()}`);
+      return JSON.parse(line);
+    },
+    async complete() {
+      const { code } = await closed;
+      if (code !== 0) assert.fail(`Worker did not complete. ${await diagnostics()}`);
+      const line = stdout.at(-1);
+      if (line === undefined) assert.fail(`Worker did not report a result. ${await diagnostics()}`);
+      return JSON.parse(line);
+    },
+    async stop() {
+      if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      return (await closed).signal;
+    },
+  };
 }
 
 export async function scriptedFixture(respond: (context: TranscriptContext, signal?: AbortSignal) => AssistantMessage | Promise<AssistantMessage>, config: Partial<Config> = {}, extensions: (workspace: string) => Extension[] | Promise<Extension[]> = () => [], options: Omit<RuntimeOptions, "models" | "extensions"> = {}) {

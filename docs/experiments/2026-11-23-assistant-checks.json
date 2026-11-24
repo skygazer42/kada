@@ -14,9 +14,10 @@
     },
     "windowsFull": {
       "command": "npm run check",
-      "tests": 204,
-      "passed": 204,
+      "tests": 213,
+      "passed": 213,
       "failed": 0,
+      "cancelled": 0,
       "skipped": 0
     },
     "typecheck": true,
@@ -73,7 +74,7 @@
     "H": "H01-H06 passed, including Windows Notepad and Explorer windows; macOS GUI remains unverified",
     "C": "C01-C06 passed",
     "R": "R01-R04 passed, including process kill, sleeping process and queued cancellation",
-    "D": "D01-D06 passed, including compaction, ownership and stale links",
+    "D": "D01-D06 passed, including progress replay after reconnect, compaction, ownership and stale links",
     "U01": "fake driver passed",
     "U02": "passed on the selected agent-browser local page, with takeover, return, and transport interruption recovery verified",
     "A": "A01-A02 passed",
@@ -92,6 +93,12 @@
     "disconnectDuringModelRequest": "2026-11-23-assistant-live-disconnect.json",
     "computerHandoff": "2026-11-23-computer-browser-live.json",
     "computerReconnect": "2026-11-23-computer-browser.json",
+    "skillCaptureAttempts": [
+      "2026-11-23-live-skill-capture-attempt-2.json",
+      "2026-11-23-live-skill-capture-attempt-3.json",
+      "2026-11-23-live-skill-capture-attempt-4.json"
+    ],
+    "skillCaptureResumed": "2026-11-23-live-skill-capture-resumed.json",
     "amountUsd": null,
     "containsEarlierFailedAttempts": true
   },

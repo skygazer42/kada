@@ -3,7 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { acceptanceChecks, CheckSchema, type AcceptanceCheck } from "./checks.js";
-import { GoalDoc, goalEvent, goalExtension, plain, type GoalState } from "./goal.js";
+import { changeGoal, goalExtension, plain, type GoalState } from "./goal.js";
 import type { PathSnapshot, Workspace } from "./workspace.js";
 
 export type TaskBudget = { maxEstimatedCostUsd: number; maxDurationMs: number; maxTotalTokens?: number };
@@ -40,6 +40,7 @@ const lines = (minimum = 0, maximum = 16) => Type.Array(text, { minItems: minimu
 export function preparationExtension(workspace: Workspace, defaults: TaskBudget, options: {
   /** Ordinary conversations create business goal state only when this tool is used. */
   startGoal?: () => Promise<Pick<GoalState, "objective" | "userMessages" | "tokenLimit" | "costLimit">>;
+  remote?: boolean;
 } = {}) {
   return defineExtension({ name: options.startGoal ? "local_conversation" : "local_preparation", tools: [
     createReadTool(),
@@ -68,8 +69,8 @@ export function preparationExtension(workspace: Workspace, defaults: TaskBudget,
           }
         }
         const initial = options.startGoal ? await options.startGoal() : undefined;
-        const result = await api.commit(async tx => {
-          const state = await tx.doc(GoalDoc), key = String(api.taskId);
+        const result = await api.commit(tx => changeGoal(tx, (state, record) => {
+          const key = String(api.taskId);
           if (!state.appliedTools[key]) {
             if (state.confirmation || state.phase !== "working") throw new Error("The task is not accepting preparation changes");
             for (const criterion of args.criteria) if (criterion.verification && (criterion.method !== "check" || !criterion.verification.command.trim())) {
@@ -80,17 +81,17 @@ export function preparationExtension(workspace: Workspace, defaults: TaskBudget,
             if (merged.size > 32) throw new Error("At most 32 acceptance checks per task");
             if (initial && !state.initialized) {
               Object.assign(state, initial, { initialized: true });
-              goalEvent(state, "created", state.objective);
+              record("created", state.objective);
             }
             state.brief = { ...args, revision: (state.brief?.revision ?? 0) + 1, checks, budget: budgetValues({ ...defaults, ...args.budget }) };
             state.phase = args.questions.length ? "clarifying" : "awaiting_confirmation";
             state.question = args.questions.length ? args.questions.join("\n") : null;
             state.reason = args.questions.length ? "Material information is missing; no execution has been authorized." : "Review the task brief and total budget before execution.";
             state.appliedTools[key] = true;
-            goalEvent(state, state.phase, `${state.brief.revision}: ${args.outcome}`);
+            record(state.phase, `${state.brief.revision}: ${args.outcome}`);
           }
           return plain({ revision: state.brief?.revision, phase: state.phase });
-        }, ctx);
+        }, options.remote ? api.conversationId : undefined), ctx);
         return { output: [{ type: "text", text: JSON.stringify(result) }], control: { terminate: true } };
       },
     }),

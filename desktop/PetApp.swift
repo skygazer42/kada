@@ -24,7 +24,18 @@ import UniformTypeIdentifiers
     let appearanceStore: PetAppearanceStore
     var showBubble: ((Bool) -> Void)?
     var hideBubble: (() -> Void)?
-    private var selectedID: String?
+    private var selectedID: String? {
+        didSet {
+            guard selectedID != oldValue else { return }
+            memoryRequest?.cancel()
+            memoryRequest = nil
+            memory = nil
+            memoryLoading = false
+            memoryError = nil
+            if showingMemory { loadMemory() }
+        }
+    }
+    private var memoryRequest: Task<Void, Never>?
     private var lastAttention = ""
     private var restoringSelectedTask = false
     private var generation = 0
@@ -129,6 +140,7 @@ import UniformTypeIdentifiers
         do {
             let value = try await api.task(id)
             guard generation == revision else { return }
+            showingMemory = false
             if selectedID != id {
                 selectedID = id
                 draft = ""; editing = false; attachments = []; resumePrompt = false
@@ -139,7 +151,6 @@ import UniformTypeIdentifiers
             failures = 0
             lastAttention = value.attentionKey
             error = nil
-            showingMemory = false
             showBubble?(true)
             let _: PetOK = try await api.request("/v1/tasks/\(id)/notifications/read", method: "POST", body: [:])
         } catch {
@@ -149,9 +160,10 @@ import UniformTypeIdentifiers
         }
     }
     func newGoal() {
+        showingMemory = false
         generation += 1; selectedID = nil; lastAttention = ""; restoringSelectedTask = false
         UserDefaults.standard.removeObject(forKey: api.configuration.defaultsKey)
-        task = nil; draft = ""; attachments = []; editing = false; error = nil; resumePrompt = false; showingMemory = false
+        task = nil; draft = ""; attachments = []; editing = false; error = nil; resumePrompt = false
         showBubble?(true)
     }
     func submit() {
@@ -202,12 +214,28 @@ import UniformTypeIdentifiers
     func openMemory() {
         NSApp.keyWindow?.makeFirstResponder(nil)
         showingMemory = true
+        loadMemory()
+    }
+    private func loadMemory() {
         guard !memoryLoading else { return }
+        let id = selectedID
+        let workspace = task?.id == id ? task?.workspace : nil
         memoryLoading = true; memoryError = nil
-        Task {
-            defer { memoryLoading = false }
-            do { memory = try await api.request("/v1/environment/memory") }
-            catch { memoryError = "暂时无法读取用户记忆。可以重试，当前输入和任务会保留。" }
+        memoryRequest = Task {
+            do {
+                var scope = workspace
+                if scope == nil, let id = id { scope = try await api.task(id).workspace }
+                try Task.checkCancellation()
+                let query = scope.map { [URLQueryItem(name: "workspace", value: $0)] } ?? []
+                let result: PetMemoryView = try await api.request("/v1/environment/memory", queryItems: query)
+                try Task.checkCancellation()
+                memory = result
+            } catch {
+                guard !Task.isCancelled else { return }
+                memoryError = "暂时无法读取用户记忆。可以重试，当前输入和任务会保留。"
+            }
+            memoryRequest = nil
+            memoryLoading = false
         }
     }
     func retry() {
@@ -742,13 +770,13 @@ private final class PetPanel: NSPanel {
         if tasks.isEmpty { menu.addItem(withTitle: empty, action: nil, keyEquivalent: "") }
         for task in tasks {
             let objective = String(task.objective.prefix(28)).replacingOccurrences(of: "\n", with: " ")
-            let summary = String(task.summary.prefix(24)).replacingOccurrences(of: "\n", with: " ")
             var title = "\(task.statusLabel) · \(objective)"
-            if task.group == "pending" && task.summary != task.status { title += " · \(summary)" }
+            let detail = task.group == "pending" && task.summary != task.status ? task.summary : task.step
+            if let detail = detail { title += " · " + String(detail.prefix(24)).replacingOccurrences(of: "\n", with: " ") }
             let item = NSMenuItem(title: title, action: #selector(attachTask(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = task.id
-            item.toolTip = task.summary == task.status ? task.objective : "\(task.objective)\n\(task.summary)"
+            item.toolTip = task.handoffDetails
             menu.addItem(item)
         }
     }
@@ -837,12 +865,32 @@ private final class PetPanel: NSPanel {
             model.submit()
             try await waitUntil { self.model.mode == .chat && self.model.task?.reply?.text == "好的，有需要再叫我。" && !self.model.busy }
             try snapshot(directory + "/09-chat.png")
+            guard let chatWorkspace = model.task?.workspace else { throw PetError.message("Missing chat workspace") }
+            let chatRoot = URL(fileURLWithPath: chatWorkspace, isDirectory: true)
+            let projectPreference = "偏好在评审中采用紫色标记"
+            try Data().write(to: chatRoot.appendingPathComponent(".kada-project"))
+            try Data((projectPreference + "。\n").utf8).write(to: chatRoot.appendingPathComponent("AGENTS.md"))
+            model.openMemory()
+            try await waitUntil { !self.model.memoryLoading }
+            guard model.memory?.facts.contains(where: { $0.scope == "project" && $0.text.contains(projectPreference) }) == true else {
+                throw PetError.message("The native memory page must load the selected workspace's own facts")
+            }
+            model.openMemory()
             model.newGoal()
+            guard model.memory == nil, !model.memoryLoading else { throw PetError.message("Leaving a task must clear its memory and pending refresh") }
             try snapshot(directory + "/01-goal.png")
             model.draft = "把资料整理成一份中文摘要，交付 report.md，保留原文件。"
             model.submit()
             try await waitUntil { self.model.mode == .clarify && !self.model.busy }
             guard bubble.isVisible, let pendingID = model.task?.id else { throw PetError.message("Clarification must be shown automatically") }
+            model.openMemory()
+            try await waitUntil { !self.model.memoryLoading }
+            guard let projectFacts = model.memory?.facts,
+                  projectFacts.contains(where: { $0.scope == "global" && $0.text.contains("偏好简洁中文") }),
+                  !projectFacts.contains(where: { $0.text.contains(projectPreference) }) else {
+                throw PetError.message("Switching tasks must keep applicable global memory and exclude the first workspace's facts")
+            }
+            model.showingMemory = false
             let tasks: [PetTaskItem] = try await model.api.request("/v1/tasks")
             let pending = NSMenu()
             fillTaskMenu(pending, tasks: tasks.filter { $0.group == "pending" }, empty: "没有待处理任务")

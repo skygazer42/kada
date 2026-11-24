@@ -97,11 +97,13 @@ import AppKit
             try expect(refused, "invalid visible budget fields cannot be submitted")
         }
         let memoryJSON = """
-        {"enabled":true,"updatedAt":1234,"facts":[{"id":"f1","text":"偏好中文","category":"preferences","scope":"project","certainty":"inferred","evidence":[{"path":"/tmp/USER.md","quote":"偏好中文","sha256":"hash","observedAt":1234}]}],"notices":[]}
+        {"enabled":true,"updatedAt":1234,"facts":[{"id":"f1","text":"偏好中文","category":"preferences","scope":"project","certainty":"inferred","state":"active","revision":"fact-version","evidence":[{"path":"/tmp/USER.md","quote":"偏好中文","sha256":"hash","observedAt":1234}]}],"notices":[]}
         """
         let memory = try JSONDecoder().decode(PetMemoryView.self, from: Data(memoryJSON.utf8))
         try expect(memory.facts.first?.sourceLabel == "USER.md · 项目线索 · 待核实", "memory UI preserves project scope and uncertainty")
         try expect(memory.facts.first?.evidence.first?.quote == "偏好中文", "memory UI receives the actual quoted evidence")
+        try expect(memory.facts.first?.stateLabel == "有效" && memory.facts.first?.revision == "fact-version", "memory UI receives the current fact state and revision")
+        try expect(memory.facts.first?.evidence.first?.sha256 == "hash", "memory UI can display the version of the cited source")
         let lifeJSON = """
         {"enabled":true,"facts":[{"id":"f2","text":"喜欢旅行","category":"life","domain":"life","scope":"project","project":"/tmp/travel","certainty":"inferred","evidence":[]}],"notices":[]}
         """
@@ -114,6 +116,12 @@ import AppKit
         let portrait = try JSONDecoder().decode(PetMemoryView.self, from: Data(portraitJSON.utf8))
         try expect(portrait.organizedFacts.map(\.id) == ["f3"] && portrait.sourceFacts.map(\.id) == ["f4"], "organized portrait and raw clues are displayed separately")
         try expect(portrait.profile == "/tmp/user-memory.md" && memory.profile == nil && memory.sourceFacts.count == 1, "old daemons remain decodable and full profile can be opened")
+
+        let taskItemJSON = """
+        {"id":"t1","objective":"提交报告","status":"completed","group":"delivered","summary":"报告已送达","step":"核对报告","budget":{"totalTokens":810,"estimatedCostUsd":null,"costLimit":0.25},"artifacts":["report.md"]}
+        """
+        let taskItem = try JSONDecoder().decode(PetTaskItem.self, from: Data(taskItemJSON.utf8))
+        try expect(taskItem.handoffDetails.contains("核对报告") && taskItem.handoffDetails.contains("810 token") && taskItem.handoffDetails.contains("$0.25") && taskItem.handoffDetails.contains("report.md"), "native task menu can show the step, budget and delivered files without opening the task")
 
         let profileDirectory = directory.appendingPathComponent("appearance", isDirectory: true)
         let store = PetAppearanceStore(directory: profileDirectory)

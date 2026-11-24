@@ -4,7 +4,7 @@ import type { ModelRef } from './config.js';
 import { modelCostKnown, validateModel } from './models.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
-export type ModelCheckError = 'unknown_model' | 'auth' | 'rate_limit' | 'timeout' | 'unreachable' | 'provider_error';
+export type ModelCheckError = 'unknown_model' | 'missing_credentials' | 'auth' | 'rate_limit' | 'timeout' | 'unreachable' | 'provider_error';
 type ProbeResult = { status: 'available' } | { status: 'unavailable'; code: ModelCheckError };
 export type ModelCheck = { checkedAt: string; code?: ModelCheckError; message?: string } & ProbeResult;
 export type ModelProbe = (model: Model<Api>, signal: AbortSignal) => Promise<ProbeResult>;
@@ -12,7 +12,8 @@ type SavedSettings = { model?: ModelRef; checks: Record<string, ModelCheck> };
 
 const messages: Record<ModelCheckError, string> = {
   unknown_model: 'Unknown model. Check the installed Pi model catalog.',
-  auth: 'The provider rejected or could not find its credentials. Check Pi sign-in or the provider environment variable.',
+  missing_credentials: 'No provider credentials are configured. Sign in through Pi or set the provider environment variable.',
+  auth: 'The provider rejected or could not validate its credentials. Check Pi sign-in or the provider environment variable.',
   rate_limit: 'The provider is rate limited or has insufficient quota. Check the provider account and retry.',
   timeout: 'The model check timed out. Retry when the provider is reachable.',
   unreachable: 'Could not reach the provider. Check the connection and retry.',
@@ -22,6 +23,7 @@ const messages: Record<ModelCheckError, string> = {
 function errorCode(error: unknown): ModelCheckError {
   // Provider error bodies may include request values, so classify them without exposing them.
   const text = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  if (/^(Provider is not configured|No API key for provider):/i.test(text)) return 'missing_credentials';
   if (/\b(401|403)\b|unauthori[sz]ed|forbidden|credentials?|api[ _-]?key|sign.in|authenticat/i.test(text)) return 'auth';
   if (/\b(429|402)\b|rate.limit|quota|billing/i.test(text)) return 'rate_limit';
   if (/\b404\b|model.{0,30}(not found|does not exist|unavailable)|unknown model/i.test(text)) return 'unknown_model';

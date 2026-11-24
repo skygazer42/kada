@@ -1,0 +1,66 @@
+{
+  "id": "F18",
+  "provider": "siliconflow",
+  "modelId": "deepseek-ai/DeepSeek-V3.2",
+  "passed": false,
+  "stage": "verify_pinned_reuse",
+  "evidence": {
+    "fixture": ".harness/live-assistant-capture-cbCqHW",
+    "source": {
+      "result": 6,
+      "frozenCheck": true
+    },
+    "capture": {
+      "name": "fixture-invoice-total",
+      "version": "be1189ce69e0b42fdbe490fe3b33b9baf5e71968461a98b56ff7e79375c4886d",
+      "sourceReceiptMatched": true,
+      "modelRequests": 0
+    },
+    "rollback": {
+      "disabledForNewTasks": true
+    }
+  },
+  "limits": {
+    "requests": 32,
+    "outputTokensPerRequest": 1024,
+    "tokensPerTask": 100000,
+    "elapsedMs": 480000
+  },
+  "modelRequests": 14,
+  "elapsedMs": 480080,
+  "usage": {
+    "inputTokens": 14612,
+    "outputTokens": 2659,
+    "cachedTokens": 37888,
+    "totalTokens": 55159,
+    "errors": 1
+  },
+  "money": null,
+  "tasks": {
+    "source": {
+      "status": "completed",
+      "compactions": 0,
+      "reworks": 0,
+      "inputTokens": 6797,
+      "outputTokens": 1396,
+      "totalTokens": 27009,
+      "toolErrors": [
+        "bash",
+        "bash",
+        "read"
+      ]
+    },
+    "reuse": {
+      "status": "pending",
+      "compactions": 0,
+      "reworks": 0,
+      "inputTokens": 7815,
+      "outputTokens": 1263,
+      "totalTokens": 28150,
+      "toolErrors": [
+        "bash",
+        "bash"
+      ]
+    }
+  }
+}

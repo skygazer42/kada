@@ -22,6 +22,45 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+test("memory list shows certainty, state and the versions of each fact and source", async () => {
+  const events: ChatEvent[] = [];
+  const workspace = "E:/project + notes";
+  const client = { healthy: async () => true, async request<T>(path: string): Promise<T> {
+    assert.equal(new URL(path, "http://localhost").searchParams.get("workspace"), workspace);
+    return { facts: [{ id: "memory-1", scope: "project", project: workspace, text: "Use short answers",
+      certainty: "inferred", state: "active", revision: "fact-version", evidence: [
+        { path: "notes.md", quote: "Keep it short", sha256: "source-version" },
+      ] }] } as T;
+  } };
+  await new ChatSession(client, event => events.push(event), workspace).handle("/memory list");
+  const text = events.map(event => event.text).join("\n");
+  assert.match(text, /memory-1.*project.*Use short answers/);
+  assert.match(text, /inferred.*active.*fact-version/);
+  assert.match(text, /notes\.md.*source-version/);
+  assert.match(text, /Keep it short/);
+});
+
+test("task list includes handoff steps, budget and delivered artifacts", async () => {
+  const events: ChatEvent[] = [];
+  const requests: string[] = [];
+  const client = { healthy: async () => true, async request<T>(path: string): Promise<T> {
+    requests.push(path);
+    return [
+      { id: "running-id", status: "running", objective: "Write a report", summary: "Preparing report", step: "Check facts",
+        budget: { totalTokens: 2400, estimatedCostUsd: 0.025, costLimit: 0.1 }, artifacts: [] },
+      { id: "delivered-id", status: "completed", objective: "Deliver a file", summary: "File ready", step: null,
+        budget: { totalTokens: 350, estimatedCostUsd: null, costLimit: null }, artifacts: ["report.md"] },
+    ] as T;
+  } };
+  await new ChatSession(client, event => events.push(event)).handle("/tasks");
+  assert.deepEqual(requests, ["/v1/tasks?filter=all"]);
+  assert.match(events[0]!.text, /Check facts/);
+  assert.match(events[0]!.text, /2400 token.*\$0\.0250.*\$0\.1/);
+  assert.match(events[1]!.text, /File ready/);
+  assert.match(events[1]!.text, /费用未知/);
+  assert.match(events[1]!.text, /report\.md/);
+});
+
 test("a same-version daemon without ordinary-chat support is rejected before any session is created", async () => {
   const f = await demoFixture();
   const server = createHttpServer((_req, res) => {

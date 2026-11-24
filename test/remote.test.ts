@@ -207,6 +207,79 @@ test("D04 polling the original chat returns ordered replies without duplication"
   assert.deepEqual(await view(), after);
 });
 
+test("D04 reconnect replays a resolved wait once across Pi pages and daemon reopen", async (t) => {
+  let phase = "chat";
+  const fixture = await scriptedFixture(() => {
+    if (phase === "chat") return fauxAssistantMessage("Ready to help.");
+    if (phase === "prepare") return tool("task_prepare", {
+      outcome: "Write a synthetic report.", deliverables: ["report.txt"], inputs: [], scope: ["This workspace"],
+      assumptions: [], questions: [], criteria: [{ text: "Inspect report.txt", method: "inspect" }],
+    });
+    if (phase === "wait") return tool("task_blocked", { reason: "PRIVATE_WAIT_REASON", question: "Which heading?" });
+    if (phase === "write") {
+      phase = "submit";
+      return tool("write", { path: "report.txt", content: "Verified report." });
+    }
+    return tool("task_submit", { summary: "Report ready.", artifacts: ["report.txt"],
+      criteria: [{ id: 1, status: "passed", evidence: "Inspected report.txt." }] });
+  });
+  let reopened: LocalRuntime | undefined;
+  t.after(async () => { await reopened?.close(); await fixture.close(); });
+  const owner = pairing();
+  const other = pairing("owner", "other-phone");
+  const devices = [owner.device, other.device];
+  const directory = join(fixture.directory, "remote");
+  const before = await portal(t, fixture.runtime, directory, devices);
+  const path = "/conversations/progress-replay";
+  const receipt = await (await before.call(owner.token, path + "/messages", turn("hello", "Hello."))).json();
+  await until(() => fixture.runtime.status(receipt.taskId), (state) => state.status === "answered");
+  phase = "prepare";
+  await before.call(owner.token, path + "/messages", turn("report", "Create report.txt."));
+  const saved = await until(async () => (await before.call(owner.token, path)).json(), (state) => state.task?.status === "awaiting_confirmation");
+  await before.close();
+  await fixture.runtime.close();
+
+  const storage = await openNodeSqliteStorage(join(fixture.directory, "tasks", receipt.taskId, "session.sqlite"));
+  const harness = await Harness.open(storage, { models: fixture.models, registry: createRegistry() }, ctx);
+  let pageBoundary = 0;
+  try {
+    const root = await harness.root(ctx);
+    await harness.commit(async (tx) => {
+      for (let index = 0; index < 220; index++) {
+        pageBoundary = Number((await tx.appendEntry(root.id, { kind: "test.note", data: { index } })).id);
+      }
+    }, ctx);
+  } finally { await harness.close(ctx); }
+
+  reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+  const runtime = reopened;
+  phase = "wait";
+  await runtime.confirm(receipt.taskId, saved.task.brief.revision, saved.task.briefDigest);
+  await until(() => runtime.status(receipt.taskId), (state) => state.status === "waiting_user");
+  phase = "write";
+  await runtime.followUp(receipt.taskId, "Use a synthetic heading.");
+  await until(() => runtime.status(receipt.taskId), (state) => state.status === "completed");
+  await runtime.close();
+  reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+
+  const after = await portal(t, reopened, directory, devices);
+  const view = await (await after.call(owner.token, path)).json();
+  assert.equal(view.taskId, receipt.taskId);
+  assert.equal(view.task.status, "completed");
+  assert.equal(view.task.question, null);
+  assert.deepEqual(view.messages.slice(0, saved.messages.length), saved.messages);
+  assert.deepEqual(view.progressEvents.slice(0, saved.progressEvents.length), saved.progressEvents);
+  const history = view.progressEvents as { event: string; sequence: number }[];
+  assert.deepEqual(history.map(({ event }) => event), ["created", "awaiting_confirmation", "confirmed", "waiting_user", "user_input", "submitted", "completed"]);
+  const sequences = history.map(({ sequence }) => sequence);
+  assert.deepEqual(sequences, [...new Set(sequences)].sort((a, b) => a - b));
+  assert(sequences[1]! < pageBoundary && sequences[2]! > pageBoundary);
+  assert(!JSON.stringify(history).includes("PRIVATE_WAIT_REASON"));
+  assert(!JSON.stringify(history).includes("Which heading?"));
+  assert.deepEqual((await (await after.call(owner.token, path)).json()).progressEvents, history);
+  assert.equal((await after.call(other.token, path)).status, 404);
+});
+
 test("F14 remote history preserves messages and sequence IDs after native compaction and reopen", async (t) => {
   const fixture = await scriptedFixture((context) => context.messages.some((message) =>
     message.role === "system" && JSON.stringify(message).includes("context summarization assistant"))

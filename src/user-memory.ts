@@ -315,8 +315,17 @@ export class UserMemoryStore {
       }
       const old = value.facts.find(fact => fact.id === id);
       if (!old || !belongs(old, project)) throw new MemoryMutationError(404, "Memory was not found in this workspace.");
-      if (memoryRevision(old) !== input.expectedRevision) {
-        throw new MemoryMutationError(409, "Memory changed. Read the current version before saving.", { ...structuredClone(old), revision: memoryRevision(old) });
+      if (old.state === "superseded" || old.state === "forgotten" || memoryRevision(old) !== input.expectedRevision) {
+        // Corrections are appended in order, so a replacement can extend an earlier replacement's lineage.
+        const replaced = new Set([old.id]);
+        let latest = old;
+        for (const fact of value.facts) {
+          if (fact.scope === old.scope && fact.project === old.project && fact.supersedes?.some(id => replaced.has(id))) {
+            replaced.add(fact.id);
+            latest = fact;
+          }
+        }
+        throw new MemoryMutationError(409, "Memory changed. Read the current version before saving.", { ...structuredClone(latest), revision: memoryRevision(latest) });
       }
       const related = value.facts.filter(fact => fact.scope === old.scope && fact.project === old.project &&
         (fact.id === old.id || fact.text === old.text || fact.evidence.some(left =>

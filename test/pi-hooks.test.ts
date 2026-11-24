@@ -1,17 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { GoalDoc, goalExtension } from "../src/goal.js";
 import { localEnvironment, localExecution } from "../src/execution.js";
-import { until } from "./helpers.js";
+import { recoveryTestTimeoutMs, startRecoveryWorker } from "./helpers.js";
 
 const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 
@@ -52,27 +50,17 @@ test("Pi onYield continues a natural answer; failed tools continue normally; tas
   } finally { await harness.close(ctx); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("Pi hook continuation survives compaction and SIGKILL without duplicate input or side effects", { timeout: 25_000 }, async () => {
+test("Pi hook continuation survives compaction and SIGKILL without duplicate input or side effects", { timeout: recoveryTestTimeoutMs }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "pi-hook-crash-")));
-  let processHandle: ChildProcess | undefined;
-  const worker = (mode: string) => {
-    const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./fixtures/hooks-worker.ts", import.meta.url)), mode, directory], { stdio: ["ignore", "pipe", "pipe"] });
-    processHandle = child;
-    let stdout = "", stderr = "";
-    child.stdout.on("data", data => { stdout += String(data); });
-    child.stderr.on("data", data => { stderr += String(data); });
-    const exit = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
-    return { child, exit, stdout: () => stdout, stderr: () => stderr };
-  };
+  const fixture = new URL("./fixtures/hooks-worker.ts", import.meta.url);
+  let worker: ReturnType<typeof startRecoveryWorker> | undefined;
   try {
-    const first = worker("create");
-    await until(async () => first.stdout(), text => text.includes('"type":"ready"'));
-    const before = JSON.parse(first.stdout().trim().split("\n").at(-1)!);
-    first.child.kill("SIGKILL"); await first.exit;
+    worker = startRecoveryWorker(fixture, "create", directory);
+    const before = await worker.ready();
+    assert.equal(await worker.stop(), "SIGKILL");
     await writeFile(join(directory, "release"), "resume");
-    const second = worker("recover");
-    assert.equal(await second.exit, 0, second.stderr());
-    const after = JSON.parse(second.stdout().trim().split("\n").at(-1)!);
+    worker = startRecoveryWorker(fixture, "recover", directory);
+    const after = await worker.complete();
     assert.equal(after.type, "completed");
     assert.equal(after.inputId, before.inputId);
     assert.equal(after.inputRequests, 1);
@@ -81,5 +69,8 @@ test("Pi hook continuation survives compaction and SIGKILL without duplicate inp
     assert.ok(after.compactions >= 1);
     assert.equal(after.phase, "submitted");
     assert.equal(await readFile(join(directory, "effects.txt"), "utf8"), "once\n");
-  } finally { processHandle?.kill("SIGKILL"); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await worker?.stop();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+  }
 });

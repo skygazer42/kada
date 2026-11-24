@@ -11,6 +11,7 @@ import { LocalRuntime } from "../src/runtime.js";
 import { until } from "./helpers.js";
 import { LocalDiscovery } from "../src/discovery.js";
 import { createClient } from "../src/client.js";
+import { MemoryMutationError, memoryRevision } from "../src/user-memory.js";
 import { serve } from "../src/server.js";
 
 async function fixture() {
@@ -59,12 +60,22 @@ test("M03/M04 concurrent corrections conflict and persisted request identities r
     assert.equal(failure.reason.status, 409);
     const saved = results[winner];
     assert(saved?.status === "fulfilled");
+    assert(failure.reason instanceof MemoryMutationError);
+    assert.equal(failure.reason.current?.id, saved.value.id);
+    assert.equal(failure.reason.current?.revision, saved.value.revision);
     const reopened = new LocalDiscovery(f.data, { home: f.home });
     const replay = await reopened.memory.change(f.home, original.id, choices[winner]!, f.alpha);
     assert.deepEqual(replay, saved.value);
     const facts = (await reopened.memoryView(f.alpha)).facts;
     assert(facts.some(item => item.id === replay.id && item.text === choices[winner]!.text));
     assert(!facts.some(item => item.id === original.id));
+    const replaced = (await reopened.memory.read(f.home)).facts.find(item => item.id === original.id)!;
+    const third = { action: "correct" as const, text: "项目日报请用日文。", requestId: "edit-later" };
+    await assert.rejects(reopened.memory.change(f.home, original.id, { ...third, expectedRevision: memoryRevision(replaced) }, f.alpha),
+      (error: unknown) => error instanceof MemoryMutationError && error.status === 409 && error.current?.id === replay.id);
+    const latest = await reopened.memory.change(f.home, replay.id, { ...third, expectedRevision: replay.revision }, f.alpha);
+    await assert.rejects(reopened.memory.change(f.home, original.id, { ...third, requestId: "read-latest", expectedRevision: original.revision }, f.alpha),
+      (error: unknown) => error instanceof MemoryMutationError && error.status === 409 && error.current?.id === latest.id);
     await assert.rejects(reopened.memory.change(f.home, original.id, { ...choices[winner]!, text: "同一标识的不同请求。" }, f.alpha), (error: { status?: number }) => error.status === 409);
     assert.equal(await readFile(join(f.alpha, "AGENTS.md"), "utf8"), "项目日报请用中文。");
   } finally { await f.close(); }
@@ -92,6 +103,9 @@ test("M05/M06 forgotten project facts stay forgotten after scans and other proje
     const input = { action: "forget" as const, expectedRevision: original.revision, requestId: "forget-one" };
     const result = await f.discovery.memory.change(f.home, original.id, input, f.alpha);
     assert.equal(result.state, "forgotten");
+    await assert.rejects(f.discovery.memory.change(f.home, original.id,
+      { action: "correct", expectedRevision: result.revision, requestId: "edit-forgotten", text: "项目日报请用德文。" }, f.alpha),
+    (error: unknown) => error instanceof MemoryMutationError && error.status === 409 && error.current?.state === "forgotten");
     await writeFile(join(f.alpha, "AGENTS.md"), "项目日报请用中文。\n\n交付需要注明输入文件。");
     const reopened = new LocalDiscovery(f.data, { home: f.home });
     await reopened.load(true);

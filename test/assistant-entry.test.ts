@@ -86,8 +86,11 @@ test('H05/H06 delivery paths include empty files and Chinese directories; change
   } finally { await f.close(); }
 });
 
-test('settings, scoped phone pairing and durable reminders work through the authenticated daemon', async () => {
-  const f = await scriptedFixture(() => fauxAssistantMessage('OK'));
+test('C02 model switching, scoped phone pairing and durable reminders work through the authenticated daemon', async () => {
+  const f = await scriptedFixture(context => fauxAssistantMessage(
+    context.messages.some(message => message.role === 'user' && message.content === 'continue old conversation')
+      ? 'Original model continued' : 'OK',
+  ));
   const extra = fauxProvider({provider:'second-test',models:[{id:'second'}]});
   extra.setResponses(Array.from({length:10}, () => fauxAssistantMessage('OK')));
   f.models.setProvider(extra.provider);
@@ -123,6 +126,14 @@ test('settings, scoped phone pairing and durable reminders work through the auth
     server = await serve(settings,{models:f.models});
     assert.deepEqual(await server.runtime.notifications(),before);
     assert.deepEqual((await server.runtime.status(next.id)).model,ref);
+    const answers: string[] = [];
+    const terminal = new ChatSession(client, event => {
+      if (event.kind === 'answer') answers.push(event.text);
+    });
+    await terminal.handle(`/attach ${old.id}`);
+    await terminal.handle('continue old conversation');
+    await until(async () => { await terminal.poll(); return answers; }, values => values.includes('Original model continued'));
+    assert.deepEqual((await server.runtime.status(old.id)).model, f.settings.model);
     assert.equal((await client.request<{id:string}[]>('/v1/routines'))[0]!.id,rule.id);
     assert.deepEqual(await client.request(historyPath),history);
   } finally { await server.close(); await f.close(); }

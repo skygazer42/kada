@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { setTimeout } from "node:timers/promises";
 import type { Readable, Writable } from "node:stream";
 import type { HarnessClient, TaskMeta, TaskStatus } from "./client.js";
+import type { LocalRuntime } from "./runtime.js";
+import type { MemoryFactView } from "./user-memory.js";
 import { errorText, SerialQueue } from "./util.js";
 import { briefText, progressText, usageText, verificationText } from "./presentation.js";
 import { isConfirmation } from "./preparation.js";
@@ -74,10 +76,13 @@ export class ChatSession {
         }
         const workspace = this.taskId ? (await this.client.request<TaskStatus>("/v1/tasks/" + this.taskId)).workspace : this.workspace ?? process.cwd();
         const query = "?workspace=" + encodeURIComponent(workspace);
-        const view = await this.client.request<{ facts: { id: string; text: string; revision: string; scope: string; evidence: { path: string; quote: string }[] }[] }>("/v1/environment/memory" + query);
+        const view = await this.client.request<{ facts: MemoryFactView[] }>("/v1/environment/memory" + query);
         if (action === "list") {
-          this.info(view.facts.length ? view.facts.map(fact => fact.id + " [" + fact.scope + "] " + fact.text + "\n  来源：" +
-            fact.evidence.map(item => item.path + "\n  摘录：" + item.quote).join("\n")).join("\n") : "当前项目尚无有效记忆。");
+          this.info(view.facts.length ? view.facts.map(fact => [
+            `${fact.id} [${fact.scope}] ${fact.text}`,
+            `  确定性 ${fact.certainty} · 状态 ${fact.state} · 版本 ${fact.revision}`,
+            ...fact.evidence.map(item => `  来源 ${item.path} · SHA-256 ${item.sha256}\n  摘录 ${item.quote}`),
+          ].join("\n")).join("\n") : "当前项目尚无有效记忆。");
           return true;
         }
         const fact = view.facts.find(item => item.id === memoryId);
@@ -93,10 +98,17 @@ export class ChatSession {
         return true;
       }
       if (command === "/tasks") {
-        const tasks = (await this.client.request<(TaskMeta & { status: string; summary?:string })[]>("/v1/tasks?filter="+encodeURIComponent(argument ?? 'all'))).slice(0, 10);
+        const tasks = (await this.client.request<Awaited<ReturnType<LocalRuntime["list"]>>>("/v1/tasks?filter=" + encodeURIComponent(argument ?? "all"))).slice(0, 10);
         if (!tasks.length) this.info("还没有对话，直接输入消息即可开始。");
         else for (const task of tasks) {
-          this.info(`${task.id}  [${task.status}]  ${task.objective.slice(0, 100).replace(/\s+/g, " ")}${task.summary ? '\n  '+task.summary : ''}`);
+          const cost = task.budget.estimatedCostUsd === null ? "费用未知" : `$${task.budget.estimatedCostUsd.toFixed(4)}`;
+          const limit = task.budget.costLimit === null ? "" : ` / $${task.budget.costLimit}`;
+          const lines = [`${task.id}  [${task.status}]  ${task.objective.slice(0, 100).replace(/\s+/g, " ")}`];
+          if (task.summary) lines.push(`  ${task.summary}`);
+          if (task.step && task.step !== task.summary) lines.push(`  当前步骤 ${task.step}`);
+          lines.push(`  用量 ${task.budget.totalTokens} token · ${cost}${limit}`);
+          if (task.artifacts.length) lines.push(`  产物 ${task.artifacts.join("、")}`);
+          this.info(lines.join("\n"));
         }
         return true;
       }

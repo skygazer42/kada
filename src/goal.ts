@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { createHash } from 'node:crypto';
 import { relative, sep } from 'node:path';
-import { defineDoc, defineExtension, defineTool, type ConversationId, type Harness, type ToolExecutionApi } from "@earendil-works/pi-durable";
+import { defineDoc, defineExtension, defineTool, type ConversationId, type Harness, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { acceptanceChecks, CheckSchema, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
 import type { Confirmation, TaskBrief } from "./preparation.js";
@@ -54,32 +54,61 @@ export const Reviews = defineDoc<{ verdicts: Record<string, ReviewVerdict> }>({
 
 /** Chord documents are proxies inside commits; detach before returning them to the host. */
 export function plain<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
-export function goalEvent(goal: GoalState, type: string, detail: string, workspace?: string): void {
+function goalEvent(goal: GoalState, type: string, detail: string, workspace?: string): number {
   const outputs = goal.candidate?.artifacts.length
     ? [...(goal.mechanical?.files ?? []), ...(goal.mechanical?.directories ?? [])].map(file => [
       workspace ? relative(workspace, file.path).split(sep).join("/") : file.path,
       file.sha256,
     ]).sort()
     : goal.candidate?.summary;
-  goal.events.push({ at: Date.now(), type, detail: detail.slice(0, 4000), revision:goal.revision,
+  const at = Date.now();
+  goal.events.push({ at, type, detail: detail.slice(0, 4000), revision:goal.revision,
     ...(type === 'completed' ? {resultHash:createHash('sha256').update(JSON.stringify(outputs ?? null)).digest('hex')} : {}) });
   if (goal.events.length > 200) goal.events.splice(0, goal.events.length - 200);
+  return at;
+}
+
+export const remoteProgressKind = "local.goal.remote_progress";
+const remoteProgressLabels: Readonly<Record<string, string>> = {
+  created: "Task created", clarifying: "More information requested", awaiting_confirmation: "Confirmation requested",
+  confirmed: "Task confirmed", plan: "Plan updated", checkpoint: "Step updated", waiting_user: "More information requested",
+  user_input: "Task information received", submitted: "Result submitted for checks", verifying: "Verification started",
+  rejected: "Result needs revision", completed: "Task completed", blocked: "Task blocked", needs_attention: "Needs attention",
+  failed: "Task failed", budget_limited: "Budget limit reached", resumed: "Task resumed",
+};
+export function remoteProgressLabel(event: string): string | undefined {
+  if (Object.hasOwn(remoteProgressLabels, event)) return remoteProgressLabels[event];
+}
+
+export type GoalChange<T> = (goal: GoalState, record: (type: string, detail: string, workspace?: string) => void) => T | Promise<T>;
+
+export async function changeGoal<T>(tx: Tx, change: GoalChange<T>, remoteConversation?: ConversationId): Promise<T> {
+  const goal = await tx.doc(GoalDoc);
+  const events: { event: string; timestamp: number }[] = [];
+  const result = await change(goal, (event, detail, workspace) => {
+    const timestamp = goalEvent(goal, event, detail, workspace);
+    if (remoteConversation && remoteProgressLabel(event)) events.push({ event, timestamp });
+  });
+  if (remoteConversation) for (const data of events) {
+    // The mobile history carries stable stage names without the local event's free-form detail.
+    await tx.appendEntry(remoteConversation, { kind: remoteProgressKind, data });
+  }
+  return result;
 }
 export async function readGoal(harness: Harness): Promise<GoalState> {
   return harness.commit(async tx => plain(await tx.doc(GoalDoc)), ctx);
 }
 
-export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: boolean } = {}) {
-  const mutate = async (api: ToolExecutionApi, context: typeof ctx, action: (goal: GoalState) => void) => api.commit(async tx => {
-    const goal = await tx.doc(GoalDoc);
+export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: boolean; remote?: boolean } = {}) {
+  const mutate = async (api: ToolExecutionApi, context: typeof ctx, action: GoalChange<void>) => api.commit(tx => changeGoal(tx, (goal, record) => {
     const key = String(api.taskId);
     if (!goal.appliedTools[key]) {
       if (goal.phase !== "working") throw new Error(`Goal is ${goal.phase}; wait for supervision or user input`);
-      action(goal);
+      action(goal, record);
       goal.appliedTools[key] = true;
     }
     return { ok: true, revision: goal.revision, phase: goal.phase, candidateId: goal.candidate?.id ?? null };
-  }, context);
+  }, options.remote ? api.conversationId : undefined), context);
   const output = (value: unknown) => [{ type: "text" as const, text: JSON.stringify(value) }];
   return defineExtension({ name: "local_goal", tools: [
     defineTool({
@@ -101,7 +130,7 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
       name: "task_plan", description: `${options.advisoryPlan ? "Optionally record a concise plan for progress. Plan status does not gate delivery. " : ""}Persist a plan with stable step IDs; retain completed steps. Optionally APPEND executable acceptance checks. Existing checks cannot be removed or weakened. Only mark steps done through task_checkpoint with evidence.`,
       parameters: Type.Object({ steps: Type.Array(Type.Object({ id: Type.String({ minLength: 1, maxLength: 64 }), title: Type.String({ minLength: 1, maxLength: 500 }) }), { minItems: 1, maxItems: 24 }),
         checks: Type.Optional(Type.Array(CheckSchema, { maxItems: 32 })) }), replay: "safe", executionMode: "sequential",
-      execute: async (args, api, context) => ({ output: output(await mutate(api, context, goal => {
+      execute: async (args, api, context) => ({ output: output(await mutate(api, context, (goal, record) => {
         if (new Set(args.steps.map(s => s.id)).size !== args.steps.length) throw new Error("Plan step IDs must be unique");
         const added = acceptanceChecks(args.checks);
         const checks = plain(goal.checks);
@@ -111,17 +140,17 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
         goal.plan = args.steps.map(step => ({ id: step.id, status: "pending" as const, evidence: "", ...previous.find(s => s.id === step.id), title: step.title }));
         for (const step of previous) if (step.status === "done" && !goal.plan.some(s => s.id === step.id)) goal.plan.push(step);
         goal.checks = checks;
-        goalEvent(goal, "plan", `${goal.plan.length} steps, ${goal.checks.length} checks`);
+        record("plan", `${goal.plan.length} steps, ${goal.checks.length} checks`);
       })) }),
     }),
     defineTool({
       name: "task_checkpoint", description: "Persist a plan step's state and concrete evidence. Notes alone do not prove task completion.",
       parameters: Type.Object({ stepId: Type.String(), status: Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done")]), evidence: Type.String({ minLength: 1, maxLength: 2000 }) }), replay: "safe", executionMode: "sequential",
-      execute: async (args, api, context) => ({ output: output(await mutate(api, context, goal => {
+      execute: async (args, api, context) => ({ output: output(await mutate(api, context, (goal, record) => {
         const step = goal.plan.find(s => s.id === args.stepId);
         if (!step) throw new Error("Unknown plan step ID");
         step.status = args.status; step.evidence = args.evidence;
-        goalEvent(goal, "checkpoint", `${step.id}: ${step.status}: ${step.evidence}`);
+        record("checkpoint", `${step.id}: ${step.status}: ${step.evidence}`);
       })) }),
     }),
     defineTool({
@@ -130,20 +159,20 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
         ...(options.captureSkill ? { skill: Type.Optional(Type.String({ minLength: 1, maxLength: 2048, description: "Optional standard Skill directory already included in freshly verified outputs. No extra learning task; skip if no useful reusable discovery." })) } : {}),
         criteria: Type.Optional(Type.Array(Type.Object({ id: Type.Integer({ minimum: 1, maximum: 16 }), status: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("unverified")]),
           evidence: Type.String({ minLength: 1, maxLength: 2000 }), proofIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 8 })) }), { maxItems: 16 })) }), replay: "safe", executionMode: "sequential",
-      execute: async (args, api, context) => ({ output: output(await mutate(api, context, goal => {
+      execute: async (args, api, context) => ({ output: output(await mutate(api, context, (goal, record) => {
         if (args.criteria && new Set(args.criteria.map(c => c.id)).size !== args.criteria.length) throw new Error("Criterion IDs must be unique");
         goal.candidate = { id: String(api.taskId), revision: goal.revision, summary: args.summary, artifacts: [...new Set(args.artifacts)], ...(args.criteria ? { criteria: args.criteria } : {}) };
         if (options.captureSkill && "skill" in args && typeof args.skill === "string") goal.candidate.skill = args.skill;
         goal.phase = "submitted"; goal.review = null; goal.mechanical = null; goal.verification = null;
-        goalEvent(goal, "submitted", args.summary);
+        record("submitted", args.summary);
       })), control: { terminate: true } }),
     }),
     defineTool({
       name: "task_blocked", description: "Stop autonomous work when an external dependency is unavailable. If user input is required, provide a precise question. State what is already done and why continuation is impossible.",
       parameters: Type.Object({ reason: Type.String({ minLength: 1, maxLength: 4000 }), question: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })) }), replay: "safe", executionMode: "sequential",
-      execute: async (args, api, context) => ({ output: output(await mutate(api, context, goal => {
+      execute: async (args, api, context) => ({ output: output(await mutate(api, context, (goal, record) => {
         goal.phase = args.question ? "waiting_user" : "blocked"; goal.reason = args.reason; goal.question = args.question ?? null;
-        goalEvent(goal, goal.phase, `${args.reason}${args.question ? `\n${args.question}` : ""}`);
+        record(goal.phase, `${args.reason}${args.question ? `\n${args.question}` : ""}`);
       })), control: { terminate: true } }),
     }),
   ] });
