@@ -14,7 +14,7 @@ try { loadEnvFile(".env"); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 
 const args = parseArgs({ allowPositionals: true, options: {
-  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" },
+  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
 } });
 const [command = "chat", id, ...rest] = args.positionals;
 const config = await loadConfig(args.values.config);
@@ -25,7 +25,7 @@ try {
   if (args.values.help || command === "help") {
     console.log(`Kada\n\n  npm run chat                             Chat in the terminal; starts/reuses the daemon\n  npm run harness -- chat [task-id]         Start chat or reconnect to a task\n  npm run dev                              Start only the local daemon\n  npm run demo                             Run the explicit offline simulation\n  npm run discover                         Inspect discovered local Agents/Skills/plugins\n  npm run discover -- --refresh             Refresh local discovery metadata\n  npm run harness -- models [provider]      List the installed Pi model catalog\n  npm run harness -- run "goal" --detach    Create a background task\n  npm run harness -- run "goal" --workspace /absolute/path\n  npm run harness -- status [task-id]       Inspect tasks, workers and usage\n  npm run harness -- pause <task-id>\n  npm run harness -- resume <task-id>       Resume with another configured task budget\n  npm run harness -- cancel <task-id>\n  npm run harness -- follow-up <task-id> "message"\n\nrun also accepts --acceptance <checks.json>. All commands accept --config <file>. Configure cloud model credentials through environment variables.`);
     console.log("\n默认 run 先准备待确认说明；在 chat 中 /attach 后确认。只有已有明确授权时使用 run --yes 或聊天 /run，沿用配置预算直接执行。");
-    console.log(`\n个人助手入口（npm run harness -- …）：\n  memory list|edit ID 内容|forget ID|used 任务ID\n  tasks --filter pending|running|delivered\n  inbox [read 通知ID]\n  files 任务ID | files open 任务ID 编号\n  model list [provider] | model check|select provider modelId\n  skills list|enable 名称|disable 名称 --workspace 路径\n  skills rollback 名称 版本 | skills capture 任务ID 目录\n  mcp list|add 配置.json|test ID|enable ID revision 工具…|disable ID\n  routines list|history ID|add 规则.json|update ID 规则.json|cancel ID\n  remote list|pair 账户ID 设备ID|revoke 账户ID 设备ID\n  computer status|takeover|return\n\nrun --skills 名称,名称@版本 可固定所选方法；空字符串表示不选方法。`);
+    console.log(`\n个人助手入口（npm run harness -- …）：\n  memory list|edit ID 内容|forget ID|used 任务ID\n  tasks --filter pending|running|delivered\n  inbox [read 通知ID]\n  files 任务ID | files open 任务ID 编号\n  model list [provider] | model check|select provider modelId\n  skills list|enable 名称|disable 名称 --workspace 路径\n  skills rollback 名称 版本 | skills capture 任务ID 目录\n  mcp list|add 配置.json|test ID|enable ID revision 工具…|disable ID\n  routines list|history ID [--task-status]|add 规则.json|update ID 规则.json|cancel ID\n  remote list|pair 账户ID 设备ID|revoke 账户ID 设备ID\n  computer status|takeover|return\n\nrun --skills 名称,名称@版本 可固定所选方法；空字符串表示不选方法。`);
   } else if (command === "chat") {
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
@@ -91,7 +91,7 @@ try {
       else throw new Error('Use mcp list, add, test, enable or disable.');
     } else if (command === 'routines') {
       if (action === 'list') result = await request('/v1/routines');
-      else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences');
+      else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences'+(args.values['task-status'] ? '?includeTaskStatus=true' : ''));
       else if (action === 'add') result = await request('/v1/routines','POST',await json(rest[0]));
       else if (action === 'update') result = await request('/v1/routines/'+segment(rest[0]),'PATCH',await json(rest[1]));
       else if (action === 'cancel') result = await request('/v1/routines/'+segment(rest[0]),'DELETE');

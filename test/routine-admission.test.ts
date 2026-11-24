@@ -1,12 +1,110 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { fakeRoutineClock, recoveryTestTimeoutMs, scriptedFixture, startRecoveryWorker, until } from "./helpers.js";
+import { serve } from "../src/server.js";
+import { createClient } from "../src/client.js";
+import type { RoutineHistoryRecord } from "../src/routines.js";
 
 const budget = { maxEstimatedCostUsd: 1, maxDurationMs: 10_000, maxTotalTokens: 10_000 };
+
+test("recurring overlap skips before precheck and links the blocking task across a daemon restart", async () => {
+  const first = Date.UTC(2026, 10, 23, 12);
+  const day = 86_400_000;
+  const clock = fakeRoutineClock(first - 60_000);
+  let release!: () => void;
+  const running = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  const fixture = await scriptedFixture(async () => {
+    if (++calls === 1) {
+      await running;
+      return fauxAssistantMessage(fauxToolCall("task_blocked", {
+        reason: "Missing inventory", question: "Which inventory should I use?",
+      }), { stopReason: "toolUse" });
+    }
+    return fauxAssistantMessage(fauxToolCall("task_submit", { summary: "Checked inventory", artifacts: [] }), { stopReason: "toolUse" });
+  });
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const settings = { ...fixture.settings, port };
+  const client = createClient(settings);
+  const options = { models: fixture.models, routineClock: clock };
+  let server = await serve(settings, options);
+  try {
+    const { workspace } = fixture;
+    const samples = join(workspace, "samples.txt");
+    await writeFile(join(workspace, "sample.mjs"), [
+      "import { appendFileSync, readFileSync } from 'node:fs';",
+      "appendFileSync('samples.txt', 'sample\\n');",
+      "process.stdout.write(readFileSync('samples.txt'));",
+    ].join("\n"));
+    const rule = {
+      id: "overlap", action: "task", objective: "Summarize inventory", workspace, budget,
+      overlapPolicy: "skip", precheck: { command: [process.execPath, "sample.mjs"] },
+      schedule: { kind: "daily", time: "12:00", timeZone: "UTC" },
+    };
+    await client.request("/v1/routines", "POST", rule);
+    const path = `/v1/routines/${rule.id}/occurrences`;
+    const history = (detail = false) => client.request<RoutineHistoryRecord[]>(
+      path + (detail ? "?includeTaskStatus=true" : ""),
+    );
+    const slot = async (offset: number) => {
+      const at = first + offset * day;
+      await until(async () => clock.waitingAt(at), Boolean);
+      clock.advanceTo(at);
+      const date = new Date(at).toISOString();
+      const rows = await until(() => history(), records => records.some(row => row.scheduledAt === date && row.status !== "claimed"));
+      return rows.filter(row => row.scheduledAt === date);
+    };
+
+    const [, started] = await slot(0);
+    assert.equal(started.status, "started");
+    const taskId = started.taskId!;
+    await until(async () => calls, count => count === 1);
+    assert.equal((await history(true)).find(row => row.status === "started")?.taskStatus, "running");
+    const [skippedRunning, ...otherRunning] = await slot(1);
+    assert.deepEqual(otherRunning, []);
+    assert.equal(skippedRunning.status, "skipped");
+    assert.deepEqual(skippedRunning.blockedBy, { occurrenceId: started.id, taskId, status: "running" });
+    release();
+    await until(() => server.runtime.taskOverview(taskId), overview => overview.status === "waiting_user");
+
+    await server.close();
+    server = await serve(settings, options);
+    const [skippedWaiting, ...otherWaiting] = await slot(2);
+    assert.deepEqual(otherWaiting, []);
+    assert.equal(skippedWaiting.status, "skipped");
+    assert.deepEqual(skippedWaiting.blockedBy, { occurrenceId: started.id, taskId, status: "waiting_user" });
+    assert.equal(skippedWaiting.precheck, undefined);
+    assert.equal(await readFile(samples, "utf8"), "sample\n");
+    assert.equal(calls, 1);
+    assert((await history()).every(row => row.taskStatus === undefined));
+    const waiting = (await history(true)).find(row => row.id === started.id && row.status === "started");
+    assert.equal(waiting?.taskStatus, "waiting_user");
+    assert.equal(waiting?.taskReason, "Missing inventory");
+    assert.equal(waiting?.taskQuestion, "Which inventory should I use?");
+    assert.equal((await fetch(`http://127.0.0.1:${port}${path}?includeTaskStatus=true`)).status, 401);
+
+    await client.request(`/v1/tasks/${taskId}/messages`, "POST", { message: "Use the main inventory." });
+    await until(() => server.runtime.taskOverview(taskId), overview => overview.status === "completed");
+    const [, next] = await slot(3);
+    assert.equal(next.status, "started");
+    assert.notEqual(next.taskId, taskId);
+    const delivered = (await history(true)).find(row => row.id === started.id && row.status === "started");
+    assert.equal(delivered?.taskStatus, "completed");
+    assert.equal(delivered?.taskSummary, "Checked inventory");
+  } finally {
+    release();
+    await server.close();
+    await fixture.close();
+  }
+});
 
 test("R03 a fixed precheck only starts a task on the first successful sample or a change", async () => {
   const first = Date.UTC(2026, 10, 23, 12);
@@ -54,6 +152,9 @@ test("R03 a fixed precheck only starts a task on the first successful sample or 
     assert.match(initial.precheck.sha256, /^[a-f0-9]{64}$/);
     assert.equal(unchanged.precheck.sha256, initial.precheck.sha256);
     assert.notEqual(changed.precheck.sha256, initial.precheck.sha256);
+    const details = await runtime.routines.history(rule.id, true);
+    assert.equal(details.find(row => row.id === failed.id && row.status === "claimed")?.taskStatus, "missing");
+    assert.equal(details.find(row => row.id === failed.id && row.status === "failed")?.taskStatus, undefined);
   } finally { await fixture.close(); }
 });
 

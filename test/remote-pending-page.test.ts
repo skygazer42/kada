@@ -37,7 +37,7 @@ const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness() {
+function harness(history?: (url: URL) => Response | Promise<Response>) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -93,6 +93,7 @@ function harness() {
             return Response.json({ error: "Device revoked." }, { status: 401 });
           }
           if (url.includes("?messageId=") || url.endsWith("/messages")) return Response.json({ state: receipt });
+          if (history) return history(new URL(url, "http://localhost"));
           return Response.json({ error: "Conversation not found." }, { status: 404 });
         },
       });
@@ -111,6 +112,67 @@ function harness() {
     },
   };
 }
+
+test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {
+  const initial = { role: "user", sequence: 1, text: "Original request" };
+  const reply = { role: "assistant", sequence: 4, text: "Original reply" };
+  const progress = { sequence: 3, label: "Working", timestamp: 1 };
+  const late = Promise.withResolvers<Response>();
+  let step = 0;
+  const device = harness((url) => {
+    if (url.pathname.endsWith("/other")) {
+      assert.equal(url.search, "");
+      return Response.json({ cursor: 8, messages: [{ ...initial, text: "Other chat" }], progressEvents: [], task: null });
+    }
+    switch (++step) {
+      case 1: return Response.json({ cursor: 2, messages: [initial], progressEvents: [], task: { status: "running" } });
+      case 2: return Response.json({ cursor: 5, messages: [reply], progressEvents: [progress], task: { status: "running" } });
+      case 3: return Response.json({ cursor: 5, messages: [], progressEvents: [], task: { status: "completed" } });
+      default: return late.promise;
+    }
+  });
+  const page = await device.open();
+  const shown = () => page.field("messages").children.map((article) => article.children[1]!.textContent);
+  assert.deepEqual(shown(), ["Original request"]);
+  await page.poll();
+  await page.poll();
+  assert.deepEqual(shown(), ["Original request", "Original reply"]);
+  assert.equal(page.field("task-events").children.length, 1);
+  assert.equal(page.field("task").children[0]!.textContent, "Completed");
+  assert.deepEqual(device.requests.slice(-2), [
+    "/remote/api/conversations/" + conversationId + "?after=2",
+    "/remote/api/conversations/" + conversationId + "?after=5",
+  ]);
+  const stale = page.poll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  page.field("conversation").value = "other";
+  await page.field("conversation").trigger("change");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  late.resolve(Response.json({ cursor: 6, messages: [reply], progressEvents: [progress], task: { status: "running" } }));
+  await stale;
+  assert.deepEqual(shown(), ["Other chat"]);
+  assert.equal(page.field("task-events").children.length, 0);
+});
+
+test("a rejected cursor rebuilds history and a connection failure preserves the last cursor", async () => {
+  const address = "/remote/api/conversations/" + conversationId;
+  let step = 0;
+  const device = harness(() => {
+    switch (++step) {
+      case 1: return Response.json({ cursor: 2, messages: [{ sequence: 2, role: "user", text: "Original" }], progressEvents: [], task: null });
+      case 2: throw new TypeError("Connection dropped");
+      case 3: return Response.json({ error: "Invalid history cursor." }, { status: 400 });
+      default: return Response.json({ cursor: 1, messages: [{ sequence: 1, role: "user", text: "Restored" }], progressEvents: [], task: null });
+    }
+  });
+  const page = await device.open();
+  await page.poll();
+  assert.match(page.field("status").textContent, /connection dropped/);
+  await page.poll();
+  assert.deepEqual(device.requests.slice(-4), [address, address + "?after=2", address + "?after=2", address]);
+  assert.deepEqual(page.field("messages").children.map((article) => article.children[1]!.textContent), ["Restored"]);
+  assert.equal(page.field("status").textContent, "");
+});
 
 test("reload restores the pending text and retries the original message only on demand", async () => {
   const device = harness();

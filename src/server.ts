@@ -117,7 +117,9 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'POST') return send(201,await runtime.routines.create(await body(req) as RoutineInput));
       }
       const occurrenceHistory=/^\/v1\/routines\/([^/]+)\/occurrences$/.exec(url.pathname);
-      if(occurrenceHistory && req.method==='GET') return send(200,await runtime.routines.history(decodeURIComponent(occurrenceHistory[1]!)));
+      if (occurrenceHistory && req.method === 'GET') {
+        return send(200, await runtime.routines.history(decodeURIComponent(occurrenceHistory[1]!), url.searchParams.get('includeTaskStatus') === 'true'));
+      }
       const routine = /^\/v1\/routines\/([^/]+)$/.exec(url.pathname);
       if (routine) {
         if (req.method === 'PATCH') return send(200,await runtime.routines.update(decodeURIComponent(routine[1]!),await body(req) as RoutineInput));

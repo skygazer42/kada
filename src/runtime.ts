@@ -116,7 +116,13 @@ export class LocalRuntime {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,execute:async (occurrence,signal) => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,taskOverview:async id => {
+      try { return await this.taskOverview(id); }
+      catch (error) {
+        const cause = error as NodeJS.ErrnoException;
+        if (cause.code !== "ENOENT" || cause.path !== this.metaFile(id)) throw error;
+      }
+    },execute:async (occurrence,signal) => {
       signal.throwIfAborted();
       if (occurrence.action === 'notify') { await this.inbox.notify(occurrence); return {status:'notified'}; }
       const task = await this.create(occurrence.objective,occurrence.workspace,occurrence.acceptance,{id:occurrence.taskId,budget:occurrence.budget,routineOccurrenceId:occurrence.id,notifyOnChange:occurrence.notifyOnChange,signal});
@@ -300,15 +306,19 @@ export class LocalRuntime {
       return (await this.goalState(active))?.outbox?.requestId === "user:" + requestId;
     });
   }
-  async conversationHistory(id:string) {
+  async conversationHistory(id: string, after?: EntryId) {
     return this.changes.run(async () => {
       const active=await this.open(await this.metadata(id),false);
       const messages:{sequence:number;role:'user'|'assistant';text:string;timestamp:number}[]=[];
       const progressEvents:{sequence:number;event:string;label:string;timestamp:number}[]=[];
+      let latest = after;
       let cursor:Cursor|undefined;
       do {
-        const page=await active.root.entries({order:'ascending'},200,cursor,ctx);
+        const page=await active.root.entries({order:'ascending',minEntryId:after},200,cursor,ctx);
+        if (!cursor && after !== undefined && page.items[0]?.id !== after) return;
         for(const entry of page.items) {
+          if (entry.id === after) continue;
+          latest = entry.id;
           if (entry.kind === remoteProgressKind && entry.data && typeof entry.data === "object" && !Array.isArray(entry.data)) {
             const { event, timestamp } = entry.data;
             const label = typeof event === "string" ? remoteProgressLabel(event) : undefined;
@@ -322,7 +332,7 @@ export class LocalRuntime {
         }
         cursor=page.next;
       } while(cursor);
-      return { messages, progressEvents };
+      return { cursor: latest ?? null, messages, progressEvents };
     });
   }
   private async open(meta: TaskMeta, run: boolean): Promise<Active> {
@@ -644,7 +654,8 @@ export class LocalRuntime {
       return;
     }
     if (!goal.candidate) {
-      await this.reject(active, goal, "No candidate submitted. Use task_submit to provide the actual result, or task_blocked with the missing input.", String(latest.id));
+      await this.reject(active, goal, "No candidate submitted.", String(latest.id),
+        "If your last reply asked for input or authorization needed to proceed, register the same question with task_blocked and wait. If the work is ready, call task_submit with the actual result and existing evidence. Reuse the work and tool results already available. Inspect only evidence still needed to continue or verify the result.");
       return;
     }
     const report = await this.check(active, goal);
@@ -776,7 +787,7 @@ export class LocalRuntime {
     await this.finishLearning(active);
     this.options.computer?.release(active.meta.id); active.enabled = false;
   }
-  private async reject(active: Active, goal: GoalState, reason: string, evaluated: string): Promise<void> {
+  private async reject(active: Active, goal: GoalState, reason: string, evaluated: string, guidance?: string): Promise<void> {
     const fingerprint = createHash("sha256").update(JSON.stringify({
       ...(active.meta.planPolicy === "advisory" ? { failure: reason } : { plan: goal.plan.map(s => [s.id, s.status]) }),
       files: goal.mechanical?.files ?? [], directories: goal.mechanical?.directories ?? [], results: goal.mechanical?.results ?? [],
@@ -790,7 +801,9 @@ export class LocalRuntime {
       state.reworks++;
       state.phase = "working"; state.candidate = null; state.review = null; state.verification = null;
       const preparing = active.meta.preparation && !state.confirmation;
-      state.outbox = { requestId: `supervisor:${state.revision}:${state.epoch}:${state.reworks}`, content: `SUPERVISOR_REWORK ${state.reworks}: The goal is NOT complete.\n${reason}\n${preparing ? "Use the read-only tools and task_prepare; execution has not been authorized." : `Read task_status, inspect actual files, fix these failures${active.meta.planPolicy === "advisory" ? "" : ", update checkpoints"}, then call task_submit. Do not weaken existing acceptance checks. If blocked, call task_blocked with a concrete reason/question.`}` };
+      const nextStep = preparing ? "Use the read-only tools and task_prepare; execution has not been authorized."
+        : guidance ?? `Read task_status, inspect actual files, fix these failures${active.meta.planPolicy === "advisory" ? "" : ", update checkpoints"}, then call task_submit. Do not weaken existing acceptance checks. If blocked, call task_blocked with a concrete reason/question.`;
+      state.outbox = { requestId: `supervisor:${state.revision}:${state.epoch}:${state.reworks}`, content: `SUPERVISOR_REWORK ${state.reworks}: The goal is NOT complete.\n${reason}\n${nextStep}` };
     });
     await this.dispatchOutbox(active);
   }
@@ -815,7 +828,10 @@ export class LocalRuntime {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const { status, goal } = await this.taskState(await this.open(meta, false), meta);
-      return { status, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null };
+      return {
+        status, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null,
+        summary: status === "completed" ? goal?.candidate?.summary ?? null : null,
+      };
     });
   }
   async status(id: string) {

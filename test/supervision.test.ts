@@ -119,6 +119,42 @@ test("plan state and append-only checks survive revisions; completed work is ret
   } finally { await f.close(); }
 });
 
+test("a question in prose gets one targeted handoff without repeating the draft", async () => {
+  const question = "Which heading should I use?";
+  let requests = 0;
+  const f = await fixture(c => {
+    requests++;
+    const turns = users(c);
+    if (turns.includes("Use Inventory.")) {
+      if (results(c, "write").length === 1) return call("write", { path: "report.txt", content: "Inventory: 71" });
+      return call("task_submit", { summary: "Inventory report delivered.", artifacts: ["report.txt"] });
+    }
+    if (!results(c, "write").length) return call("write", { path: "draft.txt", content: "Total: 71" });
+    const corrections = turns.filter(turn => turn.startsWith("SUPERVISOR_REWORK"));
+    if (!corrections.length) return fauxAssistantMessage(question);
+    assert.equal(corrections.length, 1);
+    assert.match(corrections[0]!, /register.*question.*task_blocked/i);
+    assert.doesNotMatch(corrections[0]!, /Read task_status|fix these failures/);
+    return call("task_blocked", { reason: "The heading is required for the report.", question });
+  }, { review: false });
+  try {
+    const task = await f.runtime.create("Draft the total, then ask for a heading before writing report.txt.", f.workspace,
+      [{ type: "file_contains", path: "report.txt", text: "Inventory: 71" }]);
+    const waiting = await until(() => f.runtime.status(task.id), state => ["waiting_user", "failed", "needs_attention"].includes(state.status));
+    assert.equal(waiting.status, "waiting_user", waiting.submission?.detail);
+    assert.equal(waiting.goal?.question, question);
+    assert.equal(waiting.goal?.reworks, 1);
+    assert.equal(requests, 3);
+    await assert.rejects(readFile(join(f.workspace, "report.txt")), { code: "ENOENT" });
+    await f.runtime.followUp(task.id, "Use Inventory.", "heading-answer");
+    const done = await until(() => f.runtime.status(task.id), state => state.status === "completed");
+    assert.equal(done.goal?.mechanical?.passed, true);
+    assert.equal(requests, 5);
+    assert.equal(await readFile(join(f.workspace, "draft.txt"), "utf8"), "Total: 71");
+    assert.equal(done.messages.filter(message => message.role === "toolResult" && message.toolName === "write").length, 2);
+  } finally { await f.close(); }
+});
+
 test("waiting for user input resumes the same goal and duplicate request IDs do not resubmit", async () => {
   let requests = 0;
   const f = await fixture(c => {

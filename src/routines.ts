@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { awaitWithContext, BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTask, Harness, type ConversationId, type Cursor, type Tx } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { acceptanceChecks, type AcceptanceCheck } from "./checks.js";
 import { localEnvironment, shellEnvironment } from "./execution.js";
 import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, routineTiming, type RoutineTiming, type RoutineSchedule } from "./routine-schedule.js";
+import type { LocalRuntime } from "./runtime.js";
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -26,6 +27,7 @@ export type RoutineInput = {
   schedule: RoutineSchedule;
   missedPolicy?: "run_once" | "skip";
   budgetPolicy?: "pause" | "skip";
+  overlapPolicy?: "skip";
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
   precheck?: { command: string[] };
@@ -38,7 +40,7 @@ type RoutineDefinition = Omit<RoutineInput, "id" | "acceptance" | "missedPolicy"
   notifyOnChange: boolean;
 };
 
-export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPolicy"> & {
+export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPolicy" | "overlapPolicy"> & {
   id: string;
   routineId: string;
   revision: number;
@@ -55,11 +57,16 @@ type PrecheckResult =
   | { status: "changed" | "unchanged"; sha256: string }
   | { status: "failed" | "interrupted"; detail: string };
 
+type TaskOverview = Awaited<ReturnType<LocalRuntime["taskOverview"]>>;
+type TaskState = TaskOverview["status"];
+type StartedOccurrence = { occurrenceId: string; taskId: string };
+
 type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt"> & {
   status: "claimed" | "notified" | "started" | "budget_exhausted" | "skipped" | "failed";
   taskId?: string;
   timing?: RoutineTiming;
   precheck?: PrecheckResult;
+  blockedBy?: StartedOccurrence & { status: TaskState };
 };
 
 export type RoutineOccurrenceRecord = Receipt & {
@@ -71,6 +78,13 @@ export type RoutineOccurrenceRecord = Receipt & {
   budgetPolicy: 'pause' | 'skip';
   budget?: RoutineBudget;
   recordedAt: number;
+};
+export type RoutineHistoryRecord = RoutineOccurrenceRecord & {
+  sequence: number;
+  taskStatus?: TaskState | "missing";
+  taskReason?: string;
+  taskQuestion?: string;
+  taskSummary?: string;
 };
 const occurrenceEntryKind='local.routine.occurrence';
 
@@ -107,11 +121,13 @@ type StoredRoutine = Routine & {
   timerId?: Parameters<Harness["abortTask"]>[0];
   claim?: RoutineOccurrence & { precheckResult?: PrecheckResult };
   lastPrecheckSha256?: string;
+  lastStarted?: StartedOccurrence;
 };
 
 export interface LocalRoutineOptions {
   dataDir: string;
   execute(occurrence: RoutineOccurrence, signal: AbortSignal): Promise<RoutineExecution>;
+  taskOverview?(taskId: string): Promise<TaskOverview | undefined>;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
 }
@@ -141,7 +157,7 @@ function snapshot<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
-function toRoutine({ timerId: _timer, claim: _claim, lastPrecheckSha256: _baseline, ...routine }: StoredRoutine): Routine {
+function toRoutine({ timerId: _timer, claim: _claim, lastPrecheckSha256: _baseline, lastStarted: _lastStarted, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
@@ -181,6 +197,10 @@ function definition(input: RoutineInput): RoutineDefinition {
   if (budgetPolicy !== "pause" && budgetPolicy !== "skip") {
     throw new RoutineError(400, "A routine budget policy must be pause or skip.");
   }
+  const overlapPolicy = input.overlapPolicy;
+  if (overlapPolicy !== undefined && (overlapPolicy !== "skip" || input.action !== "task" || schedule.kind === "once")) {
+    throw new RoutineError(400, "The skip overlap policy requires a recurring task.");
+  }
   if (input.notifyOnChange !== undefined && typeof input.notifyOnChange !== "boolean") {
     throw new RoutineError(400, "The notifyOnChange setting must be a boolean.");
   }
@@ -208,6 +228,7 @@ function definition(input: RoutineInput): RoutineDefinition {
     schedule,
     missedPolicy,
     budgetPolicy,
+    ...(overlapPolicy ? { overlapPolicy } : {}),
     notifyOnChange: input.notifyOnChange ?? false,
     ...(precheck ? { precheck: { command: [...precheck.command] } } : {}),
     ...(budget ? {
@@ -257,6 +278,9 @@ function endSchedule(rule: StoredRoutine, status: "paused" | "completed" | "canc
 
 function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
   const saved = { ...rule, lastOccurrence: receipt };
+  if (rule.overlapPolicy === "skip" && receipt.status === "started" && receipt.taskId) {
+    saved.lastStarted = { occurrenceId: receipt.id, taskId: receipt.taskId };
+  }
   if (receipt.status === "started" && receipt.precheck?.status === "changed") saved.lastPrecheckSha256 = receipt.precheck.sha256;
   if (receipt.status === "budget_exhausted" && rule.budgetPolicy === "pause") {
     return { rule: endSchedule(saved, "paused"), state: completed };
@@ -299,7 +323,8 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         let occurrence: RoutineOccurrence | undefined;
         let precheck: PrecheckResult | undefined;
         let newClaim = false;
-        await runtime.commit(async (tx) => {
+        let previousTaskId: string | undefined;
+        const claimDue = (checked?: { status: TaskState | undefined }) => runtime.commit(async (tx) => {
           const { rules } = await tx.doc(routinesDoc);
           const rule = snapshot(rules[key]);
           if (!rule || rule.revision !== revision || rule.status !== "scheduled") return completed;
@@ -313,10 +338,25 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           const latest = latestRoutineTime(rule.schedule, now);
           const missed = at < openedAt || (latest !== undefined && latest > at);
           const due = occurrenceFor(rule, latest === undefined ? at : Math.max(at, latest));
-          if (missed && rule.missedPolicy === "skip") {
-            const skipped:Receipt={id:due.id,scheduledAt:due.scheduledAt,status:'skipped',...(due.timing ? {timing:due.timing} : {})};
-            await recordOccurrence(tx,runtime.conversationId,rule,skipped,now);
-            const advanced = advance(rule,skipped,now);
+          const skipMissed = missed && rule.missedPolicy === "skip";
+          let blockedBy: Receipt["blockedBy"];
+          if (!skipMissed && rule.overlapPolicy === "skip" && options.taskOverview && rule.lastStarted) {
+            if (!checked) {
+              previousTaskId = rule.lastStarted.taskId;
+              return;
+            }
+            const status = checked.status;
+            if (status && !["completed", "answered", "cancelled", "failed", "budget_limited"].includes(status)) {
+              blockedBy = { ...rule.lastStarted, status };
+            }
+          }
+          if (skipMissed || blockedBy) {
+            const skipped: Receipt = {
+              id: due.id, scheduledAt: due.scheduledAt, status: "skipped",
+              ...(due.timing ? { timing: due.timing } : {}), ...(blockedBy ? { blockedBy } : {}),
+            };
+            await recordOccurrence(tx, runtime.conversationId, rule, skipped, now);
+            const advanced = advance(rule, skipped, now);
             rules[key] = advanced.rule;
             return advanced.state;
           }
@@ -325,6 +365,12 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           occurrence = due;
           newClaim = true;
         }, ctx);
+        await claimDue();
+        // Budget settlement can abort this timer before its queued task lookup runs.
+        if (previousTaskId && options.taskOverview && !runtime.signal.aborted) {
+          const overview = await awaitWithContext(options.taskOverview(previousTaskId), ctx);
+          await claimDue({ status: overview?.status });
+        }
         if (!occurrence || runtime.signal.aborted) return;
 
         const due = occurrence;
@@ -444,12 +490,12 @@ export class LocalRoutines {
     }, context);
   }
 
-  async history(id:string):Promise<(RoutineOccurrenceRecord & {sequence:number})[]> {
+  async history(id: string, includeTaskStatus = false): Promise<RoutineHistoryRecord[]> {
     const key=keyFor(inputId(id));
     const {harness,conversationId}=await this.open();
     await harness.commit(async tx=>{if(!(await tx.doc(routinesDoc)).rules[key]) throw new RoutineError(404,'Routine not found.');},context);
     const root=(await harness.conversation(conversationId,context))!;
-    const records:(RoutineOccurrenceRecord & {sequence:number})[]=[];
+    const records: RoutineHistoryRecord[] = [];
     let cursor:Cursor|undefined;
     do {
       const page=await root.entries({order:'ascending'},200,cursor,context);
@@ -458,6 +504,18 @@ export class LocalRoutines {
       }
       cursor=page.next;
     } while(cursor);
+    if (includeTaskStatus && this.options.taskOverview) {
+      const overviews = new Map<string, TaskOverview | undefined>();
+      for (const record of records) {
+        if (!record.taskId) continue;
+        if (!overviews.has(record.taskId)) overviews.set(record.taskId, await this.options.taskOverview(record.taskId));
+        const overview = overviews.get(record.taskId);
+        record.taskStatus = overview?.status ?? "missing";
+        if (overview?.reason) record.taskReason = overview.reason.slice(0, 2000);
+        if (overview?.question) record.taskQuestion = overview.question;
+        if (overview?.summary) record.taskSummary = overview.summary.slice(0, 2000);
+      }
+    }
     return records;
   }
 

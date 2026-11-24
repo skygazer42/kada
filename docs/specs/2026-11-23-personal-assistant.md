@@ -2,6 +2,8 @@
 
 版本 v0.3，状态为 implemented，日期 2026-11-23。实现基线为 Fork 的 `6e6abcc`，功能方案提交为 `2a93e8f`。F01—F18 已实现首期终端和本地 API，用户选定的 agent-browser 已完成本地网页接管验收。下文源码参考保留固定快照，使用入口见[个人助手使用说明](../assistant-usage.md)。
 
+待答交接、例行任务防重叠、手机增量历史和浏览器观察裁剪的具体实现、固定源码与验收结果见[后续优化记录](../experiments/2026-11-24-assistant-optimization-directions.md#本轮实现与验证)。
+
 ## 1. 目标与实现约束
 
 在现有本地助手上补齐可管理的记忆、任务交接、模型与工具设置、例行任务和远程入口。首期以终端和现有本地 API 交付，macOS 客户端消费相同投影。参考优先级为 OpenMausBot、Rakazo、Suparagent，其余项目补充具体机制。

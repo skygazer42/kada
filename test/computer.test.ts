@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { ComputerBridge } from "../src/computer.js";
 import { LocalRuntime } from "../src/runtime.js";
 import { demoFixture, until } from "./helpers.js";
@@ -83,5 +83,59 @@ test("MCP desktop actions serialize and screenshot bytes reach the Pi model cont
     const task = await runtime.create("Verify simulated desktop controls.", f.workspace);
     const status = await until(() => runtime!.status(task.id), s => ["completed", "failed"].includes(s.status));
     assert.equal(status.status, "completed", JSON.stringify(status.submission));
+  } finally { await runtime?.close(); await bridge.close(); await f.close(); }
+});
+
+test("Pi requests omit superseded browser payloads while keeping the durable results and lease boundaries", async () => {
+  const f = await demoFixture();
+  const bridge = new ComputerBridge();
+  let runtime: LocalRuntime | undefined;
+  try {
+    await bridge.connect({ ...driver, args: [...driver.args, "--browser"],
+      tools: ["agent_browser_snapshot", "agent_browser_screenshot", "agent_browser_click"],
+      observationTools: ["agent_browser_snapshot", "agent_browser_screenshot"] });
+    const snapshot = "computer_0_agent_browser_snapshot", screenshot = "computer_1_agent_browser_screenshot", click = "computer_2_agent_browser_click";
+    const faux = fauxProvider({ provider: "test", models: [{ id: "vision", input: ["text", "image"] }] });
+    const call = (name: string, id: string, args = {}) => fauxAssistantMessage(fauxToolCall(name, args, { id }), { stopReason: "toolUse" });
+    const requests: Record<string, TranscriptContext["messages"]> = {};
+    faux.setResponses([
+      call("computer_begin", "begin"), call(snapshot, "old"), call(snapshot, "full", { interactive: false }), call(click, "action"),
+      call(snapshot, "error", { fail: true }), call(screenshot, "first-image"), call(screenshot, "last-image"),
+      request => { requests.before = request.messages; return call(snapshot, "latest"); },
+      async request => {
+        requests.after = request.messages;
+        await bridge.takeover(); await bridge.returnControl();
+        return call("computer_begin", "handoff");
+      },
+      request => { requests.handoff = request.messages; return call(snapshot, "fresh"); },
+      request => { requests.fresh = request.messages; return call("task_submit", "submit", { summary: "Observed the browser after return.", artifacts: [] }); },
+    ]);
+    const models = createModels(); models.setProvider(faux.provider);
+    runtime = new LocalRuntime({ ...f.config, review: false, model: { provider: "test", modelId: "vision" } }, { models, computer: bridge });
+    const task = await runtime.create("Verify browser observations before and after handoff.", f.workspace);
+    const status = await until(() => runtime!.status(task.id), s => ["completed", "failed"].includes(s.status));
+    assert.equal(status.status, "completed");
+
+    const byId = (messages: TranscriptContext["messages"], id: string) => {
+      const result = messages.find(m => m.role === "toolResult" && m.toolCallId === id);
+      assert(result?.role === "toolResult", `Missing result for ${id}`);
+      return result;
+    };
+    const old = byId(requests.after!, "old"), stored = byId(status.messages, "old");
+    assert.match(JSON.stringify(byId(requests.before!, "old").content), /first snapshot/);
+    assert.match(JSON.stringify(stored.content), /first snapshot/);
+    assert.match(JSON.stringify(old.content), /superseded/i);
+    assert.ok(Buffer.byteLength(JSON.stringify(stored.content)) - Buffer.byteLength(JSON.stringify(old.content)) > 1_900);
+    assert.equal(old.toolName, stored.toolName);
+    assert.equal(old.timestamp, stored.timestamp);
+    for (const id of ["full", "action", "error", "latest", "last-image"]) {
+      assert.deepEqual(byId(requests.after!, id).content, byId(status.messages, id).content);
+    }
+    assert.equal(byId(requests.after!, "error").isError, true);
+    assert.ok(byId(status.messages, "first-image").content.some(block => block.type === "image"));
+    assert.ok(byId(requests.after!, "first-image").content.every(block => block.type !== "image"));
+    assert.deepEqual(byId(requests.after!, "first-image").content[0], { type: "text", text: "screenshot receipt 1" });
+    assert.deepEqual(byId(requests.handoff!, "latest").content, byId(requests.fresh!, "latest").content);
+    assert.deepEqual(byId(requests.fresh!, "fresh").content, byId(status.messages, "fresh").content);
   } finally { await runtime?.close(); await bridge.close(); await f.close(); }
 });

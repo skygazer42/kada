@@ -80,3 +80,20 @@ OpenMausBot 的通知接口用读取方区分通知状态。Kada 的手机会话
 从连接、回到页面或手动刷新开始更新列表，控制加载完整任务状态的次数。浏览器验收覆盖两个同设备会话，一项正在执行，另一项进入待答或交付。更新后可直接接回原会话，并核对其他设备的任务状态与理由不可见。 [现有完整任务状态开销](../../src/runtime.ts#L786)
 
 这轮复现覆盖本地脚本化模型和合成 MCP。两个硅基流动样本来自此前的合成交接实验。下一轮的降本结论依赖新的匹配对照，真实用户任务、小时级交付和实机条件各自保留原有验收要求。 [既有验收记录](2026-11-23-assistant-validation.md)
+
+## 本轮实现与验证
+
+以下改动以 Fork 的 `0db9cba` 为基线，沿用 Pi 1.4.0。每项采用参考项目的具体机制，并在现有 Kada 入口验证。
+
+| 功能 | 参考机制与 Kada 实现 | 验证 |
+| --- | --- | --- |
+| 提问后进入待答 | OpenMausBot 的循环监督为特定失误给出定向提示。Kada 沿用监督 outbox，在执行回合缺少提交时要求登记已问的问题或提交现有结果。 [OpenMausBot 循环监督](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/loop-guard.ts#L202) · [Kada 监督](../../src/runtime.ts) | 脚本化模型写一次初稿，收到一次纠正，登记原问题，接收一次用户答复，最终通过文件验收。 [回归](../../test/supervision.test.ts) |
+| 例行任务防重叠与历史详情 | OpenMausBot 保存跳过原因和运行详情。Pots 保存旧版本的执行结果，并用版本校验保护当前规则。Kada 可按规则版本在预检前跳过重叠发生项，并通过原任务 ID 查当前状态。 [OpenMausBot 跳过原因](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routine-skips.ts#L25) · [运行详情](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routine-run-card.ts#L7) · [Pots 结果结算](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/gateway/timers.ts#L233) · [Kada 规则](../../src/routines.ts) | 跳过时预检和模型均未执行，重启后仍按原任务判断。历史可读到待答问题、完成摘要，并区分尚未建立任务与发生项失败。预算结算可取消正在等待状态查询的定时任务。 [端到端回归](../../test/routine-admission.test.ts) · [规则回归](../../test/routines.test.ts) |
+| 手机历史增量 | Codync 从客户端最后保存的事件位置继续补发。Kada 通过原详情请求使用 Pi `EntryId`，在设备归属校验后顺序读取新条目。 [Codync 事件续读](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/host/src/api/events.rs#L55) · [Android 接回位置](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/AppStoreConnection.kt#L114) · [Kada 服务端](../../src/remote.ts) · [手机页面](../../src/remote-page.ts) | 覆盖空轮询仍更新任务、游标失效、压缩重开、断线、会话切换和设备隔离。 [API 回归](../../test/remote.test.ts) · [页面回归](../../test/remote-pending-page.test.ts) |
+| 浏览器观察裁剪 | Rakazo 在请求上下文移除已被替代的大块工具结果。Kada 用 Pi `GenerationTask.beforeRequest` 省略同一租约内已被替代的大段同类快照或截图图片，保留工具调用对应关系和完整持久结果。 [Rakazo 裁剪](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/runtime/context/context-pruning.ts#L39) · [请求上下文](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/runtime/context/runtime-context.ts#L90) · [Kada 电脑桥](../../src/computer.ts) | 核对模型请求与 Pi 持久记录，覆盖不同观察类型、接管和重连边界、动作回执、错误及用户图片。 [回归](../../test/computer.test.ts) |
+
+手机增量测试使用本地服务、脚本化 Pi 模型和 390 × 844 的 Chromium 视口。首次详情的未压缩 JSON 响应为 16,429 字节，空闲轮询为 757 字节。人为断开三次请求后，恢复响应为 1,173 字节，页面依序补齐两条新消息。切换和刷新另一个会话都正确重载。每次轮询仍构造当前任务状态并读取回执，未测服务端 CPU 或实际手机网络流量。
+
+浏览器快照测试使用 agent-browser 0.38.1、本地合成网页和脚本化 Pi 模型。接管和重连后，页面状态与交付文件一致。三份快照的持久内容共 10,860 字节，投影到模型请求的快照内容为 7,380 字节，减少 32.0%。原测试的自动关闭超时，随后用同一驱动关闭测试会话。图片裁剪由 MCP 夹具验证，实际 CLI 把截图写入本地文件。快照字节数仅衡量该请求的观察内容，供应商的 token、缓存命中和账单尚待测量。
+
+沿用合成日报脚本，以硅基流动 DeepSeek-V3.2 复测待答交接。原生 Pi 用 6 次请求完成。Kada 第一轮保留了正确草稿，180 秒内尚未进入待答，记录 2 次模型流错误。单独重试时，Kada 保存原问题并在重启后接回，验证记忆引用、原草稿和最终 JSON 均正确，提交前达到 180 秒上限，记录 1 次模型流错误。单独重试共 9 次请求、38,530 token。在线样本未完成交付，定向纠正的行为由脚本化回归验证。 [复测脚本](../../scripts/compare-assistant-handoff.ts) · [定向回归](../../test/supervision.test.ts)

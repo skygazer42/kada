@@ -124,8 +124,7 @@ let pending = new Map();
 let busy = false;
 let refreshVersion = 0;
 let listVersion = 0;
-let shownMessages = [];
-let lastProgressSequence = 0;
+let historyCursor = null;
 let shownTask = "";
 let disconnected = false;
 
@@ -206,8 +205,7 @@ function choose(id) {
 
 function resetConversationView() {
   refreshVersion++;
-  shownMessages = [];
-  lastProgressSequence = 0;
+  historyCursor = null;
   shownTask = "";
   messages.replaceChildren();
   taskEvents.replaceChildren();
@@ -412,11 +410,20 @@ async function refresh() {
   if (!identity || !conversationId) return;
   const version = ++refreshVersion;
   const id = conversationId;
-  await checkReceipt();
-  if (id !== conversationId || version !== refreshVersion) return;
+  const current = () => version === refreshVersion;
+  const path = conversationPath(id);
+  let after = historyCursor;
   let view;
-  try { view = await get(conversationPath(id)); }
-  catch (error) {
+  try {
+    await checkReceipt();
+    if (!current()) return;
+    view = await get(after === null ? path : path + "?after=" + after).catch((error) => {
+      if (!current() || after === null || !(error instanceof RequestError) || error.status !== 400) throw error;
+      after = null;
+      return get(path);
+    });
+  } catch (error) {
+    if (!current()) return;
     if (error instanceof RequestError && error.status === 404) {
       if (disconnected) status.textContent = "";
       disconnected = false;
@@ -424,31 +431,29 @@ async function refresh() {
     }
     throw error;
   }
-  if (id !== conversationId || version !== refreshVersion) return;
+  if (!current()) return;
   if (disconnected) status.textContent = "";
   disconnected = false;
-  const snapshot = view.messages.map((message) => JSON.stringify(message));
-  if (shownMessages.some((previous, index) => previous !== snapshot[index])) {
-    shownMessages = [];
+  if (after === null && historyCursor !== null) {
     messages.replaceChildren();
+    taskEvents.replaceChildren();
+    taskHistory.hidden = true;
   }
-  for (const message of view.messages.slice(shownMessages.length)) {
+  for (const message of view.messages) {
     const fromUser = message.role === "user";
     const article = element("article", "", messages);
     article.className = "message " + (fromUser ? "message-user" : "message-assistant");
     element("p", fromUser ? "You" : "Kada", article).classList.add("speaker");
     element("p", message.text, article);
   }
-  shownMessages = snapshot;
   for (const event of view.progressEvents || []) {
-    if (event.sequence <= lastProgressSequence) continue;
     const row = element("li", event.label + " · ", taskEvents);
     const occurred = new Date(event.timestamp);
     const time = element("time", occurred.toLocaleString(), row);
     time.dateTime = occurred.toISOString();
-    lastProgressSequence = event.sequence;
     taskHistory.hidden = false;
   }
+  historyCursor = view.cursor;
   const taskSnapshot = JSON.stringify(view.task);
   if (taskSnapshot !== shownTask) {
     shownTask = taskSnapshot;

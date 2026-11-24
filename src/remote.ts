@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import type { EntryId } from "@earendil-works/pi-durable";
 import type { LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
 import { taskGroup, taskView } from "./task-view.js";
@@ -357,10 +358,17 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       b.updatedAt - a.updatedAt || a.conversationId.localeCompare(b.conversationId));
   }
 
-  async function history(conversation: Conversation) {
+  async function history(conversation: Conversation, cursors: string[]) {
+    const raw = cursors[0];
+    const after = raw === undefined ? undefined : Number(raw) as EntryId;
+    if (cursors.length > 1 || raw !== undefined && (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(after))) {
+      throw new HttpError(400, "Invalid history cursor.");
+    }
     const status = await taskStatus(conversation);
     const view = status ? taskView(status) : undefined;
-    const history = status ? await runtime.conversationHistory(conversation.taskId) : { messages: [], progressEvents: [] };
+    const history = status ? await runtime.conversationHistory(conversation.taskId, after) :
+      after === undefined ? { cursor: null, messages: [], progressEvents: [] } : undefined;
+    if (!history) throw new HttpError(400, "Invalid history cursor.");
     const delivery = status && view?.delivery ? {
       ...view.delivery,
       artifacts: verifiedArtifacts(status, conversation).map(({ snapshot: _snapshot, ...artifact }) => artifact),
@@ -591,7 +599,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             });
           } else {
             const row = requireConversation(prior, scope);
-            if (method === "GET" && !action) send(response, 200, await history(row));
+            if (method === "GET" && !action) send(response, 200, await history(row, url.searchParams.getAll("after")));
             else if (method === "GET" && action?.startsWith("artifacts/")) {
               await download(response, row, route, url.searchParams.get("file"));
             } else if (method === "POST" && action === "confirm") {

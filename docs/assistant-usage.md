@@ -84,6 +84,7 @@ npm run harness -- mcp disable local-tools
 npm run harness -- routines add routine.json
 npm run harness -- routines list
 npm run harness -- routines history 规则ID
+npm run harness -- routines history 规则ID --task-status
 npm run harness -- routines update 规则ID routine.json
 npm run harness -- routines cancel 规则ID
 ```
@@ -91,6 +92,8 @@ npm run harness -- routines cancel 规则ID
 `weekday` 以周日为 0。每日/每周默认跳过离线错过项，单次默认补跑一次。`run_once` 只补最新一项。夏令时缺失时刻顺延，重复时刻选第一次。`notifyOnChange` 比较已验收产物的哈希；相同产物不重复通知，失败和待答仍展示。规则中的 task 操作就是对该目标及预算的明确授权。
 
 有明确 `workspace` 的任务规则可添加 `"precheck": {"command":["node","checks/project-fingerprint.mjs"]}`。脚本在该目录中以本地用户权限运行，使用参数数组直接启动，时限为 30 秒。使用只读脚本，并向标准输出写出稳定的 UTF-8 检查结果。首次成功或输出的 SHA-256 变化会创建任务，输出相同的发生项记为 `skipped`。更新规则版本会重新建立基线。预检失败或中断会记录原因，当前发生项到此结束。`routines history` 可查看预检状态和成功样本的哈希。
+
+每日或每周的任务可设置 `"overlapPolicy": "skip"`。如果同一规则版本的上一次任务仍在运行或等待处理，本次直接跳过。回执的 `blockedBy` 保存上一次发生项、任务 ID 和当时的状态。`--task-status` 按原任务 ID 查询当前状态，并在有值时显示待答问题、原因或交付摘要。若回执有关联 ID 但任务尚未建立，当前状态显示 `missing`。
 
 列表的 `nextTiming` 显示计划本地时间、实际本地时间及夏令时调整说明；发生项回执保留已采用的调整。`history` 读取 Pi 的持久条目，保留旧规则版本的认领、失败、跳过和预算停止记录。`claimed` 表示已认领但尚无确认结果，不能当作任务已经启动或成功；取消/中断后应按 `taskId` 查询实际状态。任务产物和用量仍从原任务读取。更早版本只有最近回执，没有的历史不会被补造。
 
@@ -105,6 +108,8 @@ npm run harness -- remote revoke owner phone
 配对返回一次性展示的设备令牌，在 `/remote` 页面输入。设备只访问自己的会话；daemon 管理令牌不会提供给手机。每个会话使用独立工作区和项目边界。附件每条消息最多 4 个、每个 5 MiB，输入和下载核对 SHA-256。已受理消息通过原请求身份查询，中断状态保留原请求。
 
 会话列表把待处理会话排在前面，并显示待答问题、等待原因和交付状态。连接、回到页面或点击 **Refresh** 都会更新列表。展开 **Task history** 可查看原会话中的请求补充、确认和交付阶段。
+
+打开会话时加载完整历史，之后使用 Pi 条目游标接收新增消息和进度，同时刷新任务状态和回执。临时断线后从最后收到的位置继续读取，切换会话或游标失效后重新同步。
 
 发送前，同一标签页会暂存原消息、已上传的附件引用和消息 ID。刷新后先查原回执。查不到回执时，可点击 **Retry send** 用原 ID 重发。已送达的消息会自动恢复，附件过期时可重新添加，原正文回到输入框。
 
@@ -121,6 +126,8 @@ npm run harness -- computer return
 ```
 
 未配置驱动时 status 显示 disabled。接管会立即阻止新动作并等待当前调用结束；`takingOver`、`busy` 和 `uncertain` 分别显示等待、当前操作及结果不明。回交或重连后重新获得租约并观察。
+
+同一次租约取得更新的同类观察后，模型请求会省略已被替代的大段快照或截图图片。完整观察保留在 Pi 会话历史中。交互快照、完整快照和截图分别处理。
 
 首个真实驱动选择为已安装的 agent-browser 0.38.1，仅用于本地测试网页。它的原生 MCP 端点在本机调用超时，因此提供 `scripts/agent-browser-stdio.ts` 薄适配，仍由现成 CLI 执行浏览器操作。会话、页面和截图路径固定，不提供任意 JavaScript 或 Shell。当前 CLI 不支持安全传递以 `-` 开头的填写值，适配会明确拒绝。
 

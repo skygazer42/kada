@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setImmediate } from "node:timers/promises";
+import { setImmediate, setTimeout } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { LocalRoutines, nextRoutineTime, type RoutineInput, type RoutineOccurrence } from "../src/routines.js";
@@ -272,6 +272,84 @@ test("R03 replays only the latest missed slot and persists a skipped slot", asyn
     assert.deepEqual(skipped?.lastOccurrence, { id: "skip/1/" + latest, scheduledAt: latest, status: "skipped" });
     assert.deepEqual((await routines.history('skip')).map(row=>[row.id,row.status]),[['skip/1/'+latest,'skipped']]);
   } finally {
+    await routines.close();
+  }
+});
+
+test("a recurring rule checks overlap only within its opted-in revision", async t => {
+  const dataDir = await tempDir(t);
+  const clock = fakeClock();
+  const calls: RoutineOccurrence[] = [];
+  let lookups = 0;
+  const routines = new LocalRoutines({
+    dataDir, ...clock,
+    execute: async occurrence => { calls.push(occurrence); return { taskId: occurrence.taskId }; },
+    taskOverview: async () => { lookups++; return { status: "blocked", reason: "Waiting on input", question: null, summary: null }; },
+  });
+  const rule: RoutineInput = {
+    id: "overlap-revision", action: "task", objective: "Original recurring rule",
+    schedule: { kind: "daily", time: "00:01", timeZone: "UTC" },
+  };
+  const fire = async (day: number) => {
+    const at = first + day * 86_400_000;
+    await until(() => clock.waitingAt(at));
+    clock.advanceTo(at);
+    await until(async () => (await routines.list())[0]?.lastOccurrence?.scheduledAt === iso(at));
+  };
+  try {
+    await routines.create(rule);
+    await fire(0);
+    await fire(1);
+    assert.equal(lookups, 0);
+    assert.deepEqual(calls.map(call => call.revision), [1, 1]);
+    await routines.update(rule.id!, { ...rule, overlapPolicy: "skip" });
+    await fire(2);
+    await fire(3);
+    assert.equal((await routines.list())[0]?.lastOccurrence?.blockedBy?.taskId, calls[2]?.taskId);
+    await routines.update(rule.id!, { ...rule, objective: "Revised recurring rule", overlapPolicy: "skip" });
+    await fire(4);
+    assert.deepEqual(calls.map(call => call.revision), [1, 1, 2, 3]);
+    assert.equal(lookups, 1);
+  } finally { await routines.close(); }
+});
+
+test("budget settlement can abort a timer waiting for the prior task state", async t => {
+  const dataDir = await tempDir(t);
+  const clock = fakeClock();
+  const lookup = Promise.withResolvers<undefined>();
+  let lookingUp = false;
+  const routines = new LocalRoutines({
+    dataDir, ...clock,
+    execute: async occurrence => ({ taskId: occurrence.taskId }),
+    taskOverview: () => { lookingUp = true; return lookup.promise; },
+  });
+  const id = "overlap-budget";
+  const timeout = new AbortController();
+  let settlement: Promise<void> | undefined;
+  try {
+    await routines.create({
+      id, action: "task", objective: "Budget-limited solution", overlapPolicy: "skip",
+      schedule: { kind: "daily", time: "00:01", timeZone: "UTC" },
+    });
+    await until(() => clock.waitingAt(first));
+    clock.advanceTo(first);
+    const next = first + 86_400_000;
+    await until(() => clock.waitingAt(next));
+    const [routine] = await routines.list();
+    assert.equal(routine.lastOccurrence?.status, "started");
+    const occurrenceId = routine.lastOccurrence!.id;
+    clock.advanceTo(next);
+    await until(() => lookingUp);
+
+    settlement = routines.settleBudget(occurrenceId);
+    const settled = await Promise.race([settlement.then(() => true), setTimeout(2_000, false, { signal: timeout.signal })]);
+    assert.equal(settled, true, "Settlement must finish before the pending task state lookup returns.");
+    assert.equal((await routines.list())[0].status, "paused");
+    assert.deepEqual((await routines.history(id)).map(row => row.status), ["claimed", "started", "budget_exhausted"]);
+  } finally {
+    timeout.abort();
+    lookup.resolve(undefined);
+    await settlement;
     await routines.close();
   }
 });

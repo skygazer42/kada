@@ -205,6 +205,18 @@ test("D04 polling the original chat returns ordered replies without duplication"
   const sequence: number[] = after.messages.map((message: { sequence: number }) => message.sequence);
   assert.deepEqual(sequence, [...new Set(sequence)].sort((a, b) => a - b));
   assert.deepEqual(await view(), after);
+  assert(Number.isSafeInteger(before.cursor) && before.cursor >= sequence[1]!);
+  const delta = await (await call(owner.token, path + "?after=" + before.cursor)).json();
+  assert.deepEqual(delta.messages, after.messages.slice(before.messages.length));
+  assert.deepEqual(delta.progressEvents, after.progressEvents.slice(before.progressEvents.length));
+  assert.deepEqual(delta.task, after.task);
+  assert.deepEqual(delta.receipts, after.receipts);
+  assert.equal(delta.cursor, after.cursor);
+  const idle = await (await call(owner.token, path + "?after=" + delta.cursor)).json();
+  assert.deepEqual(idle, { ...delta, messages: [], progressEvents: [] });
+  for (const invalid of ["", "-1", "0", "1.5", "1e3", "9007199254740992", String(delta.cursor + 1), delta.cursor + "&after=1"]) {
+    assert.equal((await call(owner.token, path + "?after=" + invalid)).status, 400, invalid);
+  }
 });
 
 test("D04 reconnect replays a resolved wait once across Pi pages and daemon reopen", async (t) => {
@@ -277,7 +289,14 @@ test("D04 reconnect replays a resolved wait once across Pi pages and daemon reop
   assert(!JSON.stringify(history).includes("PRIVATE_WAIT_REASON"));
   assert(!JSON.stringify(history).includes("Which heading?"));
   assert.deepEqual((await (await after.call(owner.token, path)).json()).progressEvents, history);
+  const delta = await (await after.call(owner.token, path + "?after=" + saved.cursor)).json();
+  assert.deepEqual(delta.progressEvents, history.slice(saved.progressEvents.length));
+  assert.deepEqual(delta.messages, view.messages.slice(saved.messages.length));
+  assert.deepEqual(delta.task, view.task);
+  assert.deepEqual(delta.receipts, view.receipts);
   assert.equal((await after.call(other.token, path)).status, 404);
+  assert.equal((await after.call(other.token, path + "?after=" + view.cursor)).status, 404);
+  assert.equal((await after.call(other.token, path + "?after=invalid")).status, 404);
 });
 
 test("the phone overview puts an older waiting chat first, then shows its delivery", async (t) => {
