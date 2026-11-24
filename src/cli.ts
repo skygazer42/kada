@@ -41,14 +41,27 @@ try {
     process.once("SIGTERM", stop);
   } else if (command === "memory") {
     const { ensureDaemon } = await import("./daemon.js");
-    const { ChatSession } = await import("./chat.js");
     await ensureDaemon(config, args.values.config);
-    const session = new ChatSession(client, event => console.log(event.text), args.values.workspace ? resolve(args.values.workspace) : process.cwd());
-    if (id === "used") {
-      if (!rest[0]) throw new Error("Provide a task ID after memory used.");
-      await session.attach(rest[0]);
-      await session.handle("/memory used");
-    } else await session.handle("/memory " + [id ?? "list", ...rest].join(" "));
+    const workspace = args.values.workspace ? resolve(args.values.workspace) : process.cwd();
+    if (id === "capture") {
+      const setting = rest[0];
+      if (rest.length > 1 || (setting !== undefined && setting !== "on" && setting !== "off")) {
+        throw new Error("Use memory capture [on|off] --workspace PATH.");
+      }
+      const path = "/v1/settings/memory/capture";
+      const state = setting === undefined
+        ? await request(path + "?workspace=" + encodeURIComponent(workspace))
+        : await request(path, "PUT", { workspace, enabled: setting === "on" });
+      console.log(JSON.stringify(state, null, 2));
+    } else {
+      const { ChatSession } = await import("./chat.js");
+      const session = new ChatSession(client, event => console.log(event.text), workspace);
+      if (id === "used") {
+        if (!rest[0]) throw new Error("Provide a task ID after memory used.");
+        await session.attach(rest[0]);
+        await session.handle("/memory used");
+      } else await session.handle("/memory " + [id ?? "list", ...rest].join(" "));
+    }
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));

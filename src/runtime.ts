@@ -169,6 +169,12 @@ export class LocalRuntime {
     if (this.config.discovery !== true) return { enabled: false, updatedAt: null, facts: [], notices: [] };
     return this.discovery.memoryView(workspace);
   }
+  async memoryCapture(workspace: string, enabled?: boolean) {
+    if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
+    return enabled === undefined
+      ? this.discovery.memory.captureSettings(workspace)
+      : this.discovery.memory.setCapture(workspace, enabled);
+  }
   async changeMemory(id: string, input: MemoryChange, workspace?: string) {
     return this.changes.run(async () => {
       if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
@@ -298,19 +304,22 @@ export class LocalRuntime {
       return meta;
     });
   }
-  async hasRequest(id: string, requestId: string): Promise<boolean> {
+  async hasRequest(id: string, requestId: string, required: "admitted" | "placed" | "recoverable" = "admitted"): Promise<boolean> {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
-      const accepted = await active.harness.commit(async tx => Boolean(
+      const submission = await active.harness.commit(async tx =>
         await tx.submissionByRequest(active.root.id, "user:" + requestId) ||
-        await tx.submissionByRequest(active.root.id, requestId)
-      ), ctx);
-      if (accepted) return true;
-      return (await this.goalState(active))?.outbox?.requestId === "user:" + requestId;
+        await tx.submissionByRequest(active.root.id, requestId), ctx);
+      if (required === "placed") return submission?.entry !== undefined;
+      if (submission) return required === "admitted" || submission.entry !== undefined ||
+        (submission.status === "queued" && meta.control !== "cancelled");
+      const outbox = (await this.goalState(active))?.outbox?.requestId;
+      return (required === "admitted" || meta.control !== "cancelled") &&
+        (outbox === requestId || outbox === "user:" + requestId);
     });
   }
-  async conversationHistory(id: string, after?: EntryId) {
+  async conversationHistory(id: string, after?: EntryId, linkedRequests: readonly string[] = []) {
     return this.changes.run(async () => {
       const active=await this.open(await this.metadata(id),false);
       const messages:{sequence:number;role:'user'|'assistant';text:string;timestamp:number}[]=[];
@@ -336,7 +345,16 @@ export class LocalRuntime {
         }
         cursor=page.next;
       } while(cursor);
-      return { cursor: latest ?? null, messages, progressEvents };
+      const entries = new Set(messages.filter((message) => message.role === "user").map((message) => message.sequence));
+      const messageEntries = entries.size && linkedRequests.length ? await active.harness.commit(async (tx) => {
+        const result = new Map<number, string>();
+        for (const requestId of linkedRequests) {
+          const record = await tx.submissionByRequest(active.root.id, requestId);
+          if (record?.entry !== undefined && entries.has(record.entry)) result.set(record.entry, requestId);
+        }
+        return result;
+      }, ctx) : new Map<number, string>();
+      return { cursor: latest ?? null, messages, progressEvents, messageEntries };
     });
   }
   private async open(meta: TaskMeta, run: boolean): Promise<Active> {

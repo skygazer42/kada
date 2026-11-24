@@ -38,6 +38,11 @@ export const remotePage = String.raw`<!doctype html>
     .message-user { background: #ede6fb; margin-left: min(8vw, 3rem); }
     .message-assistant { background: #fff; box-shadow: inset 0 0 0 1px var(--line); margin-right: min(8vw, 3rem); }
     .speaker { color: var(--muted); font-size: .78rem; font-weight: 700; }
+    .message-attachments { display: grid; gap: .5rem; margin: .65rem 0 0; padding: 0; list-style: none; }
+    .message-attachments li { padding: .6rem; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
+    .attachment-actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .35rem; }
+    .attachment-preview img { display: block; max-width: 100%; max-height: 60vh; margin-top: .4rem; }
+    .attachment-preview pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
     .task { background: #e9f7f0; border-color: #cce6d7; overflow-wrap: anywhere; }
     .task p + p, .task button, .task h3 { margin-top: .55rem; }
     .task ol, .task ul { margin: .3rem 0 0; padding-left: 1.4rem; }
@@ -416,6 +421,53 @@ async function download(artifact, container) {
   setTimeout(() => URL.revokeObjectURL(hrefBlob), 1000);
 }
 
+function presentAttachments(attachments, article) {
+  const list = element("ul", "", article);
+  list.className = "message-attachments";
+  for (const attachment of attachments) {
+    const card = element("li", "", list);
+    element("p", attachment.name, card);
+    const controls = element("div", "", card);
+    controls.className = "attachment-actions";
+    const image = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(attachment.type);
+    const text = attachment.type.startsWith("text/") || attachment.type === "application/json";
+    if (image || text) {
+      const preview = element("div", "", card);
+      preview.className = "attachment-preview";
+      const button = action("Preview", controls, async () => {
+        if (preview.children.length) {
+          preview.replaceChildren();
+          button.textContent = "Preview";
+          button.setAttribute("aria-expanded", "false");
+          return;
+        }
+        const response = await request(attachment.href.replace(/^\/remote\/api/, ""));
+        const blob = await response.blob();
+        if (image) {
+          const picture = element("img", "", preview);
+          const href = URL.createObjectURL(new Blob([blob], { type: attachment.type }));
+          picture.alt = attachment.name;
+          picture.addEventListener("load", () => URL.revokeObjectURL(href), { once: true });
+          picture.addEventListener("error", () => {
+            URL.revokeObjectURL(href);
+            preview.replaceChildren();
+            element("p", "The image preview could not be opened.", preview);
+          }, { once: true });
+          picture.src = href;
+        } else {
+          const limit = 64 * 1024;
+          element("pre", await blob.slice(0, limit).text(), preview);
+          if (blob.size > limit) element("p", "Preview shows the first 64 KiB. Download to open the full file.", preview);
+        }
+        button.textContent = "Hide preview";
+        button.setAttribute("aria-expanded", "true");
+      });
+      button.setAttribute("aria-expanded", "false");
+    }
+    action("Download", controls, () => download(attachment, card));
+  }
+}
+
 function taskStatusLabel(status) {
   const labels = {
     pending: "Pending", running: "Running", working: "Working", clarifying: "Clarifying", awaiting_confirmation: "Ready for confirmation",
@@ -545,7 +597,8 @@ async function refresh() {
     const article = element("article", "", messages);
     article.className = "message " + (fromUser ? "message-user" : "message-assistant");
     element("p", fromUser ? "You" : "Kada", article).classList.add("speaker");
-    element("p", message.text, article);
+    if (message.text) element("p", message.text, article);
+    if (message.attachments?.length) presentAttachments(message.attachments, article);
   }
   for (const event of view.progressEvents || []) {
     const row = element("li", event.label + " · ", taskEvents);

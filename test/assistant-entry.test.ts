@@ -224,3 +224,27 @@ test('the authenticated routine run endpoint returns the same receipt for a repe
     assert.equal(rules.find(rule => rule.id === id)?.nextRunAt, at);
   } finally { await server.close(); await f.close(); }
 });
+
+test('the owner can read and change the project memory capture setting across daemon restart', async () => {
+  const f = await scriptedFixture(() => fauxAssistantMessage('No model needed'));
+  const settings = { ...f.settings, discovery: true, port: await portNumber() };
+  const home = join(f.directory, 'synthetic-home');
+  await mkdir(home);
+  const options = { models: f.models, discovery: { home } };
+  let server = await serve(settings, options);
+  const client = createClient(settings);
+  const path = '/v1/settings/memory/capture';
+  const query = '?workspace=' + encodeURIComponent(f.workspace);
+  try {
+    const outside = await fetch(`http://127.0.0.1:${settings.port}${path}${query}`);
+    assert.equal(outside.status, 401);
+    const initial = await client.request<{ project: string; enabled: boolean }>(path + query);
+    assert.equal(initial.enabled, true);
+    await assert.rejects(client.request(path, 'PUT', { workspace: f.workspace, enabled: 'false' }), /boolean/i);
+    assert.deepEqual(await client.request(path, 'PUT', { workspace: f.workspace, enabled: false }), { ...initial, enabled: false });
+    await server.close();
+    server = await serve(settings, options);
+    assert.deepEqual(await client.request(path + query), { ...initial, enabled: false });
+    assert.deepEqual(await client.request(path, 'PUT', { workspace: f.workspace, enabled: true }), initial);
+  } finally { await server.close(); await f.close(); }
+});

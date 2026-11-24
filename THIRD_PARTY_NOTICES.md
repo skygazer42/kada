@@ -9,6 +9,7 @@ Kada's LICENSE applies to Kada-owned code and repository-owned character artwork
 | @earendil-works/pi-coding-agent | 1.4.0 | MIT |
 | @earendil-works/pi-durable | 1.4.0 | MIT |
 | @modelcontextprotocol/sdk | 1.32.2 | MIT |
+| croner | 11.0.1 | MIT |
 | jsonc-parser | 3.3.1 | MIT |
 | proper-lockfile | 4.1.2 | MIT |
 | smol-toml | 1.9.1 | BSD-3-Clause |

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -12,6 +12,7 @@ import { until } from "./helpers.js";
 import { LocalDiscovery } from "../src/discovery.js";
 import { createClient } from "../src/client.js";
 import { MemoryMutationError, memoryRevision } from "../src/user-memory.js";
+import { claudeProject } from "../src/memory-sources.js";
 import { serve } from "../src/server.js";
 
 async function fixture() {
@@ -24,6 +25,105 @@ async function fixture() {
   const discovery = new LocalDiscovery(data, { home, timezone: "America/Los_Angeles" });
   return { directory, home, data, alpha, beta, discovery, close: () => rm(directory, { recursive: true, force: true }) };
 }
+
+test("project capture can stop project sources and organizer writes while retaining local recall", async () => {
+  const f = await fixture();
+  try {
+    const nested = join(f.alpha, "subdirectory");
+    const mirror = join(f.home, ".claude", "projects", claudeProject(f.alpha).slice("claude:".length), "memory");
+    await Promise.all([mkdir(nested), mkdir(mirror, { recursive: true })]);
+    const report = (await f.discovery.memoryView(f.alpha)).facts.find(fact => fact.text === "项目日报请用中文。")!;
+    const snapshotNames = async (folder: string) => (await readdir(join(f.discovery.directory, folder), { recursive: true })).sort();
+    const filesBefore = await Promise.all([snapshotNames("memory-originals"), snapshotNames("memory-snapshots")]);
+    assert.equal((await f.discovery.memory.captureSettings(nested)).enabled, true);
+    assert.deepEqual(await f.discovery.memory.setCapture(nested, false), { project: f.alpha, enabled: false });
+    const imported = join(f.home, "export.md");
+    await Promise.all([
+      writeFile(join(f.alpha, "AGENTS.md"), "项目日报请用英文。"),
+      writeFile(join(mirror, "note.md"), "项目 Claude 新线索应暂停采集。"),
+      writeFile(imported, "项目手工导入的新线索应暂停采集。"),
+      writeFile(join(f.discovery.directory, "memory-imports.json"), JSON.stringify([
+        { path: imported, provider: "chatgpt", scope: "project", domain: "work", project: nested },
+      ])),
+    ]);
+    const reopened = new LocalDiscovery(f.data, { home: f.home });
+    assert.deepEqual(await reopened.memory.captureSettings(nested), { project: f.alpha, enabled: false });
+    await reopened.view(true);
+    assert.deepEqual(await Promise.all([snapshotNames("memory-originals"), snapshotNames("memory-snapshots")]), filesBefore);
+    const beta = await reopened.memoryView(f.beta);
+    assert.ok(beta.facts.some(fact => fact.text === "项目日报请用法文。"));
+    const alpha = await reopened.memoryView(nested);
+    assert.deepEqual(alpha.facts.filter(fact => fact.scope === "project").map(fact => [fact.text, fact.revision]),
+      [[report.text, report.revision]]);
+    const afterBeta = await Promise.all([snapshotNames("memory-originals"), snapshotNames("memory-snapshots")]);
+
+    const tools = reopened.memory.extension("test-capture", f.home, () => reopened.load(), async () => ["Use a new global preference."], nested).tools!;
+    const writer = tools.find(tool => tool.name === "user_remember")!;
+    const reader = tools.find(tool => tool.name === "user_memory_search")!;
+    const traced = await reader.execute({ query: "项目日报", domain: report.domain ?? "work" }, {}, {});
+    assert.match(JSON.stringify(traced), /项目日报请用中文/);
+    await assert.rejects(writer.execute({ facts: [{
+      text: "Use a new global preference.", category: "preferences", scope: "global", certainty: "stated",
+      evidence: [{ sourceId: "user", quote: "Use a new global preference." }],
+    }] }, { taskId: 77 }, {}), /capture.*disabled/i);
+    assert.deepEqual(await Promise.all([snapshotNames("memory-originals"), snapshotNames("memory-snapshots")]), afterBeta);
+    assert.ok(!(await reopened.memoryView(nested)).facts.some(fact => fact.text === "Use a new global preference."));
+
+    const corrected = await reopened.memory.change(f.home, report.id, {
+      action: "correct", expectedRevision: report.revision, requestId: "capture-edit", text: "项目日报请用德文。",
+    }, nested);
+    const forgotten = await reopened.memory.change(f.home, corrected.id, {
+      action: "forget", expectedRevision: corrected.revision, requestId: "capture-forget",
+    }, nested);
+    assert.equal(forgotten.state, "forgotten");
+
+    await reopened.memory.setCapture(f.alpha, true);
+    const resumed = (await reopened.memoryView(nested)).facts.map(fact => fact.text).join("\n");
+    assert.match(resumed, /英文/);
+    assert.match(resumed, /Claude 新线索/);
+    assert.match(resumed, /手工导入的新线索/);
+  } finally { await f.close(); }
+});
+
+test("an open Pi chat respects a live capture toggle and can still use existing memory", async () => {
+  const f = await fixture();
+  const provider = fauxProvider({ provider: "memory-capture", models: [{ id: "scripted" }] });
+  const quote = "Use a new global preference.";
+  provider.setResponses([
+    fauxAssistantMessage("Chat ready."),
+    fauxAssistantMessage(fauxToolCall("user_remember", { facts: [{
+      text: quote, category: "preferences", scope: "global", certainty: "stated",
+      evidence: [{ sourceId: "user", quote }],
+    }] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("user_memory_search", { query: "项目日报", domain: "work" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("Existing project memory is available."),
+  ]);
+  const models = createModels();
+  models.setProvider(provider.provider);
+  const config = { dataDir: f.data, port: 4317, model: { provider: "memory-capture", modelId: "scripted" },
+    maxSubagents: 1, maxDurationMs: 30_000, discovery: true, web: false };
+  const runtime = new LocalRuntime(config, { models, discovery: { home: f.home } });
+  try {
+    const task = await runtime.create("Ordinary chat", f.alpha, [], { chat: true });
+    await until(() => runtime.status(task.id), status => status.status === "answered");
+    await f.discovery.memory.setCapture(f.alpha, false);
+    await runtime.followUp(task.id, quote);
+    const status = await until(() => runtime.status(task.id), result =>
+      result.messages.some(message => message.role === "assistant" &&
+        message.content.some(block => block.type === "text" && block.text === "Existing project memory is available.")));
+    const results = status.messages.filter(message => message.role === "toolResult");
+    const rejected = results.find(message => message.toolName === "user_remember");
+    assert.equal(rejected?.isError, true);
+    assert.match(JSON.stringify(rejected), /capture.*disabled/i);
+    const search = results.find(message => message.toolName === "user_memory_search");
+    assert.equal(search?.isError, false);
+    assert.match(JSON.stringify(search), /项目日报请用中文/);
+    assert.ok(!(await f.discovery.memoryView(f.alpha)).facts.some(fact => fact.text === quote));
+  } finally {
+    await runtime.close();
+    await f.close();
+  }
+});
 
 test("M01/M02 project memory views filter scope and keep stable source revisions", async () => {
   const f = await fixture();

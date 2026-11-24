@@ -1,3 +1,7 @@
+import { Cron } from "croner";
+
+type CronSchedule = { kind: "cron"; expression: string; timeZone: string };
+
 type IntervalSchedule = {
   kind: "interval";
   anchorAt: string;
@@ -12,7 +16,8 @@ export type RoutineSchedule =
   | { kind: "once"; at: string }
   | { kind: "daily"; time: string; timeZone: string }
   | { kind: "weekly"; weekday: number; time: string; timeZone: string }
-  | IntervalSchedule;
+  | IntervalSchedule
+  | CronSchedule;
 
 const dayMs = 86_400_000;
 const minuteMs = 60_000;
@@ -39,6 +44,30 @@ function recurringZone(timeZone: string): string {
 
 function clockMinutes(value: string): number {
   return Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5));
+}
+
+function cronCalendar({ expression, timeZone }: CronSchedule): Cron {
+  return new Cron(expression, { mode: "5-part", timezone: timeZone, paused: true });
+}
+
+function normalizeCron(schedule: CronSchedule): CronSchedule {
+  if (Object.keys(schedule).some(key => !["kind", "expression", "timeZone"].includes(key))) {
+    throw new Error("A cron schedule accepts only kind, expression and timeZone.");
+  }
+  const expression = typeof schedule.expression === "string" ? schedule.expression.trim().replace(/\s+/g, " ") : "";
+  if (expression.length > 256 || expression.split(" ").length !== 5 || expression.includes("@")) {
+    throw new Error("A cron expression must have five fields: minute, hour, day of month, month, and weekday.");
+  }
+  const timeZone = typeof schedule.timeZone === "string" ? schedule.timeZone.trim() : "";
+  if (timeZone.length > 128 || !/^(?:UTC|[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)+)$/.test(timeZone)) {
+    throw new Error("A cron schedule needs a valid IANA time zone.");
+  }
+  try { recurringZone(timeZone); }
+  catch { throw new Error("A cron schedule needs a valid IANA time zone."); }
+  const normalized = { kind: "cron" as const, expression, timeZone };
+  try { cronCalendar(normalized); }
+  catch (error) { throw new Error("Invalid cron expression.", { cause: error }); }
+  return normalized;
 }
 
 function normalizeInterval(schedule: IntervalSchedule): IntervalSchedule {
@@ -77,8 +106,9 @@ export function normalizeRoutineSchedule(schedule: RoutineSchedule): RoutineSche
     return { kind: "once", at: new Date(explicitInstant(schedule.at, "A reminder")).toISOString() };
   }
   if (schedule.kind === "interval") return normalizeInterval(schedule);
+  if (schedule.kind === "cron") return normalizeCron(schedule);
   if (schedule.kind !== "daily" && schedule.kind !== "weekly") {
-    throw new Error("A routine schedule must be once, daily, weekly, or interval.");
+    throw new Error("A routine schedule must be once, daily, weekly, interval, or cron.");
   }
   if (typeof schedule.time !== "string" || !wallTimePattern.test(schedule.time)) {
     throw new Error("A recurring routine must have a local time in HH:MM format.");
@@ -182,6 +212,7 @@ function intervalTime(schedule: IntervalSchedule, boundary: number, direction: 1
 
 export function nextRoutineTime(schedule: RoutineSchedule, after: number): number | undefined {
   if (schedule.kind === "interval") return intervalTime(schedule, after, 1);
+  if (schedule.kind === "cron") return cronCalendar(schedule).nextRun(new Date(after))?.getTime();
   if (schedule.kind !== "once") return recurringTime(schedule, after, 1);
   const at = Date.parse(schedule.at);
   return at > after ? at : undefined;
@@ -189,6 +220,7 @@ export function nextRoutineTime(schedule: RoutineSchedule, after: number): numbe
 
 export function latestRoutineTime(schedule: RoutineSchedule, through: number): number | undefined {
   if (schedule.kind === "interval") return intervalTime(schedule, through, -1);
+  if (schedule.kind === "cron") return cronCalendar(schedule).previousRuns(1, new Date(through + 1))[0]?.getTime();
   if (schedule.kind !== "once") return recurringTime(schedule, through, -1);
   const at = Date.parse(schedule.at);
   return at <= through ? at : undefined;
@@ -205,7 +237,7 @@ export type RoutineTiming = {
 
 /** Describe the same instant calculation used by Pi timers, without adding timer state. */
 export function routineTiming(schedule: RoutineSchedule, at: number): RoutineTiming | undefined {
-  if(schedule.kind==='once' || schedule.kind==='interval') return;
+  if(schedule.kind==='once' || schedule.kind==='interval' || schedule.kind==='cron') return;
   const clock=wallClock(schedule.timeZone),local=new Date(wallTime(clock,at));
   const localDate=local.toISOString().slice(0,10),localTime=local.toISOString().slice(11,16);
   const requested=Date.parse(localDate+'T'+schedule.time+':00Z');

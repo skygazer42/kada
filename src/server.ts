@@ -70,6 +70,14 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       }
       if (url.pathname === "/v1/environment" && req.method === "GET") return send(200, await runtime.localSetup());
       if (url.pathname === "/v1/environment/memory" && req.method === "GET") return send(200, await runtime.localMemory(url.searchParams.get("workspace") ?? undefined));
+      if (url.pathname === "/v1/settings/memory/capture") {
+        if (req.method === "GET") return send(200, await runtime.memoryCapture(url.searchParams.get("workspace") ?? ""));
+        if (req.method === "PUT") {
+          const { workspace, enabled } = await body(req);
+          if (typeof workspace !== "string" || typeof enabled !== "boolean") throw new MemoryMutationError(400, "Provide a workspace path and a boolean enabled setting.");
+          return send(200, await runtime.memoryCapture(workspace, enabled));
+        }
+      }
       const memory = /^\/v1\/environment\/memory\/([^/]+)(?:\/(forget))?$/.exec(url.pathname);
       if (memory && ((!memory[2] && req.method === "PATCH") || (memory[2] === "forget" && req.method === "POST"))) {
         const input = await body(req);

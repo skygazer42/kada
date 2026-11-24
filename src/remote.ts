@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -33,6 +34,7 @@ const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const shaPattern = /^[0-9a-f]{64}$/;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
 const attachmentLimit = 5 * 1024 * 1024;
+const originalArchiveLimit = 50 * 1024 * 1024;
 const downloadLimit = 25 * 1024 * 1024;
 const uploadLifetime = 60 * 60_000;
 const maxAttachments = 4;
@@ -51,9 +53,11 @@ type Receipt = {
   requestId: string;
   fingerprint: string;
   state: "accepted" | "submitted" | "interrupted";
+  original?: { text: string; attachments: OriginalAttachment[]; expiresAt?: number };
 };
 
 type Upload = { id: string; name: string; type: string; bytes: number; sha256: string; expiresAt: number; used?: true };
+type OriginalAttachment = Pick<Upload, "id" | "name" | "type" | "bytes" | "sha256">;
 type Scope = { channel: "web"; accountId: string; deviceId: string };
 type Conversation = Scope & {
   conversationId: string;
@@ -65,6 +69,10 @@ type Conversation = Scope & {
 };
 
 type TaskStatus = Awaited<ReturnType<LocalRuntime["status"]>>;
+
+function piMessageRequest(conversation: Conversation, receipt: Receipt) {
+  return conversation.receipts[0] === receipt ? "initial" : "user:" + receipt.requestId;
+}
 
 function remoteOrigin(input: string): URL {
   const url = new URL(input);
@@ -153,6 +161,37 @@ function validateType(type: string, bytes: Buffer) {
 
 function isMissing(error: unknown) {
   return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+async function verifiedBytes(path: string, file: { bytes: number; sha256: string }) {
+  const opened = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT" && error.code !== "ELOOP") throw error;
+  });
+  if (!opened) return;
+  try {
+    const stat = await opened.stat();
+    if (!stat.isFile() || stat.size !== file.bytes) return;
+    const buffer = Buffer.alloc(file.bytes + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await opened.read(buffer, size, buffer.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    const bytes = buffer.subarray(0, size);
+    if (bytes.length === file.bytes && digest(bytes) === file.sha256) return bytes;
+  } finally { await opened.close(); }
+}
+
+function sendFile(response: ServerResponse, file: { name: string; bytes: number; sha256: string }, bytes: Buffer) {
+  const name = encodeURIComponent(file.name).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16));
+  response.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Disposition": "attachment; filename*=UTF-8''" + name,
+    "Content-Length": file.bytes,
+    "X-Kada-SHA256": file.sha256,
+  });
+  response.end(bytes);
 }
 
 async function readConversation(path: string): Promise<Conversation | undefined> {
@@ -367,9 +406,12 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     }
     const status = await taskStatus(conversation);
     const view = status ? taskView(status) : undefined;
-    const history = status ? await runtime.conversationHistory(conversation.taskId, after) :
-      after === undefined ? { cursor: null, messages: [], progressEvents: [] } : undefined;
+    const originals = new Map(conversation.receipts.flatMap((receipt) => receipt.original ?
+      [[piMessageRequest(conversation, receipt), receipt] as const] : []));
+    const history = status ? await runtime.conversationHistory(conversation.taskId, after, [...originals.keys()]) :
+      after === undefined ? { cursor: null, messages: [], progressEvents: [], messageEntries: new Map<number, string>() } : undefined;
     if (!history) throw new HttpError(400, "Invalid history cursor.");
+    const { messages, messageEntries, ...historyView } = history;
     const delivery = status && view?.delivery ? {
       ...view.delivery,
       artifacts: verifiedArtifacts(status, conversation).map(({ snapshot: _snapshot, ...artifact }) => artifact),
@@ -377,7 +419,15 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     return {
       channel: conversation.channel, accountId: conversation.accountId, deviceId: conversation.deviceId,
       conversationId: conversation.conversationId, taskId: conversation.taskId, title: conversation.title,
-      ...history, receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
+      ...historyView,
+      messages: messages.map((message) => {
+        const receipt = originals.get(messageEntries.get(message.sequence) ?? "");
+        if (!receipt?.original) return message;
+        return { ...message, text: receipt.original.text, attachments: receipt.original.attachments.map((attachment) => ({
+          ...attachment, href: "/remote/api/conversations/" + conversation.conversationId + "/attachments/" + receipt.messageId + "/" + attachment.id,
+        })) };
+      }),
+      receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
       task: status && view ? {
         status: view.status, reason: view.reason, question: view.question, brief: view.brief,
         briefDigest: view.briefDigest, confirmed: view.confirmed, progress: view.progress, delivery, budget:view.budget,
@@ -406,6 +456,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       const expired = conversation.uploads.filter((item) => !pending.includes(item));
       conversation.uploads = pending;
+      const unplaced = await reclaimOriginals(conversation, now);
       const item: Upload = { id: randomUUID(), name, type, sha256, bytes: bytes.length, expiresAt: now + uploadLifetime };
       try {
         await writeDurable(uploadPath(item.id), bytes);
@@ -415,9 +466,30 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         await rm(uploadPath(item.id), { force: true });
         throw error;
       }
-      await Promise.all(expired.map((old) => rm(uploadPath(old.id), { force: true })));
+      const retained = new Set(conversation.receipts.flatMap((receipt) => receipt.original?.attachments.map((attachment) => attachment.id) ?? []));
+      const removed = new Set([...unplaced, ...expired.filter((old) => !retained.has(old.id)).map((old) => old.id)]);
+      await Promise.all([...removed].map((id) => rm(uploadPath(id), { force: true })));
       return item;
     });
+  }
+
+  async function reclaimOriginals(conversation: Conversation, now: number) {
+    const expired: string[] = [];
+    for (const receipt of conversation.receipts) {
+      if (receipt.original?.expiresAt === undefined || receipt.original.expiresAt > now) continue;
+      const requestId = piMessageRequest(conversation, receipt);
+      const recoverable = await runtime.hasRequest(conversation.taskId, requestId, "recoverable").catch((error: unknown) => {
+        if (!isMissing(error)) throw error;
+        return false;
+      });
+      if (recoverable) {
+        if (await runtime.hasRequest(conversation.taskId, requestId, "placed")) delete receipt.original.expiresAt;
+      } else {
+        expired.push(...receipt.original.attachments.map((attachment) => attachment.id));
+        delete receipt.original;
+      }
+    }
+    return expired;
   }
 
   async function stageAttachments(workspace: Workspace, attachments: Upload[]) {
@@ -475,11 +547,19 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         }
         return item;
       });
+      if (attachments.length) {
+        const archived = conversation.receipts.flatMap((receipt) => receipt.original?.attachments ?? []);
+        if ([...archived, ...attachments].reduce((total, file) => total + file.bytes, 0) > originalArchiveLimit) {
+          throw new HttpError(413, "This conversation has reached its 50 MiB original attachment limit. Start a new conversation to attach more files.");
+        }
+      }
       const workspace = await privateWorkspace(conversation, true);
       if (task && task.workspace !== workspace.root) throw new HttpError(409, "The original workspace is unavailable.");
       const files = await stageAttachments(workspace, attachments);
       const prompt = files.length ? text + "\n\nAttached files in this workspace:\n" + files.map((file) => "- " + file).join("\n") : text;
       const receipt: Receipt = { messageId, requestId: randomUUID(), fingerprint, state: "accepted" };
+      if (attachments.length) receipt.original = { text, expiresAt: Date.now() + uploadLifetime,
+        attachments: attachments.map(({ id, name, type, bytes, sha256 }) => ({ id, name, type, bytes, sha256 })) };
       conversation.receipts.push(receipt);
       if (first) conversation.title = (text.trim() || attachments[0]?.name || "Conversation").split(/\r?\n/)[0]!.slice(0, 88);
       conversation.updatedAt = Date.now();
@@ -497,10 +577,26 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         await saveConversation(path, conversation);
       } finally {
         dispatching.delete(receipt.requestId);
-        if (receipt.state !== "accepted") await Promise.all(attachments.map((item) => rm(uploadPath(item.id), { force: true })));
       }
       return { duplicate: false, receipt: await receiptView(conversation, receipt, await taskStatus(conversation)) };
     });
+  }
+
+  async function downloadAttachment(response: ServerResponse, conversation: Conversation, messageId: string, id: string) {
+    const receipt = conversation.receipts.find((item) => item.messageId === messageId);
+    const attachment = receipt?.original?.attachments.find((item) => item.id === id);
+    if (!receipt || !attachment) throw new HttpError(404, "Original attachment not found.");
+    const requestId = piMessageRequest(conversation, receipt);
+    try {
+      await conversationTask(conversation);
+      if (!await runtime.hasRequest(conversation.taskId, requestId, "placed")) throw new HttpError(404, "Original attachment not found.");
+    } catch (error) {
+      if (isMissing(error)) throw new HttpError(404, "Original attachment not found.");
+      throw error;
+    }
+    const bytes = await verifiedBytes(uploadPath(id), attachment);
+    if (!bytes) throw new HttpError(409, "Original attachment is unavailable or has changed.");
+    sendFile(response, attachment, bytes);
   }
 
   async function download(response: ServerResponse, conversation: Conversation, href: string, filename: string | null) {
@@ -528,31 +624,9 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       : filename === null ? artifact.snapshot : undefined;
     if (!file) throw new HttpError(404, "Verified artifact not found.");
     if (file.bytes > downloadLimit) throw new HttpError(413, "This artifact exceeds the download size limit.");
-    const selected = await open(await workspace.path(file.path), "r").catch(() => undefined);
-    if (!selected) throw new HttpError(409, "This artifact changed after verification.");
-    let bytes: Buffer;
-    try {
-      const stat = await selected.stat();
-      if (!stat.isFile() || stat.size !== file.bytes) throw new HttpError(409, "This artifact changed after verification.");
-      const buffer = Buffer.alloc(file.bytes + 1);
-      let size = 0;
-      while (size < buffer.length) {
-        const { bytesRead } = await selected.read(buffer, size, buffer.length - size, size);
-        if (!bytesRead) break;
-        size += bytesRead;
-      }
-      bytes = buffer.subarray(0, size);
-    } finally { await selected.close(); }
-    if (bytes.length !== file.bytes || digest(bytes) !== file.sha256) {
-      throw new HttpError(409, "This artifact changed after verification.");
-    }
-    response.writeHead(200, {
-      "Content-Type": "application/octet-stream",
-      "Content-Disposition": "attachment; filename*=UTF-8''" + encodeURIComponent(basename(file.path)).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16)),
-      "Content-Length": file.bytes,
-      "X-Kada-SHA256": file.sha256,
-    });
-    response.end(bytes);
+    const bytes = await verifiedBytes(await workspace.path(file.path), file);
+    if (!bytes) throw new HttpError(409, "This artifact changed after verification.");
+    sendFile(response, { ...file, name: basename(file.path) }, bytes);
   }
 
   return async function handleRemote(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -564,7 +638,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Content-Security-Policy",
-      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
     try {
       if (url.origin !== origin.origin || request.headers.host?.toLowerCase() !== origin.host ||
         request.headers["sec-fetch-site"] === "cross-site" ||
@@ -582,7 +656,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       if (method === "GET" && route === "/remote/api/session") send(response, 200, { ...scope, pairingId });
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
-        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
+        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
         const conversationId = match?.[1];
         if (!conversationId || !idPattern.test(conversationId)) throw new HttpError(404, "Remote endpoint not found.");
         const action = match?.[2];
@@ -605,6 +679,10 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
           } else {
             const row = requireConversation(prior, scope);
             if (method === "GET" && !action) send(response, 200, await history(row, url.searchParams.getAll("after")));
+            else if (method === "GET" && action?.startsWith("attachments/")) {
+              const [, message, id] = action.split("/");
+              await downloadAttachment(response, row, message!, id!);
+            }
             else if (method === "GET" && action?.startsWith("artifacts/")) {
               await download(response, row, route, url.searchParams.get("file"));
             } else if (method === "POST" && action === "control") {

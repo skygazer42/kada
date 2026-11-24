@@ -595,6 +595,102 @@ test("D05 upload rejects invalid, cross-conversation, oversized, and expired inp
   assert.equal((await fixture.runtime.list()).length, 0);
 });
 
+test("original attachments follow their Pi message across replay and survive workspace edits", async (t) => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage("Received it."));
+  let reopened: LocalRuntime | undefined;
+  t.after(async () => { await reopened?.close(); await fixture.close(); });
+  const owner = pairing();
+  const other = pairing("owner", "tablet");
+  const directory = join(fixture.directory, "remote");
+  const before = await portal(t, fixture.runtime, directory, [owner.device, other.device]);
+  const path = "/conversations/attachments";
+  const original = Buffer.from("<b>Original 资料</b>\n");
+  const firstFile = await (await before.call(owner.token, path + "/uploads", upload(original, "资料.txt", "text/plain"))).json();
+  const first = await (await before.call(owner.token, path + "/messages", turn("first", "First message", [firstFile.id]))).json();
+  const view = async () => (await before.call(owner.token, path)).json();
+  const initial = await until(view, (state) => state.messages.length === 2);
+  assert.equal(initial.messages[0].text, "First message");
+  const card = initial.messages[0].attachments[0];
+  assert.deepEqual({ name: card.name, bytes: card.bytes, sha256: card.sha256, type: card.type }, {
+    name: "资料.txt", bytes: original.length, sha256: sha(original), type: "text/plain",
+  });
+  assert.equal(initial.messages[1].attachments, undefined);
+  await writeFile(join((await fixture.runtime.status(first.taskId)).workspace, "attachments", firstFile.id, "资料.txt"), "Changed workspace file");
+  const secondFile = await (await before.call(owner.token, path + "/uploads", upload(Buffer.from("Another attachment"), "same.txt", "text/plain"))).json();
+  await before.call(owner.token, path + "/messages", turn("second", "Second message", [secondFile.id]));
+  const delta = await until(async () => (await before.call(owner.token, path + "?after=" + initial.cursor)).json(), (state) => state.messages.length === 2);
+  assert.equal(delta.messages[0].text, "Second message");
+  assert.equal(delta.messages[0].attachments[0].name, "same.txt");
+  const endpoint = card.href.replace("/remote/api", "");
+  assert.equal((await before.call(other.token, endpoint)).status, 404);
+  assert.equal((await before.call(owner.token, endpoint.replace("/first/", "/second/"))).status, 404);
+  await before.close();
+  await fixture.runtime.close();
+  reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+  const after = await portal(t, reopened, directory, [owner.device, other.device]);
+  const replay = await (await after.call(owner.token, path)).json();
+  assert.deepEqual(replay.messages[0].attachments, [card]);
+  const file = await after.call(owner.token, endpoint);
+  assert.equal(file.status, 200);
+  assert.equal(file.headers.get("content-type"), "application/octet-stream");
+  assert.equal(file.headers.get("x-kada-sha256"), sha(original));
+  assert.deepEqual(Buffer.from(await file.arrayBuffer()), original);
+  await writeFile(join(directory, "uploads", firstFile.id), Buffer.alloc(original.length, 0));
+  assert.equal((await after.call(owner.token, endpoint)).status, 409);
+});
+
+test("the original attachment limit rejects before accepting a message or consuming its upload", async (t) => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage("Received."));
+  t.after(() => fixture.close());
+  const owner = pairing();
+  const directory = join(fixture.directory, "remote");
+  const { call } = await portal(t, fixture.runtime, directory, [owner.device]);
+  const path = "/conversations/archive-limit";
+  const first = await (await call(owner.token, path + "/messages", turn("first", "Start."))).json();
+  await until(() => fixture.runtime.status(first.taskId), (state) => state.status === "answered");
+  const file = await (await call(owner.token, path + "/uploads", upload(Buffer.from("Must remain unused"), "extra.txt", "text/plain"))).json();
+  const recordPath = join(directory, "conversations", sha("owner"), sha("archive-limit") + ".json");
+  const saved = JSON.parse(await readFile(recordPath, "utf8"));
+  saved.receipts[0].original = { text: "Start.", expiresAt: Date.now(), attachments: Array.from({ length: 10 }, (_, index) => ({
+    id: `archived-${index}`, name: `${index}.bin`, type: "application/octet-stream", bytes: 5 * 1024 * 1024, sha256: sha(`${index}`),
+  })) };
+  await writeFile(recordPath, JSON.stringify(saved));
+  const response = await call(owner.token, path + "/messages", turn("excess", "Rejected", [file.id]));
+  assert.equal(response.status, 413);
+  assert.match((await response.json()).error, /50 MiB.*new conversation/i);
+  assert.deepEqual(JSON.parse(await readFile(recordPath, "utf8")), saved);
+  const current = await fixture.runtime.status(first.taskId);
+  assert.equal(current.messages.filter((message) => message.role === "user").length, 1);
+  await assert.rejects(readFile(join(current.workspace, "attachments", file.id, "extra.txt")), { code: "ENOENT" });
+});
+
+test("expired originals with no Pi admission are reclaimed while admitted originals stay", async (t) => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage("Received."));
+  t.after(() => fixture.close());
+  const owner = pairing();
+  const directory = join(fixture.directory, "remote");
+  const { call } = await portal(t, fixture.runtime, directory, [owner.device]);
+  const path = "/conversations/reclaim-original";
+  const put = async (name: string) => (await call(owner.token, path + "/uploads", upload(Buffer.from(name), name, "text/plain"))).json();
+  const retained = await put("admitted.txt");
+  const first = await (await call(owner.token, path + "/messages", turn("first", "Start.", [retained.id]))).json();
+  await until(() => fixture.runtime.status(first.taskId), (state) => state.status === "answered");
+  const missing = await put("interrupted.txt");
+  const failure = t.mock.method(fixture.runtime, "followUp", async () => { throw new Error("Interrupted before Pi accepted the message"); });
+  assert.equal((await (await call(owner.token, path + "/messages", turn("interrupted", "Never admitted", [missing.id]))).json()).state, "interrupted");
+  failure.mock.restore();
+  const recordPath = join(directory, "conversations", sha("owner"), sha("reclaim-original") + ".json");
+  const record = JSON.parse(await readFile(recordPath, "utf8"));
+  for (const receipt of record.receipts) receipt.original.expiresAt = Date.now() - 1;
+  await writeFile(recordPath, JSON.stringify(record));
+  await put("triggers-reclamation.txt");
+  await assert.rejects(readFile(join(directory, "uploads", missing.id)), { code: "ENOENT" });
+  assert.equal(await readFile(join(directory, "uploads", retained.id), "utf8"), "admitted.txt");
+  const cleaned = JSON.parse(await readFile(recordPath, "utf8"));
+  assert.equal(cleaned.receipts[1].original, undefined);
+  assert.equal((await (await call(owner.token, path + "?messageId=interrupted")).json()).state, "interrupted");
+});
+
 const tool = (name: string, args: Record<string, unknown>) =>
   fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 

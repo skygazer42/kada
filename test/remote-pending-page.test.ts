@@ -19,6 +19,7 @@ class Element {
   focus() {}
 
   addEventListener(type: string, handler: Handler) { this.handlers.set(type, handler); }
+  setAttribute() {}
   querySelector() { return this.children.find((child) => child.dataset.emptyConversation); }
   append(child: Element) {
     this.children.push(child);
@@ -194,6 +195,21 @@ test("a rejected cursor rebuilds history and a connection failure preserves the 
   assert.deepEqual(device.requests.slice(-4), [address, address + "?after=2", address + "?after=2", address]);
   assert.deepEqual(page.field("messages").children.map((article) => article.children[1]!.textContent), ["Restored"]);
   assert.equal(page.field("status").textContent, "");
+});
+
+test("a message attachment preview renders original text as plain content", async () => {
+  const href = "/remote/api/conversations/" + conversationId + "/attachments/first/file";
+  const device = harness((url) => url.pathname === href ? new Response("<script>original()</script>") : Response.json({
+    cursor: 1, progressEvents: [], task: null,
+    messages: [{ sequence: 1, role: "user", text: "Here is the file", attachments: [{ name: "original.txt", type: "text/plain", href }] }],
+  }));
+  const page = await device.open();
+  const message = page.field("messages").children[0]!;
+  const card = message.children[2]!.children[0]!;
+  assert.equal(card.children[0]!.textContent, "original.txt");
+  await card.children[1]!.children.find((child) => child.textContent === "Preview")!.trigger("click");
+  assert.equal(card.children.at(-1)!.children[0]!.textContent, "<script>original()</script>");
+  assert.ok(device.requests.includes(href));
 });
 
 test("task controls update the selected card and preserve the transcript and draft", async () => {

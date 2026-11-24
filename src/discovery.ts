@@ -239,7 +239,12 @@ export class LocalDiscovery {
   }
   async context(includeMemory = false, workspace?: string, query = ""): Promise<LocalContext> {
     const value = await this.load();
-    const memory = includeMemory ? await this.memory.refresh(value, workspace).then(async v => this.memory.context(v, query, await memoryProject(workspace))).catch(() => undefined) : undefined;
+    const memory = includeMemory ? await this.memory.refresh(value, workspace).then(async records => {
+      const project = await memoryProject(workspace);
+      const context = this.memory.context(records, query, project);
+      if (project) context.captureEnabled = (await this.memory.captureSettings(project)).enabled;
+      return context;
+    }).catch(() => undefined) : undefined;
     return { overview: join(this.directory, "overview.md"), catalogue: join(this.directory, "skills.md"), guidance: value.guidance.map(g => g.path),
       summary: JSON.stringify({ platform: value.platform, locale: value.locale, timezone: value.timezone, agents: value.agents.map(a => ({ name: a.name, model: a.model, language: a.language })), skills: value.skills.length, plugins: value.plugins.length }),
       skills: value.skills, ...(memory ? { memory } : {}) };
