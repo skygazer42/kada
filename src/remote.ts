@@ -3,7 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promi
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { EntryId } from "@earendil-works/pi-durable";
-import type { LocalRuntime } from "./runtime.js";
+import { TaskConflictError, type LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
 import { taskGroup, taskView } from "./task-view.js";
 import { readJson, SerialQueue } from "./util.js";
@@ -377,9 +377,10 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       channel: conversation.channel, accountId: conversation.accountId, deviceId: conversation.deviceId,
       conversationId: conversation.conversationId, taskId: conversation.taskId, title: conversation.title,
       ...history, receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
-      task: view ? {
+      task: status && view ? {
         status: view.status, reason: view.reason, question: view.question, brief: view.brief,
         briefDigest: view.briefDigest, confirmed: view.confirmed, progress: view.progress, delivery, budget:view.budget,
+        controls: status.remoteControls, controlVersion: status.remoteControlVersion,
       } : null,
     };
   }
@@ -463,6 +464,9 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const first = !conversation.receipts.length;
       const task = await taskStatus(conversation);
       if (!first && !task) throw new HttpError(409, "The original task is unavailable. Start a new conversation.");
+      if (task?.control === "paused" || task?.control === "cancelled") {
+        throw new HttpError(409, "This task is " + task.control + ".");
+      }
       const attachments = attachmentIds.map((id) => {
         const item = conversation.uploads.find((upload) => upload.id === id);
         if (!item || item.used || item.expiresAt <= Date.now()) {
@@ -577,7 +581,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       if (method === "GET" && route === "/remote/api/session") send(response, 200, scope);
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
-        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
+        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
         const conversationId = match?.[1];
         if (!conversationId || !idPattern.test(conversationId)) throw new HttpError(404, "Remote endpoint not found.");
         const action = match?.[2];
@@ -602,6 +606,22 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             if (method === "GET" && !action) send(response, 200, await history(row, url.searchParams.getAll("after")));
             else if (method === "GET" && action?.startsWith("artifacts/")) {
               await download(response, row, route, url.searchParams.get("file"));
+            } else if (method === "POST" && action === "control") {
+              const { action: control, version } = await json(request);
+              if ((control !== "pause" && control !== "continue" && control !== "cancel") || typeof version !== "string" || !shaPattern.test(version)) {
+                throw new HttpError(400, "Invalid task action or version.");
+              }
+              await exclusive(path, async () => {
+                try {
+                  const workspace = await privateWorkspace(row, false);
+                  await runtime.controlRemoteTask(row.taskId, workspace.root, control, version);
+                } catch (error) {
+                  if (error instanceof TaskConflictError) throw new HttpError(409, error.message);
+                  if (isMissing(error)) throw new HttpError(409, "The original task is unavailable.");
+                  throw error;
+                }
+              });
+              send(response, 200, { updated: true });
             } else if (method === "POST" && action === "confirm") {
               const { revision, digest: briefDigest } = await json(request);
               if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1 ||

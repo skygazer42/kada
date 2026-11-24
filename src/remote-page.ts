@@ -122,6 +122,7 @@ let identity = null;
 let conversationId = "";
 let pending = new Map();
 let busy = false;
+let canSend = true;
 let refreshVersion = 0;
 let listVersion = 0;
 let historyCursor = null;
@@ -205,6 +206,7 @@ function choose(id) {
 
 function resetConversationView() {
   refreshVersion++;
+  canSend = true;
   historyCursor = null;
   shownTask = "";
   messages.replaceChildren();
@@ -241,7 +243,7 @@ async function refreshList() {
 }
 
 function updateComposer() {
-  send.disabled = busy || pending.has(conversationId);
+  send.disabled = !canSend || busy || pending.has(conversationId);
   fileInput.disabled = send.disabled;
   prompt.readOnly = send.disabled;
 }
@@ -350,6 +352,8 @@ function taskStatusLabel(status) {
 }
 
 function presentTask(view, id) {
+  canSend = view?.status !== "paused" && view?.status !== "cancelled";
+  updateComposer();
   task.replaceChildren();
   task.hidden = !view;
   if (!view) return;
@@ -392,6 +396,28 @@ function presentTask(view, id) {
       await post(conversationPath(id) + "/confirm", { revision: view.brief.revision, digest: view.briefDigest });
       await refresh();
     }).classList.add("primary");
+  }
+  if (view.controls?.length) {
+    const controls = element("div", "", task);
+    controls.className = "controls";
+    const labels = { pause: "Pause", continue: "Continue", cancel: "Cancel task" };
+    let updating = false;
+    for (const control of view.controls) {
+      action(labels[control], controls, async () => {
+        if (updating || id !== conversationId || control === "cancel" && !confirm("Cancel this task?")) return;
+        updating = true;
+        const device = identity;
+        try {
+          await post(conversationPath(id) + "/control", { action: control, version: view.controlVersion });
+          if (device === identity && id === conversationId) await refresh();
+          if (device === identity) await refreshList();
+        } catch (error) {
+          if (device !== identity || id !== conversationId) return;
+          if (error instanceof RequestError && error.status === 409) await refresh();
+          if (device === identity && id === conversationId) report(error);
+        } finally { updating = false; }
+      });
+    }
   }
   if (view.delivery) {
     if (view.delivery.summary) element("p", view.delivery.summary, task);

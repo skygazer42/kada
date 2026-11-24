@@ -34,6 +34,9 @@ npm run harness -- model check siliconflow Qwen/Qwen2.5-7B-Instruct
 npm run harness -- model select siliconflow Qwen/Qwen2.5-7B-Instruct
 npm run harness -- model check siliconflow deepseek-ai/DeepSeek-V3.2
 npm run harness -- model select siliconflow deepseek-ai/DeepSeek-V3.2
+npm run harness -- model select siliconflow deepseek-ai/DeepSeek-V3.2 --workspace E:/project
+npm run harness -- model list siliconflow --workspace E:/project
+npm run harness -- model clear --workspace E:/project
 npm run harness -- skills list --workspace E:/project
 npm run harness -- skills disable 方法名 --workspace E:/project
 npm run harness -- skills enable 方法名 --workspace E:/project
@@ -43,6 +46,8 @@ npm run harness -- skills rollback 方法名 版本
 ```
 
 新任务采用当前模型，原任务保留保存的模型及方法版本。`--skills ""` 显式不选择方法。方法目录按项目、已发现的用户方法、内置方法、本地试用处理同名优先级。停用和固定版本使用同一目录，新任务不再通过原始发现目录绕过选择。读取方法与真实运行脚本分别记录，脚本通过 Pi 原生 bash 执行。
+
+项目默认模型需先通过 `model check`。`model select --workspace` 与记忆使用同一个项目根，新的本地 `run` 或 `chat` 指定该项目工作区时会采用项目默认。`model clear --workspace` 恢复全局默认，已有任务继续使用创建时保存的模型。
 
 硅基流动目录的价格尚未配置，因此金额显示未知；金额上限无法计量，实际停止依赖 token 预算与时限。预算在请求边界按已返回用量检查，单个已受理请求可能跨过累计额度。请在本地配置中明确 `maxTotalTokens`、`maxDurationMs`，费用以供应商账单为准。
 
@@ -86,14 +91,27 @@ npm run harness -- routines list
 npm run harness -- routines history 规则ID
 npm run harness -- routines history 规则ID --task-status
 npm run harness -- routines update 规则ID routine.json
+npm run harness -- routines run 规则ID 本次请求ID
+npm run harness -- routines pause 规则ID
+npm run harness -- routines resume 规则ID
 npm run harness -- routines cancel 规则ID
 ```
 
-`weekday` 以周日为 0。每日/每周默认跳过离线错过项，单次默认补跑一次。`run_once` 只补最新一项。夏令时缺失时刻顺延，重复时刻选第一次。`notifyOnChange` 比较已验收产物的哈希；相同产物不重复通知，失败和待答仍展示。规则中的 task 操作就是对该目标及预算的明确授权。
+`weekday` 以周日为 0。周期规则默认跳过离线错过项，单次默认补跑一次。`run_once` 只补最新一项。每日与每周的夏令时缺失时刻顺延，重复时刻选第一次。`notifyOnChange` 比较已验收产物的哈希；相同产物不重复通知，失败和待答仍展示。规则中的 task 操作就是对该目标及预算的明确授权。
+
+间隔规则可按固定起点每隔 5 到 1440 分钟运行。以下日间窗口左闭右开。间隔按实际经过时间计算，星期和窗口按已选时区过滤，`endsAt` 可省略。
+
+```json
+{"kind":"interval","anchorAt":"2026-12-01T09:00:00-05:00","everyMinutes":30,"timeZone":"America/New_York","weekdays":[1,2,3,4,5],"window":{"start":"09:00","end":"17:00"},"endsAt":"2026-12-31T17:00:00-05:00"}
+```
+
+暂停周期规则后，已经受理的任务仍可从原任务入口管理。恢复使用原规则和预算，从未来第一个有效时间点开始。暂停期间的时间点不会补跑。
+
+手动运行沿用规则的预检和预算，发生项在历史中标为 `manual`，原定时点继续生效。若命令断线，使用相同的请求 ID 可查询原受理回执；省略 ID 会为本次命令生成新的 ID。
 
 有明确 `workspace` 的任务规则可添加 `"precheck": {"command":["node","checks/project-fingerprint.mjs"]}`。脚本在该目录中以本地用户权限运行，使用参数数组直接启动，时限为 30 秒。使用只读脚本，并向标准输出写出稳定的 UTF-8 检查结果。首次成功或输出的 SHA-256 变化会创建任务，输出相同的发生项记为 `skipped`。更新规则版本会重新建立基线。预检失败或中断会记录原因，当前发生项到此结束。`routines history` 可查看预检状态和成功样本的哈希。
 
-每日或每周的任务可设置 `"overlapPolicy": "skip"`。如果同一规则版本的上一次任务仍在运行或等待处理，本次直接跳过。回执的 `blockedBy` 保存上一次发生项、任务 ID 和当时的状态。`--task-status` 按原任务 ID 查询当前状态，并在有值时显示待答问题、原因或交付摘要。若回执有关联 ID 但任务尚未建立，当前状态显示 `missing`。
+周期任务可设置 `"overlapPolicy": "skip"`。如果同一规则版本的上一次任务仍在运行或等待处理，本次直接跳过。回执的 `blockedBy` 保存上一次发生项、任务 ID 和当时的状态。`--task-status` 按原任务 ID 查询当前状态，并在有值时显示待答问题、原因或交付摘要。若回执有关联 ID 但任务尚未建立，当前状态显示 `missing`。
 
 列表的 `nextTiming` 显示计划本地时间、实际本地时间及夏令时调整说明；发生项回执保留已采用的调整。`history` 读取 Pi 的持久条目，保留旧规则版本的认领、失败、跳过和预算停止记录。`claimed` 表示已认领但尚无确认结果，不能当作任务已经启动或成功；取消/中断后应按 `taskId` 查询实际状态。任务产物和用量仍从原任务读取。更早版本只有最近回执，没有的历史不会被补造。
 
@@ -110,6 +128,8 @@ npm run harness -- remote revoke owner phone
 会话列表把待处理会话排在前面，并显示待答问题、等待原因和交付状态。连接、回到页面或点击 **Refresh** 都会更新列表。展开 **Task history** 可查看原会话中的请求补充、确认和交付阶段。
 
 打开会话时加载完整历史，之后使用 Pi 条目游标接收新增消息和进度，同时刷新任务状态和回执。临时断线后从最后收到的位置继续读取，切换会话或游标失效后重新同步。
+
+任务卡提供 **Pause**、**Continue** 和 **Cancel task**。手机可在原时限和额度内继续由该手机暂停的任务。发送记录、任务身份和草稿在暂停和接回时保留。
 
 发送前，同一标签页会暂存原消息、已上传的附件引用和消息 ID。刷新后先查原回执。查不到回执时，可点击 **Retry send** 用原 ID 重发。已送达的消息会自动恢复，附件过期时可重新添加，原正文回到输入框。
 

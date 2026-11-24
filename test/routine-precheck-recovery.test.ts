@@ -6,20 +6,20 @@ import { join } from "node:path";
 import test from "node:test";
 import { recoveryTestTimeoutMs, startRecoveryWorker } from "./helpers.js";
 
-test("SIGKILL during a precheck records the interruption and leaves the partial effect alone", { timeout: recoveryTestTimeoutMs }, async () => {
+for (const trigger of ["scheduled", "manual"] as const) test(`SIGKILL during a ${trigger} precheck records the interruption and leaves the partial effect alone`, { timeout: recoveryTestTimeoutMs }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "kada-routine-precheck-")));
   const fixture = new URL("./fixtures/routine-precheck-worker.ts", import.meta.url);
   const marker = join(directory, "workspace", "check-attempts.txt");
-  let worker = startRecoveryWorker(fixture, "create", directory);
+  let worker = startRecoveryWorker(fixture, "create", directory, trigger);
   try {
     await worker.ready();
     assert.ok(existsSync(marker), "The fixed command must run before a model task is created");
     assert.equal(await worker.stop(), "SIGKILL");
     assert.equal(await readFile(marker, "utf8"), "started\n");
 
-    worker = startRecoveryWorker(fixture, "recover", directory);
+    worker = startRecoveryWorker(fixture, "recover", directory, trigger);
     assert.deepEqual(await worker.complete(), {
-      type: "completed", history: [["claimed", null], ["failed", "interrupted"]], tasks: [], modelCalls: 0,
+      type: "completed", history: [["claimed", null, trigger], ["failed", "interrupted", trigger]], tasks: [], modelCalls: 0,
     });
     assert.equal(await readFile(marker, "utf8"), "started\n");
   } finally {

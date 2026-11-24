@@ -77,12 +77,22 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         return send(200, await runtime.changeMemory(decodeURIComponent(memory[1]!), { action: memory[2] === "forget" ? "forget" : "correct", expectedRevision: input.expectedRevision, requestId: input.requestId, ...(typeof input.text === "string" ? { text: input.text } : {}) }, url.searchParams.get("workspace") ?? undefined));
       }
       if (url.pathname === "/v1/environment/refresh" && req.method === "POST") return send(200, await runtime.localSetup(true));
-      if (url.pathname === '/v1/settings/models' && req.method === 'GET') return send(200,await runtime.providers.list(config.model));
+      if (url.pathname === '/v1/settings/models') {
+        const workspace = url.searchParams.get('workspace') ?? undefined;
+        if (req.method === 'GET') return send(200, await runtime.providers.list(config.model, workspace));
+        if (req.method === 'DELETE') {
+          if (!workspace) throw new Error('Provide the current workspace.');
+          await runtime.providers.clear(workspace);
+          return send(200, { model: await runtime.providers.selected(config.model, workspace) });
+        }
+      }
       if (['/v1/settings/models/check','/v1/settings/models/select'].includes(url.pathname) && req.method === 'POST') {
         const input = await body(req);
         if (typeof input.provider !== 'string' || typeof input.modelId !== 'string') throw new Error('Provide provider and modelId.');
         const ref = {provider:input.provider,modelId:input.modelId};
-        return send(200,url.pathname.endsWith('/check') ? await runtime.providers.check(ref) : await runtime.providers.select(ref));
+        if (url.pathname.endsWith('/check')) return send(200, await runtime.providers.check(ref));
+        if (input.workspace !== undefined && typeof input.workspace !== 'string') throw new Error('Provide a workspace path.');
+        return send(200, await runtime.providers.select(ref, input.workspace));
       }
       if (url.pathname === '/v1/settings/skills' && req.method === 'GET') {
         const workspace = url.searchParams.get('workspace');
@@ -119,6 +129,17 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const occurrenceHistory=/^\/v1\/routines\/([^/]+)\/occurrences$/.exec(url.pathname);
       if (occurrenceHistory && req.method === 'GET') {
         return send(200, await runtime.routines.history(decodeURIComponent(occurrenceHistory[1]!), url.searchParams.get('includeTaskStatus') === 'true'));
+      }
+      const routineControl = /^\/v1\/routines\/([^/]+)\/(pause|resume)$/.exec(url.pathname);
+      if (routineControl && req.method === 'POST') {
+        const id = decodeURIComponent(routineControl[1]!);
+        return send(200, routineControl[2] === 'pause' ? await runtime.routines.pause(id) : await runtime.routines.resume(id));
+      }
+      const manualRoutine = /^\/v1\/routines\/([^/]+)\/run$/.exec(url.pathname);
+      if (manualRoutine && req.method === 'POST') {
+        const { requestId } = await body(req);
+        if (typeof requestId !== 'string') throw new Error('Provide a routine request ID.');
+        return send(202, await runtime.routines.runNow(decodeURIComponent(manualRoutine[1]!), requestId));
       }
       const routine = /^\/v1\/routines\/([^/]+)$/.exec(url.pathname);
       if (routine) {

@@ -10,15 +10,28 @@ const inside = (root: string, path: string) => { const rel = relative(root, path
 export const claudeProject = (workspace: string) => `claude:${workspace.replace(/[^a-zA-Z0-9]/g, "-")}`;
 
 /** The nearest repository root is a stable identity for both project instructions and recall. */
-export async function memoryProject(workspace?: string): Promise<string | undefined> {
+export async function memoryProject(workspace?: string, { allowMissing = false } = {}): Promise<string | undefined> {
   if (!workspace) return;
-  const actual = await realpath(workspace).catch(() => undefined);
-  if (!actual || !(await stat(actual).catch(() => undefined))?.isDirectory()) return;
+  const requested = resolve(workspace);
+  let candidate = requested;
+  let actual: string;
+  while (true) {
+    try {
+      actual = await realpath(candidate);
+      break;
+    } catch (error) {
+      const parent = dirname(candidate);
+      if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT" || parent === candidate) return;
+      candidate = parent;
+    }
+  }
+  if (!(await stat(actual).catch(() => undefined))?.isDirectory()) return;
   let dir = actual;
   while (true) {
     if ((await stat(join(dir, ".kada-project")).catch(() => undefined))?.isFile()) return dir;
     if (await stat(join(dir, ".git")).catch(() => undefined)) return dir;
-    const parent = dirname(dir); if (parent === dir) return actual;
+    const parent = dirname(dir);
+    if (parent === dir) return candidate === requested ? actual : undefined;
     dir = parent;
   }
 }

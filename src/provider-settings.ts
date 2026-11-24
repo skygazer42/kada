@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type { Api, Model, Models } from '@earendil-works/pi-ai';
 import type { ModelRef } from './config.js';
+import { memoryProject } from './memory-sources.js';
 import { modelCostKnown, validateModel } from './models.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
@@ -8,7 +9,7 @@ export type ModelCheckError = 'unknown_model' | 'missing_credentials' | 'auth' |
 type ProbeResult = { status: 'available' } | { status: 'unavailable'; code: ModelCheckError };
 export type ModelCheck = { checkedAt: string; code?: ModelCheckError; message?: string } & ProbeResult;
 export type ModelProbe = (model: Model<Api>, signal: AbortSignal) => Promise<ProbeResult>;
-type SavedSettings = { model?: ModelRef; checks: Record<string, ModelCheck> };
+type SavedSettings = { model?: ModelRef; projectModels?: Record<string, ModelRef>; checks: Record<string, ModelCheck> };
 
 const messages: Record<ModelCheckError, string> = {
   unknown_model: 'Unknown model. Check the installed Pi model catalog.',
@@ -46,6 +47,12 @@ function probeModel(models: Models): ModelProbe {
 
 const modelKey = (ref: ModelRef) => JSON.stringify([ref.provider, ref.modelId]);
 
+async function projectKey(workspace: string): Promise<string> {
+  const project = await memoryProject(workspace);
+  if (!project) throw new Error('The model settings workspace must be an existing directory.');
+  return project;
+}
+
 export class ProviderSettings {
   private readonly path: string;
   private readonly changes = new SerialQueue();
@@ -65,8 +72,10 @@ export class ProviderSettings {
     }
   }
 
-  async selected(fallback?: ModelRef): Promise<ModelRef | undefined> {
-    return (await this.read()).model ?? fallback;
+  async selected(fallback?: ModelRef, workspace?: string): Promise<ModelRef | undefined> {
+    const project = await memoryProject(workspace, { allowMissing: true });
+    const settings = await this.read();
+    return (project === undefined ? undefined : settings.projectModels?.[project]) ?? settings.model ?? fallback;
   }
 
   assertSelectable(ref: ModelRef): ModelRef {
@@ -74,20 +83,38 @@ export class ProviderSettings {
     return { provider: model.provider, modelId: model.modelId };
   }
 
-  async select(ref: ModelRef): Promise<ModelRef> {
+  async select(ref: ModelRef, workspace?: string): Promise<ModelRef> {
     const model = this.assertSelectable(ref);
+    const project = workspace === undefined ? undefined : await projectKey(workspace);
     return this.changes.run(async () => {
       const settings = await this.read();
       const check = settings.checks[modelKey(model)];
       if (check?.status === 'unavailable') throw new Error(check.message);
-      await atomicJson(this.path, { ...settings, model });
+      if (project === undefined) {
+        settings.model = model;
+      } else {
+        if (check?.status !== 'available') throw new Error('Run a successful model connection check before setting a project default.');
+        settings.projectModels = { ...settings.projectModels, [project]: model };
+      }
+      await atomicJson(this.path, settings);
       return model;
     });
   }
 
-  async list(defaultModel?: ModelRef) {
+  async clear(workspace: string): Promise<void> {
+    const project = await projectKey(workspace);
+    await this.changes.run(async () => {
+      const settings = await this.read();
+      if (!settings.projectModels || !Object.hasOwn(settings.projectModels, project)) return;
+      delete settings.projectModels[project];
+      await atomicJson(this.path, settings);
+    });
+  }
+
+  async list(defaultModel?: ModelRef, workspace?: string) {
+    const project = workspace === undefined ? undefined : await projectKey(workspace);
     const settings = await this.read();
-    const selected = settings.model ?? defaultModel;
+    const selected = (project === undefined ? undefined : settings.projectModels?.[project]) ?? settings.model ?? defaultModel;
     const providers = new Map<string, Array<{ id: string; name: string; selected: boolean; priceKnown: boolean; check?: ModelCheck }>>();
     for (const model of this.models.getModels()) {
       const ref = { provider: model.provider, modelId: model.id };

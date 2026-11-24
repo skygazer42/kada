@@ -21,6 +21,12 @@ const turn = (messageId: string, text: string, attachmentIds: string[] = []) => 
   body: JSON.stringify({ messageId, text, attachmentIds }),
 });
 
+const taskControl = (action: string, version: string) => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ action, version }),
+});
+
 async function portal(t: TestContext, runtime: LocalRuntime, directory: string, devices: readonly RemoteDevice[]) {
   let handle: ReturnType<typeof createRemoteHandler>;
   const server = createServer((request, response) => {
@@ -217,6 +223,147 @@ test("D04 polling the original chat returns ordered replies without duplication"
   for (const invalid of ["", "-1", "0", "1.5", "1e3", "9007199254740992", String(delta.cursor + 1), delta.cursor + "&after=1"]) {
     assert.equal((await call(owner.token, path + "?after=" + invalid)).status, 400, invalid);
   }
+});
+
+test("phone controls keep the original Pi turn and budget across pause, restart, and cancellation", async (t) => {
+  let starts = 0;
+  const fixture = await scriptedFixture(async (_context, signal) => {
+    starts++;
+    await new Promise<never>((_resolve, reject) => {
+      if (signal?.aborted) reject(signal.reason);
+      else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    return fauxAssistantMessage("Not reached.");
+  }, { maxDurationMs: 90_000, maxTotalTokens: 20_000 });
+  let reopened: LocalRuntime | undefined;
+  t.after(async () => { await reopened?.close(); await fixture.close(); });
+  const owner = pairing();
+  const other = pairing("owner", "tablet");
+  const devices = [owner.device, other.device];
+  const directory = join(fixture.directory, "remote");
+  const first = await portal(t, fixture.runtime, directory, devices);
+  const path = "/conversations/controlled";
+  const original = await (await first.call(owner.token, path + "/messages", turn("first", "Work in this conversation."))).json();
+  const running = await until(() => fixture.runtime.status(original.taskId), (status) => status.status === "running" && starts === 1);
+  const view = await (await first.call(owner.token, path)).json();
+  assert.deepEqual(view.task.controls, ["pause", "cancel"]);
+  assert.equal((await first.call(other.token, path + "/control", taskControl("cancel", view.task.controlVersion))).status, 404);
+  assert.equal((await first.call(owner.token, path + "/control", taskControl("resume", view.task.controlVersion))).status, 400);
+  const rival = await Promise.all(["pause", "pause"].map((action) => first.call(owner.token, path + "/control", taskControl(action, view.task.controlVersion))));
+  assert.deepEqual(rival.map((response) => response.status).sort(), [200, 409]);
+  assert.equal((await first.call(owner.token, path + "/control", taskControl("cancel", view.task.controlVersion))).status, 409);
+  assert.equal((await fixture.runtime.status(original.taskId)).status, "paused");
+  assert.equal((await first.call(owner.token, path + "/messages", turn("second", "Do not admit this while paused."))).status, 409);
+  await first.close();
+  await fixture.runtime.close();
+
+  const runtime = reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+  const second = await portal(t, runtime, directory, devices);
+  const paused = await (await second.call(owner.token, path + "?after=" + view.cursor)).json();
+  assert.deepEqual(paused.task.controls, ["continue", "cancel"]);
+  assert.equal(paused.taskId, view.taskId);
+  assert.deepEqual(paused.receipts, view.receipts);
+  assert.equal((await second.call(owner.token, path + "/control", taskControl("continue", paused.task.controlVersion))).status, 200);
+  const continued = await until(() => runtime.status(original.taskId), (status) => status.status === "running" && starts === 2);
+  assert.equal(continued.deadlineAt, running.deadlineAt);
+  assert.equal(continued.budget.tokenLimit, running.budget.tokenLimit);
+  assert.equal(continued.budget.costLimit, running.budget.costLimit);
+  assert.deepEqual(continued.conversations, running.conversations);
+  assert.equal((await second.call(owner.token, path + "/control", taskControl("cancel", view.task.controlVersion))).status, 409);
+  const newView = await (await second.call(owner.token, path)).json();
+  assert.equal((await second.call(owner.token, path + "/control", taskControl("cancel", newView.task.controlVersion))).status, 200);
+  const cancelled = await (await second.call(owner.token, path)).json();
+  assert.equal(cancelled.task.status, "cancelled");
+  assert.deepEqual(cancelled.task.controls, []);
+  assert.deepEqual(cancelled.receipts, view.receipts);
+  assert.equal(cancelled.messages.filter((message: { role: string }) => message.role === "user").length, 1);
+  assert.equal((await second.call(owner.token, path + "/control", taskControl("continue", paused.task.controlVersion))).status, 409);
+  assert.equal((await second.call(owner.token, path + "/messages", turn("second", "Do not admit this after cancellation."))).status, 409);
+});
+
+test("the phone cannot override a host pause or acquire a fresh budget", async (t) => {
+  const fixture = await scriptedFixture(async (_context, signal) => {
+    await new Promise<never>((_resolve, reject) => {
+      if (signal?.aborted) reject(signal.reason);
+      else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    return fauxAssistantMessage("Not reached.");
+  }, { maxDurationMs: 90_000 });
+  t.after(() => fixture.close());
+  const owner = pairing();
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [owner.device]);
+  const path = "/conversations/controls-host";
+  const { taskId } = await (await call(owner.token, path + "/messages", turn("first", "Start work."))).json();
+  await until(() => fixture.runtime.status(taskId), (status) => status.status === "running");
+  await fixture.runtime.pause(taskId);
+  const view = async () => (await call(owner.token, path)).json();
+  const hostPaused = await view();
+  assert.deepEqual(hostPaused.task.controls, []);
+  assert.equal((await call(owner.token, path + "/control", taskControl("continue", hostPaused.task.controlVersion))).status, 409);
+  assert.equal((await call(owner.token, path + "/control", taskControl("cancel", hostPaused.task.controlVersion))).status, 409);
+  await fixture.runtime.resume(taskId);
+  const running = await until(() => fixture.runtime.status(taskId), (status) => status.status === "running");
+  assert.equal((await call(owner.token, path + "/control", taskControl("pause", (await view()).task.controlVersion))).status, 200);
+  const mockedClock = t.mock.method(Date, "now", () => running.deadlineAt + 1);
+  try {
+    const expired = await view();
+    assert.deepEqual(expired.task.controls, ["cancel"]);
+    assert.equal((await call(owner.token, path + "/control", taskControl("continue", expired.task.controlVersion))).status, 409);
+  } finally { mockedClock.mock.restore(); }
+  assert.equal((await fixture.runtime.status(taskId)).deadlineAt, running.deadlineAt);
+});
+
+test("cancelling a paused task withdraws pending Pi work without starting it again", async (t) => {
+  let reviewStarts = 0;
+  let phase = "prepare";
+  const fixture = await scriptedFixture(async (context, signal) => {
+    if (!hasTool(context, "review_result")) {
+      if (phase === "prepare") return tool("task_prepare", {
+        outcome: "Write a report", deliverables: ["report.txt"], inputs: [], scope: ["This workspace"],
+        assumptions: [], questions: [], criteria: [{ text: "Inspect report.txt", method: "inspect" }],
+      });
+      if (phase === "write") { phase = "submit"; return tool("write", { path: "report.txt", content: "Verified report." }); }
+      return tool("task_submit", { summary: "Report ready.", artifacts: ["report.txt"],
+        criteria: [{ id: 1, status: "passed", evidence: "Inspected report.txt." }] });
+    }
+    reviewStarts++;
+    await new Promise<never>((_resolve, reject) => {
+      if (signal?.aborted) reject(signal.reason);
+      else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    return fauxAssistantMessage("Not reached.");
+  }, { review: true });
+  t.after(() => fixture.close());
+  const owner = pairing();
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [owner.device]);
+  const path = "/conversations/cancel-paused";
+  const { taskId } = await (await call(owner.token, path + "/messages", turn("first", "Write report.txt."))).json();
+  const view = async () => (await call(owner.token, path)).json();
+  const prepared = await until(view, (state) => state.task?.status === "awaiting_confirmation");
+  phase = "write";
+  await fixture.runtime.confirm(taskId, prepared.task.brief.revision, prepared.task.briefDigest);
+  await until(() => fixture.runtime.status(taskId), (state) => state.status === "verifying" && reviewStarts === 1);
+  assert.equal((await call(owner.token, path + "/control", taskControl("pause", (await view()).task.controlVersion))).status, 200);
+  const open = Harness.open.bind(Harness);
+  const reopen = t.mock.method(Harness, "open", async (...args: Parameters<typeof Harness.open>) => {
+    const harness = await open(...args);
+    const conversation = harness.conversation.bind(harness);
+    t.mock.method(harness, "conversation", async (...args: Parameters<typeof conversation>) => {
+      // Let the scheduler run before the second ownerless conversation is resolved.
+      if (args[0] === reviewer) await new Promise((resolve) => setTimeout(resolve, 100));
+      return conversation(...args);
+    });
+    return harness;
+  });
+  const paused = await fixture.runtime.status(taskId);
+  reopen.mock.restore();
+  const reviewer = paused.goal!.review!.conversationId;
+  assert(paused.tasks.length > 0);
+  assert.equal((await call(owner.token, path + "/control", taskControl("cancel", (await view()).task.controlVersion))).status, 200);
+  const cancelled = await fixture.runtime.status(taskId);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.tasks.length, 0);
+  assert.equal(reviewStarts, 1);
 });
 
 test("D04 reconnect replays a resolved wait once across Pi pages and daemon reopen", async (t) => {

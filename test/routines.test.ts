@@ -354,6 +354,93 @@ test("budget settlement can abort a timer waiting for the prior task state", asy
   }
 });
 
+test("resuming a recurring budget-paused rule isolates earlier stops from current slots", async t => {
+  const dataDir = await tempDir(t);
+  const clock = fakeClock();
+  const calls: RoutineOccurrence[] = [];
+  const rules = new LocalRoutines({
+    dataDir, ...clock,
+    execute: async occurrence => { calls.push(occurrence); return { taskId: occurrence.taskId }; },
+    taskOverview: async () => ({ status: "waiting_user", reason: null, question: null, summary: null }),
+  });
+  const id = "pause-budget";
+  const fire = async (offset: number) => {
+    const at = first + offset * 86_400_000;
+    await until(() => clock.waitingAt(at));
+    clock.advanceTo(at);
+    await until(async () => (await rules.list())[0]?.lastOccurrence?.scheduledAt === iso(at));
+  };
+  try {
+    await rules.create({ id, action: "task", objective: "Recurring review", overlapPolicy: "skip", schedule: { kind: "daily", time: "00:01", timeZone: "UTC" } });
+    await fire(0);
+    await rules.pause(id);
+    await rules.resume(id);
+    await fire(1);
+    assert.equal((await rules.list())[0]?.lastOccurrence?.blockedBy?.taskId, calls[0]?.taskId);
+    await rules.settleBudget(calls[0]!.id);
+    assert.equal((await rules.list())[0]?.status, "scheduled");
+    assert((await rules.history(id)).some(event => event.id === calls[0]!.id && event.status === "budget_exhausted"));
+
+    await rules.update(id, { id, action: "task", objective: "Revised recurring review", schedule: { kind: "daily", time: "00:01", timeZone: "UTC" } });
+    await fire(2);
+    await rules.settleBudget(calls[1]!.id);
+    assert.equal((await rules.list())[0]?.status, "paused");
+    assert.equal((await rules.resume(id)).revision, 2);
+    await rules.settleBudget(calls[1]!.id);
+    await fire(3);
+    assert.equal(calls.length, 3);
+    await rules.cancel(id);
+    await rules.settleBudget(calls[2]!.id);
+    assert.equal((await rules.list())[0]?.status, "cancelled");
+    await assert.rejects(rules.resume(id), { status: 409 });
+
+    await rules.create(reminder("one-shot", first + 4 * 86_400_000));
+    await assert.rejects(rules.pause("one-shot"), { status: 409 });
+  } finally { await rules.close(); }
+});
+
+test("a quick pause and resume keeps an accepted occurrence linked even before its launch receipt", async t => {
+  const dataDir = await tempDir(t);
+  const clock = fakeClock();
+  const accepted = Promise.withResolvers<RoutineOccurrence>();
+  const acknowledge = Promise.withResolvers<void>();
+  const rules = new LocalRoutines({
+    dataDir, ...clock,
+    execute: async occurrence => {
+      accepted.resolve(occurrence);
+      await acknowledge.promise;
+      return { taskId: occurrence.taskId };
+    },
+    taskOverview: async () => ({ status: "running", reason: null, question: null, summary: null }),
+  });
+  const id = "pause-admission";
+  let pause: Promise<unknown> | undefined;
+  try {
+    await rules.create({ id, action: "task", objective: "Recurring review", overlapPolicy: "skip", schedule: { kind: "daily", time: "00:01", timeZone: "UTC" } });
+    await until(() => clock.waitingAt(first));
+    clock.advanceTo(first);
+    const firstOccurrence = await accepted.promise;
+
+    pause = rules.pause(id);
+    await until(async () => (await rules.list())[0]?.status === "paused");
+    await rules.resume(id);
+    acknowledge.resolve();
+    await pause;
+
+    const next = first + 86_400_000;
+    await until(() => clock.waitingAt(next));
+    clock.advanceTo(next);
+    await until(async () => (await rules.list())[0]?.lastOccurrence?.scheduledAt === iso(next));
+    const history = await rules.history(id);
+    assert.deepEqual(history.map(row => row.status), ["claimed", "skipped"]);
+    assert.equal(history[1]?.blockedBy?.taskId, firstOccurrence.taskId);
+  } finally {
+    acknowledge.resolve();
+    await pause;
+    await rules.close();
+  }
+});
+
 test("R04 chooses the first valid instant in a gap and the earlier instant in a fold", () => {
   const schedule = { kind: "daily", time: "02:30", timeZone: "America/Los_Angeles" } as const;
   assert.equal(nextRoutineTime(schedule, Date.parse("2026-03-08T08:00:00Z")), Date.parse("2026-03-08T10:00:00Z"));

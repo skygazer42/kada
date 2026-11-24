@@ -7,9 +7,10 @@ import { LocalRuntime } from "../../src/runtime.js";
 import { fakeRoutineClock, until } from "../helpers.js";
 
 const [mode, dataDir] = process.argv.slice(2) as ["create" | "recover", string];
+const manual = process.argv[4] === "manual";
 const workspace = join(dataDir, "workspace");
 const due = Date.UTC(2026, 10, 23, 12);
-const clock = fakeRoutineClock(mode === "create" ? due - 60_000 : due + 60_000);
+const clock = fakeRoutineClock(mode === "create" || manual ? due - 60_000 : due + 60_000);
 const model = { provider: "precheck-fixture", modelId: "scripted" };
 const provider = fauxProvider({ provider: model.provider, models: [{ id: model.modelId }] });
 let modelCalls = 0;
@@ -44,15 +45,19 @@ try {
       precheck: { command: [process.execPath, "-e", script] },
       schedule: { kind: "once", at: new Date(due).toISOString() },
       budget: { maxEstimatedCostUsd: 1, maxDurationMs: 60_000 } });
-    await until(async () => clock.waitingAt(due), Boolean);
-    clock.advanceTo(due);
+    if (manual) {
+      await runtime.routines.runNow(routineId, "crash-manual");
+    } else {
+      await until(async () => clock.waitingAt(due), Boolean);
+      clock.advanceTo(due);
+    }
     await until(async () => existsSync(join(workspace, "check-attempts.txt")) || (await runtime.list()).length > 0, Boolean);
     console.log(JSON.stringify({ type: "ready" }));
     await setTimeout(60_000);
   } else {
     await runtime.recover();
-    const history = await until(() => runtime.routines.history(routineId), rows => rows.some(row => row.status !== "claimed"));
-    console.log(JSON.stringify({ type: "completed", history: history.map(row => [row.status, row.precheck?.status]),
+    const history = await until(async () => (await runtime.routines.history(routineId)).filter(row => Boolean(row.trigger) === manual), rows => rows.some(row => row.status !== "claimed"));
+    console.log(JSON.stringify({ type: "completed", history: history.map(row => [row.status, row.precheck?.status, row.trigger ?? "scheduled"]),
       tasks: (await runtime.list()).map(task => task.id), modelCalls }));
   }
 } finally {

@@ -35,6 +35,7 @@ import { taskHandoff } from "./task-view.js";
 import { claudeProject } from './memory-sources.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
+export type RemoteTaskControl = "pause" | "continue" | "cancel";
 export class TaskConflictError extends Error { readonly status = 409; }
 export interface TaskMeta {
   id: string;
@@ -46,6 +47,8 @@ export interface TaskMeta {
   deadlineAt: number;
   maxSubagents: number;
   control: Control;
+  remotePaused?: true;
+  remoteControlRevision?: string;
   schemaVersion?: 2 | 3;
   /** Stored per task: absence preserves the historical checkpoint requirement. */
   planPolicy?: "advisory";
@@ -264,7 +267,8 @@ export class LocalRuntime {
         await this.open(saved, saved.control === "active");
         return saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      const model = validateModel(this.options.models, await this.providers.selected(this.config.model));
+      const projectWorkspace = workspace === undefined || options.remote ? undefined : requestedWorkspace;
+      const model = validateModel(this.options.models, await this.providers.selected(this.config.model, projectWorkspace));
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace);
       const selection=options.remote ? [] : options.skills;
@@ -858,7 +862,9 @@ export class LocalRuntime {
         }
         return tools;
       }, ctx) : [];
+      const remoteControls = meta.remotePolicy === "workspace" ? await this.remoteTaskControls(active, meta, status, goal) : [];
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
+        remoteControls, remoteControlVersion: meta.remotePolicy === "workspace" ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
         activeTools, delegations,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
@@ -961,11 +967,53 @@ export class LocalRuntime {
       active.enabled = true;
     });
   }
+  private async remoteTaskControls(active: Active, meta: TaskMeta, status: string, goal?: GoalState): Promise<RemoteTaskControl[]> {
+    if (meta.initializationError) return [];
+    if (status === "paused" && meta.remotePaused) {
+      return await this.budgetReason(active, goal) || Date.now() >= this.deadline(active, goal) ? ["cancel"] : ["continue", "cancel"];
+    }
+    if (["running", "pending", "verifying"].includes(status)) return ["pause", "cancel"];
+    if (["clarifying", "awaiting_confirmation", "waiting_user", "blocked", "needs_attention"].includes(status)) return ["cancel"];
+    return [];
+  }
+  private remoteControlVersion(meta: TaskMeta, status: string, submissionId?: number, goal?: GoalState): string {
+    return createHash("sha256").update(JSON.stringify([meta.id, meta.remoteControlRevision, status, submissionId, goal?.revision])).digest("hex");
+  }
+  async controlRemoteTask(id: string, workspace: string, action: RemoteTaskControl, version: string): Promise<void> {
+    await this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy !== "workspace" || meta.workspace !== workspace) throw new TaskConflictError("The original task is unavailable.");
+      const active = await this.open(meta, false);
+      const { status, goal, submission } = await this.taskState(active, meta);
+      if (version !== this.remoteControlVersion(meta, status, submission?.id, goal) || !(await this.remoteTaskControls(active, meta, status, goal)).includes(action)) {
+        throw new TaskConflictError("This action is unavailable in the task’s current state.");
+      }
+      if (action === "pause") {
+        meta.remotePaused = true;
+        await this.pauseTask(meta);
+      } else if (action === "cancel") await this.cancelTask(meta);
+      else {
+        delete meta.remotePaused;
+        meta.control = "active";
+        meta.remoteControlRevision = randomUUID();
+        await atomicJson(this.metaFile(id), meta);
+        active.meta = meta;
+        await this.open(meta, true);
+      }
+    });
+  }
+  private async pauseTask(meta: TaskMeta): Promise<void> {
+    if (meta.remotePolicy === "workspace") meta.remoteControlRevision = randomUUID();
+    meta.control = "paused";
+    await atomicJson(this.metaFile(meta.id), meta);
+    await this.closeTask(meta.id);
+  }
   async pause(id: string): Promise<void> {
     await this.changes.run(async () => {
       const meta = await this.metadata(id);
       if (meta.control === "cancelled") throw new Error("Cancelled tasks cannot be paused");
-      meta.control = "paused"; await atomicJson(this.metaFile(id), meta); await this.closeTask(id);
+      delete meta.remotePaused;
+      await this.pauseTask(meta);
     });
   }
   async resume(id: string): Promise<void> {
@@ -980,6 +1028,8 @@ export class LocalRuntime {
         try {await this.configureStage(active);}
         catch(error) {meta.initializationError=previous;await this.closeTask(id);throw error;}
       }
+      delete meta.remotePaused;
+      if (meta.remotePolicy === "workspace") meta.remoteControlRevision = randomUUID();
       meta.control = "active"; meta.deadlineAt = Date.now() + (meta.maxDurationMs ?? this.config.maxDurationMs);
       await atomicJson(this.metaFile(id), meta);
       if (await this.goalState(active)) {
@@ -1010,13 +1060,21 @@ export class LocalRuntime {
     });
   }
   async cancel(id: string): Promise<void> {
-    await this.changes.run(async () => {
-      const meta = await this.metadata(id);
-      meta.control = "cancelled"; await atomicJson(this.metaFile(id), meta);
-      const active = await this.open(meta, false);
-      await this.abortAll(active);
-      await this.closeTask(id);
-    });
+    await this.changes.run(async () => this.cancelTask(await this.metadata(id)));
+  }
+  private async cancelTask(meta: TaskMeta): Promise<void> {
+    const wasPaused = meta.control === "paused";
+    delete meta.remotePaused;
+    meta.control = "cancelled"; await atomicJson(this.metaFile(meta.id), meta);
+    const active = await this.open(meta, false);
+    if (wasPaused) {
+      // Conversation.abort() wakes the whole Harness before cancelling its own scope.
+      const { tasks, submissions } = await active.harness.inspect(ctx);
+      for (const submission of submissions) await active.harness.abortSubmission(submission.id, ctx);
+      for (const { record } of tasks) await active.harness.abortTask(record.id, ctx);
+    }
+    await this.abortAll(active);
+    await this.closeTask(meta.id);
   }
   private async abortAll(active: Active): Promise<void> {
     for (const record of await this.conversations(active)) if (!record.owner) await (await active.harness.conversation(record.id, ctx))?.abort(ctx, { background: true });

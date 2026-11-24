@@ -155,3 +155,72 @@ test('R03 repeated routine deliveries notify only when the verified output chang
     assert.equal((await f.runtime.notifications()).filter(event => event.event === 'completed').length,2);
   } finally { await f.close(); }
 });
+
+test('project model settings apply at creation and leave existing Pi sessions pinned after restart', async () => {
+  const f = await scriptedFixture(() => fauxAssistantMessage('Original model continued'));
+  const extra = fauxProvider({ provider: 'project-test', models: [{ id: 'alternate' }] });
+  extra.setResponses(Array.from({ length: 10 }, () => (context) => fauxAssistantMessage(
+    context.messages.some(message => message.role === 'user' && message.content === 'Continue the original chat')
+      ? 'Project model handled the new turn' : 'Project model ready',
+  )));
+  f.models.setProvider(extra.provider);
+  const settings = { ...f.settings, port: await portNumber() };
+  const nested = join(f.workspace, 'subdirectory');
+  const sibling = join(f.directory, 'separate-workspace');
+  await Promise.all([mkdir(nested), mkdir(sibling), writeFile(join(f.workspace, '.kada-project'), '')]);
+  let server = await serve(settings, { models: f.models });
+  const client = createClient(settings);
+  const ref = { provider: 'project-test', modelId: 'alternate' };
+  const modelSettings = '/v1/settings/models';
+  const workspaceQuery = '?workspace=' + encodeURIComponent(nested);
+  const create = (workspace?: string) => client.request<{ id: string; model: typeof ref }>(
+    '/v1/tasks', 'POST', { objective: 'Verify workspace model', mode: 'chat', workspace },
+  );
+  try {
+    await client.request(`${modelSettings}/check`, 'POST', ref);
+    await client.request(`${modelSettings}/select`, 'POST', { ...ref, workspace: f.workspace });
+    const selected = await create(nested);
+    assert.deepEqual(selected.model, ref);
+    assert.deepEqual((await create(join(f.workspace, 'new', 'missing-subdirectory'))).model, ref);
+    assert.deepEqual((await create(sibling)).model, settings.model);
+    assert.deepEqual((await create()).model, settings.model);
+    await client.request(modelSettings + workspaceQuery, 'DELETE');
+    await server.close();
+    server = await serve(settings, { models: f.models });
+    assert.deepEqual((await create(f.workspace)).model, settings.model);
+    const answers: string[] = [];
+    const terminal = new ChatSession(client, event => { if (event.kind === 'answer') answers.push(event.text); });
+    await terminal.handle(`/attach ${selected.id}`);
+    await terminal.handle('Continue the original chat');
+    await until(async () => { await terminal.poll(); return answers; }, values => values.includes('Project model handled the new turn'));
+    assert.deepEqual((await server.runtime.status(selected.id)).model, ref);
+  } finally { await server.close(); await f.close(); }
+});
+
+test('the authenticated routine run endpoint returns the same receipt for a repeated request', async () => {
+  const f = await scriptedFixture(() => fauxAssistantMessage('No model needed'));
+  const settings = { ...f.settings, port: await portNumber() };
+  const server = await serve(settings, { models: f.models });
+  const client = createClient(settings);
+  const id = 'manual-notification';
+  const at = new Date(Date.now() + 3_600_000).toISOString();
+  const path = `/v1/routines/${id}`;
+  try {
+    await client.request('/v1/routines', 'POST', {
+      id, action: 'notify', objective: 'Check the local inbox', schedule: { kind: 'once', at },
+    });
+    const unauthenticated = await fetch(`http://127.0.0.1:${settings.port}${path}/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"requestId":"retry-me"}',
+    });
+    assert.equal(unauthenticated.status, 401);
+    const run = () => client.request<{ id: string; trigger: string; status: string }>(path + '/run', 'POST', { requestId: 'retry-me' });
+    const original = await run();
+    assert.equal(original.status, 'claimed');
+    assert.equal(original.trigger, 'manual');
+    assert.deepEqual(await run(), original);
+    const events = await until(() => server.runtime.notifications(), rows => rows.some(row => row.routineId === id));
+    assert.equal(events.filter(row => row.routineId === id).length, 1);
+    const rules = await server.runtime.routines.list();
+    assert.equal(rules.find(rule => rule.id === id)?.nextRunAt, at);
+  } finally { await server.close(); await f.close(); }
+});

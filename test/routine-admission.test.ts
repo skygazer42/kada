@@ -8,7 +8,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { fakeRoutineClock, recoveryTestTimeoutMs, scriptedFixture, startRecoveryWorker, until } from "./helpers.js";
 import { serve } from "../src/server.js";
 import { createClient } from "../src/client.js";
-import type { RoutineHistoryRecord } from "../src/routines.js";
+import type { Routine, RoutineHistoryRecord } from "../src/routines.js";
 
 const budget = { maxEstimatedCostUsd: 1, maxDurationMs: 10_000, maxTotalTokens: 10_000 };
 
@@ -99,6 +99,28 @@ test("recurring overlap skips before precheck and links the blocking task across
     const delivered = (await history(true)).find(row => row.id === started.id && row.status === "started");
     assert.equal(delivered?.taskStatus, "completed");
     assert.equal(delivered?.taskSummary, "Checked inventory");
+
+    const pausePath = `/v1/routines/${rule.id}/pause`;
+    const resumePath = `/v1/routines/${rule.id}/resume`;
+    assert.equal((await fetch(`http://127.0.0.1:${port}${pausePath}`, { method: "POST" })).status, 401);
+    await until(() => server.runtime.taskOverview(next.taskId!), overview => overview.status === "completed");
+    const paused = await client.request<Routine>(pausePath, "POST");
+    assert.equal(paused.status, "paused");
+    assert.equal(paused.nextRunAt, undefined);
+    assert.equal((await server.runtime.taskOverview(next.taskId!)).status, "completed");
+    assert.deepEqual(await client.request<Routine>(pausePath, "POST"), paused);
+    await server.close();
+    clock.advanceTo(first + 5 * day);
+    server = await serve(settings, options);
+    const [stored] = await client.request<Routine[]>("/v1/routines");
+    assert.deepEqual(stored, paused);
+    const resumed = await client.request<Routine>(resumePath, "POST");
+    assert.equal(resumed.revision, paused.revision);
+    assert.equal(resumed.nextRunAt, new Date(first + 6 * day).toISOString());
+    assert.deepEqual(await client.request<Routine>(resumePath, "POST"), resumed);
+    assert.equal((await history()).some(row => [4, 5].some(dayOffset => row.scheduledAt === new Date(first + dayOffset * day).toISOString())), false);
+    const [, resumedSlot] = await slot(6);
+    assert.equal(resumedSlot.status, "started");
   } finally {
     release();
     await server.close();
@@ -155,6 +177,10 @@ test("R03 a fixed precheck only starts a task on the first successful sample or 
     const details = await runtime.routines.history(rule.id, true);
     assert.equal(details.find(row => row.id === failed.id && row.status === "claimed")?.taskStatus, "missing");
     assert.equal(details.find(row => row.id === failed.id && row.status === "failed")?.taskStatus, undefined);
+    await runtime.routines.pause(rule.id);
+    clock.advanceTo(first + 5 * day);
+    await runtime.routines.resume(rule.id);
+    assert.equal((await run(6, "alpha\nbeta", 2)).precheck?.status, "unchanged");
   } finally { await fixture.close(); }
 });
 

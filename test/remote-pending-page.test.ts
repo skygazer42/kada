@@ -37,7 +37,7 @@ const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL) => Response | Promise<Response>) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -65,6 +65,7 @@ function harness(history?: (url: URL) => Response | Promise<Response>) {
         document: { getElementById: field, createElement: () => new Element(), addEventListener() {} },
         window: { addEventListener() {} },
         localStorage: storage(local), sessionStorage: storage(session), crypto: webcrypto,
+        confirm: () => true,
         setInterval(callback: () => Promise<void>) { poll = callback; },
         async fetch(url: string, init: RequestInit) {
           requests.push(url);
@@ -93,7 +94,7 @@ function harness(history?: (url: URL) => Response | Promise<Response>) {
             return Response.json({ error: "Device revoked." }, { status: 401 });
           }
           if (url.includes("?messageId=") || url.endsWith("/messages")) return Response.json({ state: receipt });
-          if (history) return history(new URL(url, "http://localhost"));
+          if (history) return history(new URL(url, "http://localhost"), init);
           return Response.json({ error: "Conversation not found." }, { status: 404 });
         },
       });
@@ -172,6 +173,60 @@ test("a rejected cursor rebuilds history and a connection failure preserves the 
   assert.deepEqual(device.requests.slice(-4), [address, address + "?after=2", address + "?after=2", address]);
   assert.deepEqual(page.field("messages").children.map((article) => article.children[1]!.textContent), ["Restored"]);
   assert.equal(page.field("status").textContent, "");
+});
+
+test("task controls update the selected card and preserve the transcript and draft", async () => {
+  let state = "running";
+  const device = harness((url, init) => {
+    if (url.pathname.endsWith("/control")) {
+      assert.equal(url.pathname, "/remote/api/conversations/" + conversationId + "/control");
+      const { action, version } = JSON.parse(init.body as string);
+      assert.equal(version, state + "-revision");
+      state = { pause: "paused", continue: "running", cancel: "cancelled" }[action as string]!;
+      return Response.json({ status: state });
+    }
+    const controls = { running: ["pause", "cancel"], paused: ["continue", "cancel"], cancelled: [] }[state];
+    const messages = url.search ? [] : [{ sequence: 1, role: "user", text: "Original request" }];
+    return Response.json({ cursor: 1, messages, progressEvents: [], task: { status: state, controls, controlVersion: state + "-revision" } });
+  });
+  const page = await device.open();
+  const task = page.field("task");
+  const action = (label: string) => task.children.flatMap((child) => child.children).find((child) => child.textContent === label);
+  page.field("prompt").value = "Keep this draft.";
+  await action("Pause")!.trigger("click");
+  assert.equal(task.children[0]!.textContent, "Paused");
+  assert.equal(page.field("send").disabled, true);
+  await action("Continue")!.trigger("click");
+  assert.equal(task.children[0]!.textContent, "Running");
+  assert.equal(page.field("send").disabled, false);
+  await action("Cancel task")!.trigger("click");
+  assert.equal(task.children[0]!.textContent, "Cancelled");
+  assert.equal(action("Cancel task"), undefined);
+  assert.equal(page.field("messages").children.length, 1);
+  assert.equal(page.field("prompt").value, "Keep this draft.");
+});
+
+test("a task control conflict stays with its conversation when the selected chat changes", async () => {
+  const rechecking = Promise.withResolvers<void>();
+  const stale = Promise.withResolvers<Response>();
+  const view = { cursor: 1, messages: [], progressEvents: [], task: { status: "running", controls: ["pause"], controlVersion: "old" } };
+  const device = harness((url) => {
+    if (url.pathname.endsWith("/control")) return Response.json({ error: "Original task changed." }, { status: 409 });
+    if (url.pathname.endsWith("/other")) return Response.json({ ...view, task: null });
+    if (url.search) { rechecking.resolve(); return stale.promise; }
+    return Response.json(view);
+  });
+  const page = await device.open();
+  const pause = page.field("task").children[1]!.children[0]!;
+  const click = pause.trigger("click");
+  await rechecking.promise;
+  page.field("conversation").value = "other";
+  await page.field("conversation").trigger("change");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  stale.resolve(Response.json(view));
+  await click;
+  assert.equal(page.field("status").textContent, "");
+  assert.equal(page.field("task").hidden, true);
 });
 
 test("reload restores the pending text and retries the original message only on demand", async () => {
