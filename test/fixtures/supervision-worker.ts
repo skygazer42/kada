@@ -1,4 +1,4 @@
-import { access, writeFile } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
@@ -6,10 +6,14 @@ import type { JsonObject } from "@earendil-works/pi-durable";
 import { LocalRuntime } from "../../src/runtime.js";
 
 const [mode, directory, stage] = process.argv.slice(2) as [string, string, string];
+const settled = stage === "settled";
+const workspace = join(directory, "workspace");
 const exists = (file: string) => access(file).then(() => true, () => false);
 const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const faux = fauxProvider({ provider: "crash-test", models: [{ id: "scripted" }] });
+let requests = 0;
 faux.setResponses(Array.from({ length: 64 }, () => async (c, options) => {
+  requests++;
   const users = c.messages.filter(m => m.role === "user").map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content));
   const isReview = c.messages.some(m => m.role === "system" && m.toolsAdded?.some(t => t.name === "review_result"));
   const results = c.messages.filter(m => m.role === "toolResult" && !m.isError);
@@ -28,18 +32,32 @@ faux.setResponses(Array.from({ length: 64 }, () => async (c, options) => {
   return call("task_submit", { summary: "Total 71 is in result.json.", artifacts: ["result.json"] });
 }));
 const models = createModels(); models.setProvider(faux.provider);
-const runtime = new LocalRuntime({ dataDir: directory, port: 4317, model: { provider: "crash-test", modelId: "scripted" }, maxSubagents: 2, maxDurationMs: 60_000, review: true, web: false }, { models });
+const runtime = new LocalRuntime({ dataDir: directory, port: 4317, model: { provider: "crash-test", modelId: "scripted" }, maxSubagents: 2, maxDurationMs: 60_000, maxTotalTokens: settled ? 1 : undefined, review: !settled, web: false }, { models });
 try {
-  if (mode === "create") await runtime.create("Write and verify total 71.", join(directory, "workspace"), [{ type: "json_value", path: "result.json", pointer: "/total", equals: 71 }]);
-  else await runtime.recover();
+  if (mode === "create") {
+    if (settled) {
+      // Hold the host timer so Pi can record the submission before the process is killed.
+      clearInterval(runtime["timer"]);
+      await mkdir(workspace);
+      await writeFile(join(workspace, "result.json"), '{"total":71}');
+    }
+    await runtime.create(settled ? "Verify the existing total 71." : "Write and verify total 71.", workspace,
+      [{ type: "json_value", path: "result.json", pointer: "/total", equals: 71 }]);
+  } else await runtime.recover();
   const task = (await runtime.list())[0]!;
   let announced = false;
   for (;;) {
     const status = await runtime.status(task.id);
     const snapshot = { reviewerId: status.goal?.review?.conversationId, rootRequest: status.submission?.requestId, reworks: status.goal?.reworks,
       reworkInputs: status.messages.filter(m => m.role === "user" && typeof m.content === "string" && m.content.includes("SUPERVISOR_REWORK")).length,
-      conversations: status.conversations.map(c => c.id) };
-    if (!announced && await exists(join(directory, "gated"))) { console.log(JSON.stringify({ type: "ready", ...snapshot })); announced = true; }
+      conversations: status.conversations.map(c => c.id),
+      ...(settled ? { taskId: task.id, submissionId: status.submission?.id, candidateId: status.goal?.candidate?.id,
+        totalTokens: status.budget.totalTokens, mechanical: status.goal?.mechanical?.passed ?? null,
+        completedEvents: status.goal?.events.filter(event => event.type === "completed").length, requests } : {}) };
+    const ready = settled
+      ? mode === "create" && status.goal?.phase === "submitted" && status.submission?.status === "done" && !status.tasks.length
+      : await exists(join(directory, "gated"));
+    if (!announced && ready) { console.log(JSON.stringify({ type: "ready", ...snapshot })); announced = true; }
     if (status.status === "completed") { console.log(JSON.stringify({ type: "completed", ...snapshot })); break; }
     if (["failed", "needs_attention", "budget_limited"].includes(status.status)) throw new Error(JSON.stringify({ status: status.status, reason: status.goal?.reason }));
     await setTimeout(25);

@@ -41,10 +41,38 @@ test('F09 one historical invalid task is quarantined and can be repaired without
   } finally {await reopened?.close();await f.close();}
 });
 
+test('F09 tasks with no pinned Skills hide and reject the script tool',async()=>{
+  const offered:boolean[]=[];
+  const f=await scriptedFixture(context=>{
+    offered.push(hasTool(context,'run_skill_script'));
+    if(!context.messages.some(message=>message.role==='toolResult' && message.toolName==='run_skill_script')) {
+      return fauxAssistantMessage(fauxToolCall('run_skill_script',{name:'unknown-skill',path:'example.mjs',args:[]}),{stopReason:'toolUse'});
+    }
+    return fauxAssistantMessage(fauxToolCall('task_submit',{summary:'Complete',artifacts:[]}),{stopReason:'toolUse'});
+  });
+  let reopened:LocalRuntime|undefined;
+  try {
+    const task=await f.runtime.create('A task without Skills',f.workspace,[],{skills:[]});
+    const done=await until(()=>f.runtime.status(task.id),status=>status.status==='completed');
+    assert.deepEqual(offered,[false,false]);
+    assert.ok(done.messages.some(message=>message.role==='toolResult' && message.toolName==='run_skill_script' && message.isError));
+    await f.runtime.close();
+    reopened=new LocalRuntime(f.settings,{models:f.models});await reopened.recover();
+    await reopened.followUp(task.id,'Check the result again');
+    await until(()=>reopened!.status(task.id),status=>status.status==='completed');
+    assert.deepEqual(offered,[false,false,false]);
+  } finally {await reopened?.close();await f.close();}
+});
+
 test('F09 a prepared task keeps the selected Skill version through disable, source edit and confirmation',async()=>{
-  const f=await scriptedFixture(context=>fauxAssistantMessage(fauxToolCall(hasTool(context,'task_prepare') ? 'task_prepare' : 'task_submit',hasTool(context,'task_prepare') ? {
-    outcome:'Answer a short question',deliverables:['Text answer in summary'],inputs:[],criteria:[{text:'A text answer is returned',method:'inspect'}],scope:['text only'],assumptions:[],questions:[],
-  } : {summary:'Verified text answer',artifacts:[],criteria:[{id:1,status:'passed',evidence:'Answered in the delivery summary'}]}),{stopReason:'toolUse'}));
+  const offered:boolean[]=[];
+  const f=await scriptedFixture(context=>{
+    offered.push(hasTool(context,'run_skill_script'));
+    return fauxAssistantMessage(fauxToolCall(hasTool(context,'task_prepare') ? 'task_prepare' : 'task_submit',hasTool(context,'task_prepare') ? {
+      outcome:'Answer a short question',deliverables:['Text answer in summary'],inputs:[],criteria:[{text:'A text answer is returned',method:'inspect'}],scope:['text only'],assumptions:[],questions:[],
+    } : {summary:'Verified text answer',artifacts:[],criteria:[{id:1,status:'passed',evidence:'Answered in the delivery summary'}]}),{stopReason:'toolUse'});
+  });
+  let reopened:LocalRuntime|undefined;
   try {
     const source=join(f.workspace,'.pi/skills/example');await mkdir(source,{recursive:true});
     const original='---\nname: example\ndescription: A synthetic text method.\n---\nOriginal instructions.\n';
@@ -58,5 +86,11 @@ test('F09 a prepared task keeps the selected Skill version through disable, sour
     const done=await until(()=>f.runtime.status(task.id),status=>status.status==='completed');
     const pin=done.goal!.skills!.pins[0]!;
     assert.equal(pin.version,version);assert.equal(await readFile(pin.filePath,'utf8'),original);
-  } finally {await f.close();}
+    assert.deepEqual(offered,[false,true]);
+    await f.runtime.close();
+    reopened=new LocalRuntime(f.settings,{models:f.models});await reopened.recover();
+    await reopened.followUp(task.id,'Check the answer again');
+    await until(()=>reopened!.status(task.id),status=>status.status==='completed');
+    assert.deepEqual(offered,[false,true,true]);
+  } finally {await reopened?.close();await f.close();}
 });

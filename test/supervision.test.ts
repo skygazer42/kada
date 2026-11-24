@@ -210,6 +210,43 @@ test("token budget is persistent, includes the coordinator and requires explicit
   } finally { await reopened?.close(); await f.close(); }
 });
 
+for (const total of [71, 0]) test(`a submitted candidate is checked after the last model request spends its budget (total ${total})`, async () => {
+  let requests = 0;
+  const f = await fixture(() => {
+    requests++;
+    return call("task_submit", { summary: "Result ready.", artifacts: ["result.json"] });
+  }, { maxTotalTokens: 1, review: false });
+  try {
+    await writeFile(join(f.workspace, "result.json"), JSON.stringify({ total }));
+    const task = await f.runtime.create("Verify the existing result.", f.workspace, [
+      { type: "json_value", path: "result.json", pointer: "/total", equals: 71 },
+    ]);
+    const expected = total === 71 ? "completed" : "budget_limited";
+    const status = await until(() => f.runtime.status(task.id), s => ["completed", "budget_limited"].includes(s.status));
+    assert.equal(status.status, expected);
+    assert.equal(status.goal?.mechanical?.passed, total === 71);
+    assert.ok(status.goal?.candidate);
+    assert.ok(status.budget.totalTokens >= 1);
+    assert.equal(requests, 1);
+    assert.equal(status.goal.reworks, 0);
+  } finally { await f.close(); }
+});
+
+test("a spent budget cannot start rework when the model has not submitted a candidate", async () => {
+  let requests = 0;
+  const f = await fixture(() => {
+    requests++;
+    return fauxAssistantMessage("Done.");
+  }, { maxTotalTokens: 1, review: false });
+  try {
+    const task = await f.runtime.create("Produce a checked result.", f.workspace);
+    const status = await until(() => f.runtime.status(task.id), s => s.status === "budget_limited");
+    assert.equal(status.goal?.candidate, null);
+    assert.equal(status.goal?.reworks, 0);
+    assert.equal(requests, 1);
+  } finally { await f.close(); }
+});
+
 test("checker handles JSON Pointer escaping and rejects unsafe or nonmatching predicates", async () => {
   const f = await demoFixture();
   try {

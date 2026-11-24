@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { BACKGROUND_CONTEXT as ctx } from '@earendil-works/chord/context';
 import { createModels, createProvider, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, type StreamOptions, type TranscriptContext } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { Harness, ToolTask, createRegistry, defineExtension, hook } from '@earendil-works/pi-durable';
+import { Harness, ToolTask, createRegistry, defineExtension, hook, wrapTool } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { conversationAnswer } from '../src/conversation.js';
 import { localEnvironment, localExecution, taskCompaction } from '../src/execution.js';
@@ -17,6 +17,9 @@ import { LocalRuntime } from '../src/runtime.js';
 
 const selfTest = process.argv.includes('--self-test');
 assert(selfTest !== process.argv.includes('--live'), 'Select --self-test or --live.');
+const selectedArm = process.argv.find(argument => /^--arm(?:=|$)/.test(argument))?.slice('--arm='.length);
+assert(selectedArm === undefined || selectedArm === 'pi' || selectedArm === 'kada', 'Select --arm=pi or --arm=kada.');
+const arms: readonly ('pi' | 'kada')[] = selectedArm ? [selectedArm] : ['pi', 'kada'];
 const preference = 'For this project my daily report title preference is exactly "Daily brief | Iris-7391".';
 const question = 'Which release channel should I use?';
 const reply = 'Use the orchid release channel. Please finish the same report.';
@@ -73,24 +76,30 @@ async function compare(arm: 'pi' | 'kada') {
   await Promise.all([mkdir(home, { recursive: true }), mkdir(workspace, { recursive: true })]);
   await Promise.all([...Object.entries(inputs), ['.kada-project', '']].map(([name, content]) => writeFile(join(workspace, name!), content!)));
   const startedAt = Date.now(), deadline = AbortSignal.timeout(limits.maxDurationMs);
-  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0 };
+  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
   const evidence = { sessionReopened: false, pausedForOperator: false, retainedQuestion: false, memoryReferenceRetained: null as boolean | null,
     draftVerified: false };
   const modelUsage: Promise<void>[] = [];
   const nativeCalls: Record<string, number> = {};
+  let firstRequestTools: { count: number; bytes: number; source: 'transcript' | 'provider-payload' } | null = null;
   let modelRequests = 0, providerErrors = 0, userContinuationMessages = 0, reworks = 0, stage = 'start', execution = 'pending';
-  function countRequest() {
+  const models = createModels(), nativeTools = localExecution();
+  const nativeNames = new Set(nativeTools.tools!.map(tool => tool.name));
+  function countRequest(context: TranscriptContext) {
     deadline.throwIfAborted();
     assert(modelRequests < limits.maxModelRequests && usage.totalTokens < limits.maxTotalTokens, 'Comparison request or token limit reached.');
     modelRequests++;
+    const tools = getCurrentTools(context.messages);
+    assert.deepEqual(tools.filter(tool => nativeNames.has(tool.name)).map(tool => tool.name).sort(), ['read', 'write']);
+    return tools;
   }
-  const models = createModels();
   if (selfTest) {
     const provider = fauxProvider({ provider: model.provider, models: [{ id: model.modelId }] });
     const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: 'toolUse' });
     provider.setResponses(Array.from({ length: limits.maxModelRequests }, () => (context: TranscriptContext) => {
-      countRequest();
-      const managed = getCurrentTools(context.messages).some(tool => tool.name === 'task_blocked');
+      const tools = countRequest(context);
+      firstRequestTools ??= { count: tools.length, bytes: Buffer.byteLength(JSON.stringify(tools)), source: 'transcript' };
+      const managed = tools.some(tool => tool.name === 'task_blocked');
       const used = (name: string) => context.messages.filter(message => message.role === 'toolResult' && message.toolName === name && !message.isError).length;
       if (!used('read')) return call('read', { path: 'sales.json' });
       if (!used('write')) return call('write', { path: 'draft.json', content: JSON.stringify(expectedDraft) });
@@ -105,16 +114,25 @@ async function compare(arm: 'pi' | 'kada') {
     const selected = cloudModels().getModel(model.provider, model.modelId);
     assert(selected, 'Select an installed SiliconFlow model.');
     const native = openAICompletionsApi();
-    const options = <T extends StreamOptions>(input?: T) => {
-      countRequest();
+    const options = <T extends StreamOptions>(context: TranscriptContext, input?: T) => {
+      countRequest(context);
+      const onPayload: StreamOptions['onPayload'] = async (payload, selected) => {
+        const replacement = await input?.onPayload?.(payload, selected);
+        if (!firstRequestTools) {
+          const { tools = [] } = (replacement ?? payload) as { tools?: unknown[] };
+          firstRequestTools = { count: tools.length, bytes: Buffer.byteLength(JSON.stringify(tools)), source: 'provider-payload' };
+        }
+        return replacement;
+      };
       return { ...input, maxTokens: Math.min(input?.maxTokens ?? limits.maxOutputTokens, limits.maxOutputTokens),
-        signal: input?.signal ? AbortSignal.any([input.signal, deadline]) : deadline };
+        signal: input?.signal ? AbortSignal.any([input.signal, deadline]) : deadline, onPayload };
     };
     const observe = (stream: ReturnType<typeof native.stream>) => {
       modelUsage.push(stream.result().then(({ usage: spent, stopReason }) => {
         usage.inputTokens += spent.input;
         usage.outputTokens += spent.output;
         usage.cachedTokens += spent.cacheRead;
+        usage.cacheWriteTokens += spent.cacheWrite;
         usage.totalTokens += spent.totalTokens;
         if (stopReason === 'error' || stopReason === 'aborted') providerErrors++;
       }, () => { providerErrors++; }));
@@ -122,14 +140,17 @@ async function compare(arm: 'pi' | 'kada') {
     };
     models.setProvider(createProvider({ id: model.provider, models: [{ ...selected, maxTokens: limits.maxOutputTokens }], baseUrl: selected.baseUrl,
       auth: { apiKey: { name: 'SiliconFlow handoff comparison', resolve: async () => ({ auth: { apiKey: apiKey! } }) } },
-      api: { stream: (selected, context, input) => observe(native.stream(selected, context, options(input))),
-        streamSimple: (selected, context, input) => observe(native.streamSimple(selected, context, options(input))) } }));
+      api: { stream: (selected, context, input) => observe(native.stream(selected, context, options(context, input))),
+        streamSimple: (selected, context, input) => observe(native.streamSimple(selected, context, options(context, input))) } }));
   }
 
   const outputs = ['draft.json', 'report.json'];
   const readable = new Set([...Object.keys(inputs), ...outputs].map(name => join(workspace, name)));
   const writable = new Set(outputs.map(name => join(workspace, name)));
-  const scope = defineExtension({ name: 'handoff_comparison_scope', hooks: [hook(ToolTask, {
+  const scope = defineExtension({ name: 'handoff_comparison_scope',
+    wraps: nativeTools.tools!.filter(tool => tool.name !== 'read' && tool.name !== 'write')
+      .map(tool => wrapTool(tool, native => ({ ...native, callers: ['tools'] }))),
+    hooks: [hook(ToolTask, {
     beforeTool(call) {
       if (['task_blocked', 'task_status', 'task_submit'].includes(call.name)) return;
       const allowed = call.name === 'read' ? readable : call.name === 'write' ? writable : undefined;
@@ -138,7 +159,7 @@ async function compare(arm: 'pi' | 'kada') {
       nativeCalls[call.name] = (nativeCalls[call.name] ?? 0) + 1;
     },
   })] });
-  const nativeTools = localExecution(), registry = createRegistry();
+  const registry = createRegistry();
   for (const extension of [nativeTools, scope]) registry.install(extension);
   const openPi = async () => Harness.open(await openNodeSqliteStorage(join(dataDir, 'session.sqlite')), {
     models, registry, env: ({ cwd }) => localEnvironment(cwd ?? workspace),
@@ -236,20 +257,20 @@ async function compare(arm: 'pi' | 'kada') {
   const draftMatches = matchesJson(finalDraft, expectedDraft);
   const reportMatches = matchesJson(finalReport, expectedReport);
   const verifiedResult = executionPassed && inputsPreserved && draftPreserved === true && reportMatches;
-  return { arm, execution, elapsedMs: Date.now() - startedAt, modelRequests, providerErrors, usage, estimatedCostUsd: null,
+  return { arm, execution, elapsedMs: Date.now() - startedAt, modelRequests, providerErrors, firstRequestTools, usage, estimatedCostUsd: null,
     userContinuationMessages, reworks, nativeCalls, ...evidence, inputsPreserved, draftPreserved, draftMatches, reportMatches,
     verifiedResult, passed: verifiedResult };
 }
 
 const results = [];
-for (const arm of ['pi', 'kada'] as const) {
+for (const arm of arms) {
   const result = await compare(arm);
   results.push(result);
   console.log(JSON.stringify(result));
 }
 const report = join(directory, 'comparison.json');
 await writeFile(report, JSON.stringify({ at: new Date().toISOString(), mode: selfTest ? 'scripted-model' : 'siliconflow', model, objective, reply, limits, results,
-  note: 'Single synthetic task per arm, fixed order. It measures these two runs; broader performance needs repeated tasks and counterbalanced order. SiliconFlow pricing is unavailable in the installed catalog.' }, null, 2) + '\n');
+  note: 'Single synthetic task per selected arm. Broader performance needs repeated tasks and counterbalanced order. SiliconFlow pricing is unavailable in the installed catalog.' }, null, 2) + '\n');
 const passed = results.every(result => result.passed);
 console.log(JSON.stringify({ report, passed }));
 if (!passed) process.exitCode = 1;
