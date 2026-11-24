@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { delegationExtension, listDelegations } from "./delegation.js";
+import { delegationExtension, listDelegations, pendingDelegation, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -274,7 +274,7 @@ export class LocalRuntime {
       const selection=options.remote ? [] : options.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
-        mcpPins:options.remote ? [] : await this.mcp.pins(),
+        mcpPins: options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root),
         ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
         ...(options.remote ? {remotePolicy:'workspace' as const} : {}),
         ...(options.routineOccurrenceId ? {routineOccurrenceId:options.routineOccurrenceId} : {}),
@@ -404,7 +404,11 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins)}));
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
       const coordinatorOnly = [goal, verification, ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
-      const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly),
+      const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
+        !remote && meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
+          const state = await tx.doc(GoalDoc);
+          if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
+        } : undefined),
         ...(policy ? [policy] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
@@ -450,7 +454,11 @@ export class LocalRuntime {
         return active;
       }
       const finished = goal ? ["completed", "blocked", "waiting_user", "needs_attention", "failed"].includes(goal.phase) : latest?.status === "done" || latest?.status === "unanswered";
-      if (finished) { await this.finishLearning(active); return active; }
+      if (finished) {
+        if (goal) await stopObsoleteDelegations(active.harness, undefined, ctx);
+        await this.finishLearning(active);
+        return active;
+      }
       if (Date.now() >= this.deadline(active, goal)) {
         await this.limit(active, "Task time budget exhausted");
         return active;
@@ -460,6 +468,7 @@ export class LocalRuntime {
         await this.supervise(active);
         return active;
       }
+      if (goal) await stopObsoleteDelegations(active.harness, goal, ctx);
       active.enabled = true;
       if (goal) await this.dispatchOutbox(active);
       const initial = await active.harness.commit(tx => tx.submissionByRequest(active!.root.id, "initial"), ctx);
@@ -644,6 +653,25 @@ export class LocalRuntime {
       latest?.status === "done" && goal.lastEvaluated !== String(latest.id);
     if (budgetReason && !canSettle) { await this.limit(active, budgetReason); return; }
     if (goal.outbox) { await this.dispatchOutbox(active); return; }
+    if (goal.phase === "working" && active.meta.schemaVersion === 3 && !active.meta.remotePolicy && active.meta.maxSubagents > 0) {
+      const batch = await pendingDelegation(active.harness, active.root.id, goal, ctx);
+      if (batch) {
+        if (tasks.some(({ record, state }) => state.kind === "blocked" &&
+          (record.id === batch.owner || batch.children.includes(record.conversationId)))) {
+          await active.harness.abortTask(batch.owner, ctx);
+        }
+        if (batch.ready && !busy) {
+          await active.root.submit({
+            type: "input",
+            whenBusy: "reject",
+            requestId: batch.requestId,
+            entry: { kind: "local.delegation.report", data: { batchId: batch.owner } },
+            content: "Background delegation finished. Read the results for conversation IDs " + batch.children.join(", ") + " with task_status. Use them as evidence for the current goal.",
+          }, ctx);
+        }
+        return;
+      }
+    }
     if (busy) return;
     if (goal.phase === "verifying" && goal.review) { await this.finishReview(active, goal); return; }
     if (!latest) return;
@@ -955,13 +983,14 @@ export class LocalRuntime {
         await atomicJson(this.metaFile(id), meta);
       }
       if (before.review) await (await active.harness.conversation(before.review.conversationId, ctx))?.abort(ctx, { background: true });
-      await this.updateGoal(active, (goal, record) => {
+      const updated = await this.updateGoal(active, (goal, record) => {
         goal.revision++; goal.phase = "working"; goal.candidate = null; goal.review = null; goal.mechanical = null; goal.verification = null;
         goal.reworks = 0; goal.stalls = 0; goal.lastFingerprint = null; goal.lastEvaluated = null; goal.reason = null; goal.question = null;
         goal.userMessages.push(message);
         record("user_input", message);
         goal.outbox = { requestId: key, content: message };
       });
+      await stopObsoleteDelegations(active.harness, updated, ctx);
       await this.configureStage(active);
       await this.dispatchOutbox(active);
       active.enabled = true;
@@ -1034,7 +1063,7 @@ export class LocalRuntime {
       await atomicJson(this.metaFile(id), meta);
       if (await this.goalState(active)) {
         const used = taskUsage(await active.harness.usage(ctx));
-        await this.updateGoal(active, (goal, record) => {
+        const updated = await this.updateGoal(active, (goal, record) => {
           const grant = this.resumeBudget(meta, goal);
           goal.tokenLimit = grant.maxTotalTokens === null ? null : used.totalTokens + grant.maxTotalTokens;
           if (grant.maxEstimatedCostUsd !== null) goal.costLimit = used.estimatedCostUsd + grant.maxEstimatedCostUsd;
@@ -1046,6 +1075,7 @@ export class LocalRuntime {
           }
           goal.reason = null; goal.question = null; record("resumed", `New deadline ${meta.deadlineAt}, cost limit ${goal.costLimit ?? "unset"}, token limit ${goal.tokenLimit ?? "unset"}`);
         });
+        await stopObsoleteDelegations(active.harness, updated, ctx);
       } else if (meta.entrypoint === "chat") {
         const used = taskUsage(await active.harness.usage(ctx));
         meta.chatBudget = { costLimit: used.estimatedCostUsd + (meta.maxEstimatedCostUsd ?? 1),

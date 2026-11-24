@@ -549,8 +549,23 @@ export class LocalRoutines {
       now: this.now,
       ...(this.options.setTimer ? { setTimer: this.options.setTimer } : {}),
     }, context);
-    const root = await harness.root(context);
-    return { harness, conversationId: root.id, timer };
+    try {
+      const root = await harness.root(context);
+      // Recovered rule changes can precede their old timer's abort mark on disk.
+      const current = await harness.commit(async tx => {
+        const { rules } = await tx.doc(routinesDoc);
+        return new Set(Object.values(rules).flatMap(rule => [rule.timerId, rule.manual?.timerId]));
+      }, context);
+      for (const { record } of (await harness.inspect(context)).tasks) {
+        if (record.kind === timer.definition.name && record.conversationId === root.id && !current.has(record.id)) {
+          await harness.abortTask(record.id, context);
+        }
+      }
+      return { harness, conversationId: root.id, timer };
+    } catch (error) {
+      await harness.close(context);
+      throw error;
+    }
   }
 
   async create(input: RoutineInput): Promise<Routine> {

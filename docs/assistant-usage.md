@@ -64,9 +64,14 @@ npm run harness -- mcp add mcp.json
 npm run harness -- mcp test local-tools
 npm run harness -- mcp enable local-tools 测试返回的revision 工具名
 npm run harness -- mcp disable local-tools
+npm run harness -- mcp project --workspace E:/project
+npm run harness -- mcp project-set tools.json --workspace E:/project
+npm run harness -- mcp project-clear --workspace E:/project
 ```
 
 发现工具不授予执行权限。用户启用后，新任务固定该版本和所选工具；连接或工具定义变化使旧测试失效。禁用会停止当前连接调用。凭据映射填写环境变量名称，服务状态不返回认证值。
+
+项目可以从全局已启用的工具中选择一个子集。`tools.json` 格式为 `[{"id":"local-tools","tool":"工具名"}]`，空数组关闭该项目新任务的所有 MCP 工具。`project-clear` 恢复继承全局设置。
 
 ## 提醒与例行任务
 
@@ -131,7 +136,7 @@ npm run harness -- remote revoke owner phone
 
 任务卡提供 **Pause**、**Continue** 和 **Cancel task**。手机可在原时限和额度内继续由该手机暂停的任务。发送记录、任务身份和草稿在暂停和接回时保留。
 
-发送前，同一标签页会暂存原消息、已上传的附件引用和消息 ID。刷新后先查原回执。查不到回执时，可点击 **Retry send** 用原 ID 重发。已送达的消息会自动恢复，附件过期时可重新添加，原正文回到输入框。
+支持 Web Locks 的浏览器会按配对和会话保存草稿。关闭页面后，用原配对令牌连接可恢复原文。待发记录保存原消息 ID 和已上传的附件引用，刷新后先查原回执。查不到回执时，可点击 **Retry send** 用原 ID 重发。未上传的本地文件需重新选择。附件过期时，原正文会回到输入框。
 
 手机首版提供工作区内的读取、写入、编辑、二进制复制和受相同限制的子会话。确认前只有只读工具。Shell、命令核验、现有 MCP、电脑工具、宿主 Skills 和本机全局记忆不会自动交给远程设备。这是工具权限边界；要开放完整宿主执行能力，需要另行选择现成隔离执行环境。未保存该权限策略的历史实验会话会被拒绝，需新建会话。
 
@@ -159,6 +164,8 @@ npm run test:computer:browser -- --live --command C:/path/to/agent-browser-win32
 测试自建合成本地页面和临时配置，不改日常 daemon。第一条用脚本化模型驱动真实浏览器；第二条使用硅基流动，默认 DeepSeek-V3.2，凭据沿用前文的环境变量或终端无回显输入。验证会调用原接管 API、通过独立操作端修改页面、强制中断并重连驱动，然后让同一 Pi 任务重新观察并交付 JSON。这里的操作端由测试自动模拟，并非人工操作记录。
 
 任务状态与 `/v1/tasks/:id/view` 的 `delegations` 显示 Pi 子会话职责、状态、结果目录与用量。接回任务后，主 Agent 可通过 `task_status` 查询已有子任务和原结果。常规响应显示完整用户要求、待办和简要失败信息，完整确认说明与证据可按需读取。任务总用量已包含子会话。
+
+已授权的本地任务可通过 `delegate_background` 启动一批子任务，收到回执后继续独立工作。子任务使用 Pi 原生本地文件和终端工具。结果就绪后，主会话会收到一次提示，读取结果后再交付。
 
 ## 验证
 

@@ -1,17 +1,21 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Harness } from "@earendil-works/pi-durable";
 import { LocalRoutines } from "../../src/routines.js";
 
 const [, , dataDir, start, due, phase] = process.argv;
 let now = Number(start);
 const at = Number(due);
+const control = phase === "pause" || phase === "cancel" || phase === "update";
+const sleeping = Promise.withResolvers<void>();
 const routines = new LocalRoutines({
   dataDir,
   now: () => now,
   setTimer(callback, delay) {
     if (now + delay !== at) return () => {};
-    if (phase === "sleeping") {
-      process.stdout.write("sleeping\n");
+    if (phase === "sleeping" || control) {
+      if (control) sleeping.resolve();
+      else process.stdout.write("sleeping\n");
       return () => {};
     }
     const timer = setImmediate(() => {
@@ -33,7 +37,20 @@ await routines.create({
   id: "restart",
   action: phase === "claimed" ? "task" : "notify",
   objective: "Reminder after restart",
-  schedule: { kind: "once", at: new Date(at).toISOString() },
+  schedule: control ? { kind: "daily", time: "00:01", timeZone: "UTC" } : { kind: "once", at: new Date(at).toISOString() },
   missedPolicy: phase === "claimed" ? "skip" : "run_once",
 });
+if (control) {
+  await sleeping.promise;
+  const { harness } = await (routines as unknown as { open(): Promise<{ harness: Harness }> }).open();
+  harness.abortTask = async () => {
+    process.stdout.write(`${phase}\n`);
+    return new Promise(() => {});
+  };
+  if (phase === "pause") await routines.pause("restart");
+  else if (phase === "cancel") await routines.cancel("restart");
+  else await routines.update("restart", {
+    action: "notify", objective: "Edited reminder", schedule: { kind: "once", at: new Date(at + 60_000).toISOString() },
+  });
+}
 process.stdout.write("opened\n");

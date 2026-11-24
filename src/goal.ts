@@ -8,7 +8,7 @@ import type { Confirmation, TaskBrief } from "./preparation.js";
 import type { CheckReceipt, CriterionResult } from "./verification.js";
 import type { LearningState } from "./learning.js";
 import type { SkillState } from "./skills.js";
-import { savedDelegation } from "./delegation.js";
+import { outstandingDelegation, savedDelegation } from "./delegation.js";
 
 export type GoalPhase = "working" | "clarifying" | "awaiting_confirmation" | "submitted" | "verifying" | "completed" | "waiting_user" | "blocked" | "needs_attention" | "failed";
 export type ReviewVerdict = { verdict: "pass" | "rework" | "blocked"; reason: string; evidence: string[] };
@@ -101,11 +101,14 @@ export async function readGoal(harness: Harness): Promise<GoalState> {
 }
 
 export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: boolean; remote?: boolean } = {}) {
-  const mutate = async (api: ToolExecutionApi, context: typeof ctx, action: GoalChange<void>) => api.commit(tx => changeGoal(tx, (goal, record) => {
+  const mutate = async (api: ToolExecutionApi, context: typeof ctx, action: GoalChange<void>, submitting = false) => api.commit(tx => changeGoal(tx, async (goal, record) => {
     const key = String(api.taskId);
     if (!goal.appliedTools[key]) {
       if (goal.phase !== "working") throw new Error(`Goal is ${goal.phase}; wait for supervision or user input`);
-      action(goal, record);
+      if (submitting && await outstandingDelegation(tx, api.conversationId, goal)) {
+        throw new Error("Background delegation has not returned. End this turn when your independent work is done.");
+      }
+      await action(goal, record);
       goal.appliedTools[key] = true;
     }
     return { ok: true, revision: goal.revision, phase: goal.phase, candidateId: goal.candidate?.id ?? null };
@@ -179,7 +182,7 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
         if (options.captureSkill && "skill" in args && typeof args.skill === "string") goal.candidate.skill = args.skill;
         goal.phase = "submitted"; goal.review = null; goal.mechanical = null; goal.verification = null;
         record("submitted", args.summary);
-      })), control: { terminate: true } }),
+      }, true)), control: { terminate: true } }),
     }),
     defineTool({
       name: "task_blocked", description: "Stop autonomous work when an external dependency is unavailable. If user input is required, provide a precise question. State what is already done and why continuation is impossible.",

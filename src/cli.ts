@@ -95,8 +95,14 @@ try {
     } else if (command === 'mcp') {
       if (action === 'list') result = await request('/v1/settings/mcp');
       else if (action === 'add') result = await request('/v1/settings/mcp','POST',await json(rest[0]));
-      else if (['test','enable','disable'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',action === 'enable' ? {revision:rest[1],tools:rest.slice(2)} : {});
-      else throw new Error('Use mcp list, add, test, enable or disable.');
+      else if (['project', 'project-set', 'project-clear'].includes(action)) {
+        if (!args.values.workspace) throw new Error('Provide --workspace for project MCP settings.');
+        const projectPath = '/v1/settings/mcp/project';
+        result = action === 'project'
+          ? await request(projectPath + '?workspace=' + encodeURIComponent(workspace))
+          : await request(projectPath, 'PUT', { workspace, tools: action === 'project-clear' ? null : await json(rest[0]) });
+      } else if (['test','enable','disable'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',action === 'enable' ? {revision:rest[1],tools:rest.slice(2)} : {});
+      else throw new Error('Use mcp list, add, test, enable, disable, project, project-set or project-clear.');
     } else if (command === 'routines') {
       if (action === 'list') result = await request('/v1/routines');
       else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences'+(args.values['task-status'] ? '?includeTaskStatus=true' : ''));

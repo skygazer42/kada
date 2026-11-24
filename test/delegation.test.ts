@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import test from "node:test";
-import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
+import { awaitWithContext, BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, UserEntry, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -11,6 +12,141 @@ import { localEnvironment, localExecution } from "../src/execution.js";
 import { goalExtension } from "../src/goal.js";
 import { LocalRuntime } from "../src/runtime.js";
 import { hasTool, scriptedFixture, until } from "./helpers.js";
+
+test("background delegation lets the parent work, waits for the report and resumes once after reopening", async () => {
+  const release = Promise.withResolvers<void>();
+  let reports = 0;
+  const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  const fixture = await scriptedFixture(async (conversation, signal) => {
+    const results = conversation.messages.filter(message => message.role === "toolResult");
+    if (!hasTool(conversation, "delegate")) {
+      assert.equal(hasTool(conversation, "delegate_background"), false);
+      if (!results.some(result => result.toolName === "write")) return call("write", { path: "child.txt", content: "Child work" });
+      await awaitWithContext(release.promise, signal ? withAbortSignal(signal, ctx) : ctx);
+      return fauxAssistantMessage("Reviewed the child evidence.");
+    }
+    const handedBack = conversation.messages.some(message => message.role === "user" && String(message.content).startsWith("Background delegation finished."));
+    if (handedBack) {
+      if (!results.some(result => result.toolName === "task_status")) {
+        reports++;
+        return call("task_status", { delegation: "list" });
+      }
+      return call("task_submit", { summary: "Used both pieces of evidence", artifacts: [] });
+    }
+    if (!results.some(result => result.toolName === "delegate_background")) return call("delegate_background", {
+      tasks: [{ name: "worker", instructions: "Write child.txt and inspect it." }],
+    });
+    if (!results.some(result => result.toolName === "write")) return call("write", { path: "parent.txt", content: "Independent parent work" });
+    if (!results.some(result => result.toolName === "task_submit")) return call("task_submit", { summary: "Too early", artifacts: [] });
+    return fauxAssistantMessage("Waiting briefly for the worker.");
+  });
+  let reopened: LocalRuntime | undefined;
+  try {
+    const task = await fixture.runtime.create("Combine independent parent and child evidence", fixture.workspace);
+    const before = await until(() => fixture.runtime.status(task.id), status =>
+      status.submission?.status === "done" && status.delegations.some(child => child.status === "running"));
+    assert.equal(await readFile(join(fixture.workspace, "parent.txt"), "utf8"), "Independent parent work");
+    assert.equal(before.goal?.candidate, null);
+    assert.equal(before.goal?.reworks, 0);
+    assert.equal(before.delegations[0]?.status, "running");
+    const child = before.delegations[0]!;
+    await until(() => readFile(join(child.directory, "child.txt"), "utf8").catch(() => ""), value => value === "Child work");
+    await fixture.runtime.close();
+    release.resolve();
+
+    reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+    await reopened.recover();
+    const after = await until(() => reopened!.status(task.id), status => status.status === "completed");
+    assert.equal(after.goal?.candidate?.summary, "Used both pieces of evidence");
+    assert.equal(after.goal?.reworks, 0);
+    assert.equal(after.goal?.events.filter(event => event.type === "completed").length, 1);
+    assert.deepEqual(after.delegations.map(item => [item.conversationId, item.status, item.answer]), [[child.conversationId, "completed", "Reviewed the child evidence."]]);
+    assert.equal(reports, 1);
+    assert.equal(after.messages.filter(message => message.role === "user" && String(message.content).startsWith("Background delegation finished.")).length, 1);
+  } finally {
+    release.resolve();
+    await reopened?.close();
+    await fixture.close();
+  }
+});
+
+test("cancelling a goal stops a background child and keeps its receipt without waking the parent", async () => {
+  const childStarted = Promise.withResolvers<void>();
+  const childStopped = Promise.withResolvers<void>();
+  const fixture = await scriptedFixture(async (conversation, signal) => {
+    if (hasTool(conversation, "delegate")) {
+      const receipt = conversation.messages.some(message => message.role === "toolResult" && message.toolName === "delegate_background");
+      if (receipt) return fauxAssistantMessage("Waiting for the child.");
+      return fauxAssistantMessage(fauxToolCall("delegate_background", {
+        tasks: [{ name: "worker", instructions: "Inspect local evidence." }],
+      }), { stopReason: "toolUse" });
+    }
+    childStarted.resolve();
+    try {
+      await setTimeout(60_000, undefined, { signal });
+    } finally {
+      childStopped.resolve();
+    }
+    return fauxAssistantMessage("Child result.");
+  });
+  let reopened: LocalRuntime | undefined;
+  try {
+    const task = await fixture.runtime.create("Run a cancellable background investigation", fixture.workspace);
+    const before = await until(() => fixture.runtime.status(task.id), status => status.delegations.some(child => child.status === "running"));
+    await childStarted.promise;
+    await fixture.runtime.cancel(task.id);
+    await childStopped.promise;
+    await fixture.runtime.close();
+    reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+    await reopened.recover();
+    const after = await reopened.status(task.id);
+    assert.equal(after.status, "cancelled");
+    assert.equal(after.activeWorkerCount, 0);
+    assert.deepEqual(after.delegations.map(({ conversationId, status, mode }) => [conversationId, status, mode]),
+      [[before.delegations[0]!.conversationId, "cancelled", "background"]]);
+    assert.ok(!after.messages.some(message => message.role === "user" && String(message.content).startsWith("Background delegation finished.")));
+  } finally {
+    await reopened?.close();
+    await fixture.close();
+  }
+});
+
+test("a user follow-up supersedes an outstanding batch before the new revision delivers", async () => {
+  const stopped = Promise.withResolvers<void>();
+  const fixture = await scriptedFixture(async (conversation, signal) => {
+    if (!hasTool(conversation, "delegate")) {
+      try {
+        await setTimeout(60_000, undefined, { signal });
+      } finally {
+        stopped.resolve();
+      }
+      return fauxAssistantMessage("Old evidence.");
+    }
+    if (conversation.messages.some(message => message.role === "user" && message.content === "Use the local evidence only.")) {
+      return fauxAssistantMessage(fauxToolCall("task_submit", { summary: "Used the local evidence", artifacts: [] }), { stopReason: "toolUse" });
+    }
+    if (conversation.messages.some(message => message.role === "toolResult" && message.toolName === "delegate_background")) {
+      return fauxAssistantMessage("Waiting on the old requirements.");
+    }
+    return fauxAssistantMessage(fauxToolCall("delegate_background", {
+      tasks: [{ name: "worker", instructions: "Read the old local material." }],
+    }), { stopReason: "toolUse" });
+  });
+  try {
+    const task = await fixture.runtime.create("Review old material and local evidence", fixture.workspace);
+    await until(() => fixture.runtime.status(task.id), status =>
+      status.submission?.status === "done" && status.delegations[0]?.status === "running");
+    await fixture.runtime.followUp(task.id, "Use the local evidence only.");
+    const result = await until(() => fixture.runtime.status(task.id), status => status.status === "completed");
+    await stopped.promise;
+    assert.equal(result.goal?.revision, 2);
+    assert.equal(result.goal?.candidate?.summary, "Used the local evidence");
+    assert.equal(result.delegations[0]?.status, "cancelled");
+    assert.ok(!result.messages.some(message => message.role === "user" && String(message.content).startsWith("Background delegation finished.")));
+  } finally {
+    await fixture.close();
+  }
+});
 
 test("A01 cancelling a parent task stops both owned Pi child conversations", async () => {
   const running = new Set<string>();

@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { McpTools, type McpDefinition } from '../src/mcp-tools.js';
+import { serve } from '../src/server.js';
+import { createClient } from '../src/client.js';
+import { fauxAssistantMessage, fauxToolCall, getCurrentTools } from '@earendil-works/pi-ai';
+import { scriptedFixture, until } from './helpers.js';
 
 const fakeServer = `
   const input = require('node:readline').createInterface({ input: process.stdin });
@@ -83,6 +89,90 @@ test('C06 MCP testing and tool pins require the current configuration revision',
     await manager.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('project MCP defaults narrow the global allowlist for new tasks and survive restart', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'kada-mcp-project-'));
+  const first = new McpTools(dataDir);
+  const second = new McpTools(dataDir);
+  t.after(async () => {
+    await Promise.all([first.close(), second.close()]);
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const project = join(dataDir, 'project');
+  const child = join(project, 'subdirectory');
+  const other = join(dataDir, 'other');
+  await Promise.all([mkdir(child, { recursive: true }), mkdir(other)]);
+  await writeFile(join(project, '.kada-project'), '');
+  await first.configure(definition);
+  const { revision } = await first.test(definition.id);
+  await first.enable(definition.id, ['echo', 'pause'], revision);
+
+  const echo = { id: definition.id, tool: 'echo' };
+  const pause = { id: definition.id, tool: 'pause' };
+  await assert.rejects(first.setProjectTools(project, [{ id: definition.id, tool: 'unknown' }]), /enabled/i);
+  await first.setProjectTools(child, [echo]);
+  await first.setProjectTools(other, []);
+  const pinned = await second.pins(project);
+  assert.deepEqual(pinned.flatMap(pin => pin.tools), ['echo']);
+  assert.deepEqual(pinned.flatMap(pin => pin.discovery?.map(tool => tool.name)), ['echo']);
+  assert.deepEqual(await second.pins(other), []);
+  assert.deepEqual((await second.pins()).flatMap(pin => pin.tools), ['echo', 'pause']);
+  assert.deepEqual(await second.projectTools(child), [echo]);
+
+  await first.setProjectTools(project, [pause]);
+  assert.deepEqual((await second.pins(child)).flatMap(pin => pin.tools), ['pause']);
+  assert.equal((await second.tools(pinned)).length, 1);
+  await first.disable(definition.id);
+  assert.deepEqual(await second.pins(child), []);
+  assert.deepEqual(await second.projectTools(child), [pause]);
+  await first.setProjectTools(project, null);
+  assert.equal(await second.projectTools(child), null);
+});
+
+test('authenticated project MCP settings pin the tools Pi actually sees after reopening a task', async () => {
+  const f = await scriptedFixture(({ messages }) => {
+    const summary = getCurrentTools(messages).filter(tool => tool.name.startsWith('mcp_fixture_'))
+      .map(tool => tool.name.split('_')[2]).sort().join(',') || 'no MCP tools';
+    return fauxAssistantMessage(fauxToolCall('task_submit', { summary, artifacts: [] }), { stopReason: 'toolUse' });
+  });
+  const workspace = f.workspace;
+  const portProbe = createServer().listen(0, '127.0.0.1');
+  await once(portProbe, 'listening');
+  const settings = { ...f.settings, port: (portProbe.address() as { port: number }).port };
+  portProbe.close();
+  await once(portProbe, 'close');
+  const path = '/v1/settings/mcp/project';
+  let server = await serve(settings, { models: f.models });
+  const client = createClient(settings);
+  const create = (project?: string) => client.request<{ id: string }>('/v1/tasks', 'POST', {
+    objective: 'List the available integrations', confirmed: true, workspace: project,
+  });
+  const answer = (id: string) => until(
+    () => server.runtime.status(id), status => status.status === 'completed',
+  );
+  try {
+    const manager = server.runtime.mcp;
+    await manager.configure(definition);
+    const { revision } = await manager.test(definition.id);
+    await manager.enable(definition.id, ['echo', 'pause'], revision);
+    assert.deepEqual(await client.request(path, 'PUT', { workspace, tools: [{ id: 'fixture', tool: 'echo' }] }), {
+      tools: [{ id: 'fixture', tool: 'echo' }],
+    });
+    assert.deepEqual(await client.request(path + '?workspace=' + encodeURIComponent(workspace)), {
+      tools: [{ id: 'fixture', tool: 'echo' }],
+    });
+    const original = await create(workspace);
+    assert.equal((await answer(original.id)).goal?.candidate?.summary, 'echo');
+    await client.request(path, 'PUT', { workspace, tools: [] });
+    await server.close();
+    server = await serve(settings, { models: f.models });
+    const scoped = await create(workspace);
+    assert.equal((await answer(scoped.id)).goal?.candidate?.summary, 'no MCP tools');
+    const global = await create();
+    assert.equal((await answer(global.id)).goal?.candidate?.summary, 'echo,pause');
+    assert.deepEqual((await server.runtime.metadata(original.id)).mcpPins?.flatMap(pin => pin.tools), ['echo']);
+  } finally { await server.close(); await f.close(); }
 });
 
 test('MCP discovery drops a server response that reflects a configured credential', async () => {

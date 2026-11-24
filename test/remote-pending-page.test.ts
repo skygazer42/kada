@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { remoteScript } from "../src/remote-page.js";
@@ -19,7 +19,7 @@ class Element {
   focus() {}
 
   addEventListener(type: string, handler: Handler) { this.handlers.set(type, handler); }
-  querySelector() { return this.children.find((child) => child.dataset.draft); }
+  querySelector() { return this.children.find((child) => child.dataset.emptyConversation); }
   append(child: Element) {
     this.children.push(child);
     child.remove = () => { this.children = this.children.filter((item) => item !== child); };
@@ -28,8 +28,11 @@ class Element {
   async trigger(type: string) { await this.handlers.get(type)!({ preventDefault() {} }); }
 }
 
-function storage(values: Map<string, string>) {
-  return { getItem: values.get.bind(values), setItem: values.set.bind(values), removeItem: values.delete.bind(values) };
+function storage(values: Map<string, string>, beforeSet?: (key: string) => void) {
+  return { getItem: values.get.bind(values), setItem(key: string, value: string) {
+    beforeSet?.(key);
+    values.set(key, value);
+  }, removeItem: values.delete.bind(values) };
 }
 
 type Message = { messageId: string; text: string; attachmentIds: string[] };
@@ -37,16 +40,18 @@ const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
   const requests: string[] = [];
+  const locks = new Map<string, Promise<unknown>>();
   let uploads = 0;
   let receipt: "unknown" | "submitted" = "unknown";
   let failure: "request" | "response" | "expired" | undefined = "request";
   let authorizationExpired = false;
   let listUnavailable = false;
+  let failComposerWrite = false;
   return {
     local, session, messages, requests,
     uploads: () => uploads,
@@ -54,6 +59,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     confirm: () => { receipt = "submitted"; },
     expireAuthorization: () => { authorizationExpired = true; },
     failList: () => { listUnavailable = true; },
+    failDraftWrite: () => { failComposerWrite = true; },
     async open() {
       const nodes = new Map<string, Element>();
       let poll: () => Promise<void>;
@@ -64,15 +70,26 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
       runInNewContext(remoteScript, {
         document: { getElementById: field, createElement: () => new Element(), addEventListener() {} },
         window: { addEventListener() {} },
-        localStorage: storage(local), sessionStorage: storage(session), crypto: webcrypto,
+        localStorage: storage(local, (key) => {
+          if (!failComposerWrite || !key.startsWith("kada:composer:")) return;
+          failComposerWrite = false;
+          throw new DOMException("Storage quota reached", "QuotaExceededError");
+        }), sessionStorage: storage(session), crypto: webcrypto,
+        navigator: { locks: { request(name: string, fn: () => unknown) {
+          const result = (locks.get(name) ?? Promise.resolve()).then(fn);
+          locks.set(name, result.catch(() => {}));
+          return result;
+        } } },
         confirm: () => true,
         setInterval(callback: () => Promise<void>) { poll = callback; },
         async fetch(url: string, init: RequestInit) {
           requests.push(url);
           if (url === "/remote/api/session") {
             const deviceToken = (init.headers as Record<string, string>).Authorization.slice("Bearer ".length);
+            await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
-            return Response.json({ channel: "web", accountId, deviceId });
+            const pairingId = createHash("sha256").update("fixture:" + deviceToken).digest("hex");
+            return Response.json({ channel: "web", accountId, deviceId, pairingId });
           }
           if (url === "/remote/api/conversations") {
             return listUnavailable ? Response.json({ error: "List unavailable." }, { status: 503 }) : Response.json([]);
@@ -104,8 +121,12 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
         poll: () => poll(),
         receiptText: () => field("uncertain").children.map((child) => child.textContent),
         action: (label: string) => field("uncertain").children.find((child) => child.textContent === label),
+        async type(text: string) {
+          field("prompt").value = text;
+          await field("prompt").trigger("input");
+        },
         async send() {
-          field("prompt").value = draft;
+          await this.type(draft);
           field("files").files = [new File(["fixture"], "data.txt", { type: "text/plain" })];
           await field("composer").trigger("submit");
         },
@@ -234,7 +255,6 @@ test("reload restores the pending text and retries the original message only on 
   const original = await device.open();
   await original.send();
   assert.equal(original.action("Retry send"), undefined);
-  assert.ok([...device.local.values()].every((value) => !value.includes("Keep this exact draft")));
   const reload = await device.open();
   assert.ok(reload.receiptText().includes(draft), "the restored receipt shows the original text");
   assert.equal(device.messages.length, 1);
@@ -281,20 +301,110 @@ test("an expired attachment allows the user to reattach files with their text in
   assert.equal(reload.field("send").disabled, false);
 });
 
-test("pending content stays with the paired account and device in the original tab", async () => {
+test("pending content survives a new tab after authentication and stays within its pairing", async () => {
   const device = harness();
   await (await device.open()).send();
-  for (const token of ["other", "phone/other-account"]) {
+  for (const token of ["other", "phone/other-account", "phone/account/new-credential"]) {
     device.session.set("kada-device-token", token);
     const other = await device.open();
     assert.equal(other.field("uncertain").hidden, true);
     assert.equal(other.field("send").disabled, false);
     assert.ok(!other.receiptText().includes(draft));
   }
+  assert.ok([...device.local].every(([key, value]) => !key.includes("new-credential") && !value.includes("new-credential")));
   device.session.clear();
-  device.session.set("kada-device-token", "phone");
   assert.equal((await device.open()).field("uncertain").hidden, true);
+  device.session.set("kada-device-token", "phone");
+  assert.ok((await device.open()).receiptText().includes(draft));
   assert.equal(device.messages.length, 1);
+});
+
+test("ordinary drafts retain their exact text by conversation across switching and reopening", async () => {
+  const device = harness();
+  const page = await device.open();
+  const exact = "  北京\n第二行  ";
+  await page.type(exact);
+  page.field("files").value = "private-file.txt";
+  page.field("conversation").value = "other";
+  await page.field("conversation").trigger("change");
+  assert.equal(page.field("prompt").value, "");
+  assert.equal(page.field("files").value, "");
+  await page.type("Other draft");
+  const reopened = await device.open();
+  assert.equal(reopened.field("prompt").value, "Other draft");
+  reopened.field("conversation").value = conversationId;
+  await reopened.field("conversation").trigger("change");
+  assert.equal(reopened.field("prompt").value, exact);
+  assert.equal(reopened.field("files").value, "");
+  await reopened.type("");
+  assert.equal((await device.open()).field("prompt").value, "");
+  assert.equal(device.messages.length, 0);
+});
+
+test("two tabs send one draft once even if the first response disappears", async () => {
+  const device = harness();
+  device.failNext("response");
+  const first = await device.open();
+  await first.type(draft);
+  const second = await device.open();
+  assert.equal(second.field("prompt").value, draft);
+  await Promise.all([first, second].map((page) => page.field("composer").trigger("submit")));
+  assert.equal(device.messages.length, 1);
+  assert.equal(device.messages[0]!.text, draft);
+  const reopened = await device.open();
+  assert.equal(reopened.field("prompt").value, "");
+  assert.equal(reopened.field("uncertain").hidden, true);
+  assert.ok(device.requests.includes(receiptUrl + device.messages[0]!.messageId));
+});
+
+test("a stale tab cannot overwrite or clear a newer draft", async () => {
+  const device = harness();
+  const first = await device.open();
+  await first.type("Original");
+  const stale = await device.open();
+  await first.type("Saved in the first tab");
+  await stale.type("Keep these local edits");
+  assert.match(stale.field("status").textContent, /changed in another tab/);
+  assert.equal(stale.field("prompt").value, "Keep these local edits");
+  await stale.type("");
+  assert.equal((await device.open()).field("prompt").value, "Saved in the first tab");
+});
+
+test("rapid input writes, including a clear, save the latest text", async () => {
+  const device = harness();
+  const page = await device.open();
+  const writes = ["北", "北京", "", "  北京\n到达  "].map((text) => page.type(text));
+  await Promise.all(writes);
+  assert.equal((await device.open()).field("prompt").value, "  北京\n到达  ");
+  assert.equal(page.field("status").textContent, "");
+});
+
+test("a temporary draft write failure keeps input and saves the next edit", async () => {
+  const device = harness();
+  const page = await device.open();
+  device.failDraftWrite();
+  await page.type("Keep this text");
+  assert.equal(page.field("prompt").value, "Keep this text");
+  assert.match(page.field("status").textContent, /storage is full or unavailable/);
+  await page.type("Keep this text and finish it");
+  assert.equal((await device.open()).field("prompt").value, "Keep this text and finish it");
+  assert.equal(page.field("status").textContent, "");
+});
+
+test("a stale retry cannot submit the discarded message after a newer message is pending", async () => {
+  const device = harness();
+  await (await device.open()).send();
+  const stale = await device.open();
+  const retry = stale.action("Retry send")!;
+  const other = await device.open();
+  await other.action("Discard pending message")!.trigger("click");
+  await other.type("New pending message");
+  device.failNext("request");
+  await other.field("composer").trigger("submit");
+  assert.equal(device.messages.length, 2);
+  await retry.trigger("click");
+  assert.equal(device.messages.length, 2);
+  assert.ok(stale.receiptText().includes("New pending message"));
 });
 
 test("pairing another device clears the previous device view before loading conversations", async () => {
@@ -321,6 +431,31 @@ test("pairing another device clears the previous device view before loading conv
   for (const id of ["conversation", "messages", "task-events"]) assert.deepEqual(page.field(id).children, [], id);
 });
 
+test("a late pairing response cannot restore drafts under the wrong bearer", async () => {
+  const slowSession = Promise.withResolvers<void>();
+  const requested = Promise.withResolvers<void>();
+  const device = harness(undefined, async (token) => {
+    if (token !== "slow") return;
+    requested.resolve();
+    await slowSession.promise;
+  });
+  const original = await device.open();
+  await original.type("Original device draft");
+  device.session.clear();
+  const page = await device.open();
+  page.field("token").value = "slow";
+  const first = page.field("pair-form").trigger("submit");
+  await requested.promise;
+  page.field("token").value = "phone";
+  await page.field("pair-form").trigger("submit");
+  assert.equal(page.field("prompt").value, "Original device draft");
+  slowSession.resolve();
+  await first;
+  assert.equal(page.field("connection").textContent, "phone");
+  assert.equal(page.field("prompt").value, "Original device draft");
+  assert.equal(device.session.get("kada-device-token"), "phone");
+});
+
 test("legacy pending IDs can be checked and dismissed without a retry payload", async () => {
   const device = harness();
   device.local.set("kada:pending:account:phone", JSON.stringify([[conversationId, "legacy-id"]]));
@@ -330,4 +465,18 @@ test("legacy pending IDs can be checked and dismissed without a retry payload", 
   await reload.action("Dismiss")!.trigger("click");
   assert.equal((await device.open()).field("send").disabled, false);
   assert.deepEqual(device.messages, []);
+});
+
+test("an existing tab migrates its old pending payload and a re-pair cannot adopt it again", async () => {
+  const device = harness();
+  const key = "kada:pending:account:phone";
+  device.session.set(key, JSON.stringify([[conversationId, { messageId: "old-message", text: draft, attachmentIds: [] }]]));
+  assert.ok((await device.open()).receiptText().includes(draft));
+  assert.equal(device.session.has(key), false);
+  device.session.set(key, JSON.stringify([[conversationId, { messageId: "old-message", text: draft, attachmentIds: [] }]]));
+  const freshTab = await device.open();
+  freshTab.field("token").value = "phone/account/new-credential";
+  await freshTab.field("pair-form").trigger("submit");
+  assert.equal((await device.open()).field("uncertain").hidden, true);
+  assert.equal(device.messages.length, 0);
 });

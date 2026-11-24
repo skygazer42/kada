@@ -262,7 +262,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     finally { if (--entry.references === 0) queues.delete(path); }
   }
 
-  async function authenticate(request: IncomingMessage): Promise<Scope> {
+  async function authenticate(request: IncomingMessage): Promise<Scope & { pairingId: string }> {
     const token = request.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
     if (!token || !tokenPattern.test(token)) throw new HttpError(401, "Enter this device’s pairing token.");
     const supplied = Buffer.from(digest(token), "hex");
@@ -272,7 +272,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     if (!device || !idPattern.test(device.accountId) || !idPattern.test(device.deviceId)) {
       throw new HttpError(401, "Enter this device’s pairing token.");
     }
-    return { channel: "web", accountId: device.accountId, deviceId: device.deviceId };
+    return { channel: "web", accountId: device.accountId, deviceId: device.deviceId,
+      pairingId: digest("kada:browser-pairing:" + device.tokenHash) };
   }
 
   function freshConversation(scope: Scope, conversationId: string): Conversation {
@@ -577,8 +578,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         response.end(script ? remoteScript : remotePage);
         return true;
       }
-      const scope = await authenticate(request);
-      if (method === "GET" && route === "/remote/api/session") send(response, 200, scope);
+      const { pairingId, ...scope } = await authenticate(request);
+      if (method === "GET" && route === "/remote/api/session") send(response, 200, { ...scope, pairingId });
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
         const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);

@@ -116,7 +116,14 @@ test("D02 the portal rejects unpaired devices, foreign origins, and conversation
   assert.equal((await fetch(path, { headers: { Authorization: "Bearer unpaired" } })).status, 401);
   const authorization = { Authorization: `Bearer ${owner.token}` };
   assert.equal((await fetch(path, { headers: { ...authorization, Origin: "https://elsewhere.example" } })).status, 403);
-  assert.deepEqual(await (await fetch(path, { headers: authorization })).json(), {
+  const { pairingId, ...session } = await (await fetch(path, { headers: authorization })).json();
+  assert.match(pairingId, /^[a-f0-9]{64}$/);
+  assert.notEqual(pairingId, owner.device.tokenHash);
+  assert.equal((await (await fetch(path, { headers: authorization })).json()).pairingId, pairingId);
+  const replacement = pairing("owner", "phone");
+  const replaced = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [replacement.device]);
+  assert.notEqual((await (await replaced.call(replacement.token, "/session")).json()).pairingId, pairingId);
+  assert.deepEqual(session, {
     channel: "web",
     accountId: "owner",
     deviceId: "phone",

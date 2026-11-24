@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { LocalRoutines, nextRoutineTime, type RoutineInput, type RoutineOccurrence } from "../src/routines.js";
 import {LocalRuntime} from '../src/runtime.js';
 import {createModels} from '@earendil-works/pi-ai';
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Harness } from "@earendil-works/pi-durable";
 import {mkdir} from 'node:fs/promises';
 import {fakeRoutineClock} from './helpers.js';
 
@@ -102,7 +104,7 @@ test("R01 the runtime routes the injected clock's due reminder to the inbox", as
   } finally { await runtime.close(); }
 });
 
-async function killFixture(dataDir: string, phase: "sleeping" | "claimed"): Promise<void> {
+async function killFixture(dataDir: string, phase: "sleeping" | "claimed" | "pause" | "cancel" | "update"): Promise<void> {
   const fixture = fileURLToPath(new URL("./fixtures/sleeping-routine.ts", import.meta.url));
   const child = spawn(process.execPath, ["--import", "tsx", fixture, dataDir, String(start), String(first), phase], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -128,6 +130,34 @@ async function killFixture(dataDir: string, phase: "sleeping" | "claimed"): Prom
     child.kill("SIGKILL");
     await exited;
   }
+}
+
+for (const [action, status] of [["pause", "paused"], ["cancel", "cancelled"], ["update", "scheduled"]] as const) {
+  test(`R02 restart discards the obsolete native timer after a committed routine ${action}`, { timeout: 25_000 }, async t => {
+    const dataDir = await tempDir(t);
+    await killFixture(dataDir, action);
+    const clock = fakeClock();
+    const calls: RoutineOccurrence[] = [];
+    const routines = new LocalRoutines({
+      dataDir, ...clock,
+      execute: async occurrence => { calls.push(occurrence); return { status: "notified" }; },
+    });
+    try {
+      await routines.recover();
+      assert.equal((await routines.list())[0]?.status, status);
+      if (action === "update") await until(() => clock.waitingAt(first + minute));
+      const { harness } = await (routines as unknown as { open(): Promise<{ harness: Harness }> }).open();
+      await until(async () => (await harness.inspect(BACKGROUND_CONTEXT)).tasks.length === (action === "update" ? 1 : 0));
+      assert.equal(clock.waitingAt(first), false);
+      clock.advanceTo(first);
+      assert.deepEqual(calls, []);
+      if (action === "update") {
+        clock.advanceTo(first + minute);
+        await until(() => calls.length === 1);
+        assert.equal(calls[0]?.revision, 2);
+      }
+    } finally { await routines.close(); }
+  });
 }
 
 test("R02 reopens a sleeping Pi task after killing the original process", { timeout: 20_000 }, async (t) => {

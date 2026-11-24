@@ -113,6 +113,18 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'GET') return send(200,await runtime.mcp.list());
         if (req.method === 'POST') return send(201,await runtime.mcp.configure(await body(req) as McpDefinition));
       }
+      if (url.pathname === '/v1/settings/mcp/project') {
+        if (req.method === 'GET') {
+          const workspace = url.searchParams.get('workspace');
+          if (!workspace) throw new Error('Provide the current workspace.');
+          return send(200, { tools: await runtime.mcp.projectTools(workspace) });
+        }
+        if (req.method === 'PUT') {
+          const { workspace, tools } = await body(req);
+          if (typeof workspace !== 'string') throw new Error('Provide a workspace path.');
+          return send(200, { tools: await runtime.mcp.setProjectTools(workspace, tools) });
+        }
+      }
       const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable)$/.exec(url.pathname);
       if (mcp && req.method === 'POST') {
         const id = decodeURIComponent(mcp[1]!);

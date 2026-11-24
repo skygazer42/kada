@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { CallToolResult, Tool as ServerTool } from '@modelcontextprotocol/sdk/types.js';
+import { memoryProject } from './memory-sources.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
 export type McpDefinition = { id: string } & (
@@ -13,6 +14,7 @@ export type McpDefinition = { id: string } & (
   | { transport: 'http'; url: string; headers?: Record<string, string> }
 );
 export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[] };
+export type ProjectMcpTool = { id: string; tool: string };
 type FoundTool = Pick<ServerTool, 'name' | 'description' | 'inputSchema'>;
 type McpTest = { checkedAt: string; tools?: FoundTool[] } & (
   | { status: 'ok'; tools: FoundTool[] }
@@ -35,6 +37,17 @@ const pinOf = (connection: SavedConnection): McpPin => ({
 const idPattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const envPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const headerPattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+async function projectRoot(workspace: string): Promise<string> {
+  const project = await memoryProject(workspace);
+  if (!project) throw new Error('The MCP settings workspace must be an existing directory.');
+  return project;
+}
+
+function validProjectTools(value: unknown): value is ProjectMcpTool[] {
+  return Array.isArray(value) && value.every(entry => entry && typeof entry.id === 'string' &&
+    idPattern.test(entry.id) && typeof entry.tool === 'string' && entry.tool.length > 0);
+}
 
 function envRefs(entries: Record<string, string> | undefined, keyPattern: RegExp): Record<string, string> | undefined {
   if (entries === undefined) return;
@@ -120,12 +133,14 @@ async function discover(client: Client, signal: AbortSignal): Promise<FoundTool[
 
 export class McpTools {
   private readonly path: string;
+  private readonly projectsPath: string;
   private readonly changes = new SerialQueue();
   private readonly active = new Set<{ id: string; controller: AbortController; done: Promise<unknown> }>();
   private closed = false;
 
   constructor(dataDir: string) {
     this.path = join(dataDir, 'mcp-connections.json');
+    this.projectsPath = join(dataDir, 'mcp-projects.json');
   }
 
   private async read(): Promise<SavedConnection[]> {
@@ -213,8 +228,54 @@ export class McpTools {
     return this.update(id, old => ({ ...this.require(old), enabled: false }));
   }
 
-  async pins(): Promise<McpPin[]> {
-    return (await this.read()).filter(connection => connection.enabled).map(pinOf).sort((a, b) => a.id.localeCompare(b.id));
+  private async readProjects(): Promise<Record<string, ProjectMcpTool[]>> {
+    try {
+      return await readJson<Record<string, ProjectMcpTool[]>>(this.projectsPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      throw error;
+    }
+  }
+
+  async projectTools(workspace: string): Promise<ProjectMcpTool[] | null> {
+    const project = await projectRoot(workspace);
+    return (await this.readProjects())[project] ?? null;
+  }
+
+  async setProjectTools(workspace: string, tools: unknown): Promise<ProjectMcpTool[] | null> {
+    if (tools !== null && !validProjectTools(tools)) throw new Error('Provide an array of MCP connection IDs and tool names, or null.');
+    const project = await projectRoot(workspace);
+    return this.changes.run(async () => {
+      const projects = await this.readProjects();
+      if (tools === null) {
+        if (Object.hasOwn(projects, project)) {
+          delete projects[project];
+          await atomicJson(this.projectsPath, projects);
+        }
+        return null;
+      }
+      const connections = await this.read();
+      if (tools.some(({ id, tool }) => !connections.some(connection =>
+        connection.enabled && connection.definition.id === id && connection.allowedTools.includes(tool)))) {
+        throw new Error('Only currently enabled MCP tools may be selected for a project.');
+      }
+      const selection = Object.values(Object.fromEntries(tools.map(({ id, tool }) => [JSON.stringify([id, tool]), { id, tool }])));
+      projects[project] = selection;
+      await atomicJson(this.projectsPath, projects);
+      return selection;
+    });
+  }
+
+  async pins(workspace?: string): Promise<McpPin[]> {
+    const selection = workspace === undefined ? null : await this.projectTools(workspace);
+    return (await this.read())
+      .filter(connection => connection.enabled)
+      .map(connection => pinOf(selection === null ? connection : {
+        ...connection,
+        allowedTools: connection.allowedTools.filter(tool => selection.some(item => item.id === connection.definition.id && item.tool === tool)),
+      }))
+      .filter(pin => pin.tools.length > 0)
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
 
   async tools(pins?: McpPin[]) {

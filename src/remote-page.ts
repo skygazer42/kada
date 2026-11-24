@@ -119,8 +119,10 @@ const send = field("send");
 
 let token = sessionStorage.getItem("kada-device-token") || "";
 let identity = null;
+let connectionAttempt = 0;
 let conversationId = "";
-let pending = new Map();
+let pending;
+let editor = { draft: undefined, saving: Promise.resolve() };
 let busy = false;
 let canSend = true;
 let refreshVersion = 0;
@@ -129,21 +131,63 @@ let historyCursor = null;
 let shownTask = "";
 let disconnected = false;
 
-function scopedKey(name) {
-  return ["kada", name, identity.accountId, identity.deviceId].join(":");
+function bookKey() { return "kada:composer:" + identity.pairingId; }
+function selectionKey() { return "kada:conversation:" + identity.pairingId; }
+
+function composerRecords(key = bookKey()) {
+  return new Map(JSON.parse(localStorage.getItem(key) || "[]"));
+}
+
+async function changeComposer(change, key = bookKey()) {
+  if (!navigator.locks) throw new RequestError(409, "This browser cannot safely save or send drafts. Use a browser that supports Web Locks.");
+  return navigator.locks.request(key, () => {
+    const records = composerRecords(key);
+    const result = change(records);
+    try {
+      if (records.size) localStorage.setItem(key, JSON.stringify([...records]));
+      else localStorage.removeItem(key);
+    } catch {
+      throw new RequestError(409, "Browser storage is full or unavailable. Keep this page open and copy your draft before leaving.");
+    }
+    return result;
+  });
+}
+
+function restoreComposer() {
+  const record = composerRecords().get(conversationId);
+  pending = record?.state === "pending" ? record : undefined;
+  editor = { draft: record?.state === "draft" ? record : undefined, saving: Promise.resolve() };
+  prompt.value = editor.draft?.text ?? "";
+  fileInput.value = "";
+  selectFiles();
+}
+
+async function migratePending(value, candidate) {
+  if (sessionStorage.getItem("kada-device-token") !== value || sessionStorage.getItem("kada-composer-pairing")) return;
+  const key = ["kada", "pending", candidate.accountId, candidate.deviceId].join(":");
+  const legacy = JSON.parse(localStorage.getItem(key) || "[]");
+  const saved = JSON.parse(sessionStorage.getItem(key) || "[]");
+  if (!legacy.length && !saved.length) return;
+  await changeComposer((records) => {
+    for (const [id, message] of [...saved, ...legacy.map(([id, messageId]) => [id, { messageId }])]) {
+      if (!records.has(id)) records.set(id, { ...message, state: "pending" });
+    }
+  }, "kada:composer:" + candidate.pairingId);
+  sessionStorage.removeItem(key);
+  localStorage.removeItem(key);
 }
 
 class RequestError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-async function request(path, init = {}) {
+async function request(path, init = {}, bearer = token) {
   const response = await fetch("/remote/api" + path, {
     ...init,
     cache: "no-store",
     credentials: "omit",
     redirect: "error",
-    headers: { Authorization: "Bearer " + token, ...init.headers },
+    headers: { Authorization: "Bearer " + bearer, ...init.headers },
   });
   if (!response.ok) {
     const failure = await response.json().catch(() => ({}));
@@ -188,18 +232,29 @@ function action(text, container, run) {
 
 function conversationPath(id = conversationId) { return "/conversations/" + encodeURIComponent(id); }
 
+function addLocalConversation(id, record) {
+  const title = record?.state === "draft" ? "Unsent conversation" : record ? "Pending conversation" : "New conversation";
+  const option = element("option", title, conversations);
+  option.value = id;
+  if (!record) option.dataset.emptyConversation = "true";
+}
+
 function choose(id) {
   conversationId = id || crypto.randomUUID();
-  localStorage.setItem(scopedKey("conversation"), conversationId);
-  conversations.querySelector("[data-draft]")?.remove();
+  localStorage.setItem(selectionKey(), conversationId);
+  const empty = conversations.querySelector("[data-empty-conversation]");
+  if (empty && empty.value !== conversationId) {
+    const record = composerRecords().get(empty.value);
+    empty.remove();
+    if (record) addLocalConversation(empty.value, record);
+  }
   conversations.value = conversationId;
   if (!conversations.value) {
-    const option = element("option", "New conversation", conversations);
-    option.dataset.draft = "true";
-    option.value = conversationId;
+    addLocalConversation(conversationId, composerRecords().get(conversationId));
     conversations.value = conversationId;
   }
   resetConversationView();
+  restoreComposer();
   refresh().catch(report);
   updateComposer();
 }
@@ -230,27 +285,29 @@ async function refreshList() {
     const option = element("option", [state, row.title, reason].filter(Boolean).join(" · "), conversations);
     option.value = row.conversationId;
   }
+  for (const [id, record] of composerRecords()) {
+    if (rows.some((row) => row.conversationId === id)) continue;
+    addLocalConversation(id, record);
+  }
   const selected = conversationId || rows[0]?.conversationId;
   if (!selected) return choose("");
   if (selected !== conversationId) return choose(selected);
   conversations.value = selected;
   if (!conversations.value) {
-    const option = element("option", "New conversation", conversations);
-    option.dataset.draft = "true";
-    option.value = selected;
+    addLocalConversation(selected);
     conversations.value = selected;
   }
 }
 
 function updateComposer() {
-  send.disabled = !canSend || busy || pending.has(conversationId);
+  send.disabled = !canSend || busy || Boolean(pending);
   fileInput.disabled = send.disabled;
   prompt.readOnly = send.disabled;
 }
 
 function displayReceipt(receipt, checked = false) {
   const id = conversationId;
-  const message = pending.get(id);
+  const message = pending;
   const canRetry = Boolean(checked && receipt.state === "unknown" && message?.attachmentIds);
   const key = id + "/" + message?.messageId + "/" + receipt.state + "/" + canRetry;
   if (!uncertain.hidden && uncertain.dataset.receipt === key) return;
@@ -271,46 +328,64 @@ function displayReceipt(receipt, checked = false) {
   }
   if (canRetry) {
     action("Retry send", uncertain, async () => {
-      if (busy || conversationId !== id || pending.get(id) !== message) return;
+      if (busy || !canSend || conversationId !== id || pending !== message) return;
       await whileSending(async () => {
-        if ((await checkReceipt())?.state === "unknown") await sendPending(id, message);
+        if ((await checkReceipt())?.state === "unknown" && pending?.messageId === message.messageId &&
+          composerRecords().get(id)?.messageId === message.messageId) await sendPending(id, message);
       });
     }).classList.add("primary");
   }
   if (receipt.state === "unknown" || receipt.state === "interrupted") {
     action(message?.attachmentIds ? "Discard pending message" : "Dismiss", uncertain, async () => {
-      if (busy || conversationId !== id || pending.get(id) !== message) return;
-      setPending(id, null);
-      uncertain.hidden = true;
+      if (busy || conversationId !== id || pending !== message) return;
+      await settlePending(message);
     });
   }
 }
 
-function setPending(id, message) {
-  const key = scopedKey("pending");
-  const storage = message || pending.get(id)?.attachmentIds ? sessionStorage : localStorage;
-  const entries = new Map(JSON.parse(storage.getItem(key) || "[]"));
-  if (message) entries.set(id, message);
-  else entries.delete(id);
-  if (entries.size) storage.setItem(key, JSON.stringify([...entries]));
-  else storage.removeItem(key);
-  if (message) pending.set(id, message);
-  else pending.delete(id);
+async function settlePending(message, restore = false) {
+  const id = conversationId;
+  const device = identity;
+  const restored = restore && message.text ? { state: "draft", messageId: crypto.randomUUID(), text: message.text } : undefined;
+  const changed = await changeComposer((records) => {
+    const current = records.get(id);
+    if (current?.state !== "pending" || current.messageId !== message.messageId) return false;
+    if (restored) records.set(id, restored);
+    else records.delete(id);
+    return true;
+  });
+  if (device !== identity || id !== conversationId || pending !== message) return;
+  if (changed && restored) {
+    editor.draft = restored;
+    prompt.value = restored.text;
+  }
+  pending = undefined;
+  uncertain.hidden = true;
   updateComposer();
 }
 
 async function checkReceipt() {
   const id = conversationId;
-  const message = pending.get(id);
+  const device = identity;
+  const record = composerRecords().get(id);
+  if (record?.state === "pending" && pending?.messageId !== record.messageId) {
+    pending = record;
+    if (editor.draft?.messageId === record.messageId && prompt.value === record.text) { editor.draft = undefined; prompt.value = ""; }
+    updateComposer();
+  } else if (record?.state !== "pending" && pending) {
+    pending = undefined;
+    updateComposer();
+  }
+  const message = pending;
   if (!message) {
     uncertain.hidden = true;
     return;
   }
   const receipt = await get(conversationPath(id) + "?messageId=" + encodeURIComponent(message.messageId));
-  if (id !== conversationId || pending.get(id) !== message) return;
+  if (device !== identity || id !== conversationId || pending !== message) return;
   if (receipt.state === "submitted") {
-    setPending(id, null);
-    uncertain.hidden = true;
+    await settlePending(message);
+    if (device !== identity || id !== conversationId) return;
     await refreshList();
     return;
   }
@@ -488,28 +563,33 @@ async function refresh() {
 }
 
 async function connect(value) {
-  token = value;
+  const attempt = ++connectionAttempt;
+  let candidate;
   try {
-    identity = await get("/session");
+    candidate = await (await request("/session", {}, value)).json();
+    if (attempt !== connectionAttempt) return;
+    await migratePending(value, candidate);
   } catch (error) {
-    if (error instanceof RequestError && error.status === 401) sessionStorage.removeItem("kada-device-token");
+    if (attempt !== connectionAttempt) return;
+    if (error instanceof RequestError && error.status === 401 && sessionStorage.getItem("kada-device-token") === value) {
+      sessionStorage.removeItem("kada-device-token");
+    }
     throw error;
   }
+  if (attempt !== connectionAttempt) return;
+  const sameSession = sessionStorage.getItem("kada-device-token") === value;
+  token = value;
+  identity = candidate;
   sessionStorage.setItem("kada-device-token", token);
-  const key = scopedKey("pending");
-  const legacy = JSON.parse(localStorage.getItem(key) || "[]");
-  pending = new Map([
-    ...legacy.map(([id, messageId]) => [id, { messageId }]),
-    ...JSON.parse(sessionStorage.getItem(key) || "[]"),
-  ]);
-  conversationId = localStorage.getItem(scopedKey("conversation")) || "";
+  sessionStorage.setItem("kada-composer-pairing", identity.pairingId);
+  const oldSelection = sameSession && localStorage.getItem(["kada", "conversation", identity.accountId, identity.deviceId].join(":"));
+  conversationId = localStorage.getItem(selectionKey()) || oldSelection || composerRecords().keys().next().value || "";
+  if (conversationId) localStorage.setItem(selectionKey(), conversationId);
   listVersion++;
   conversations.replaceChildren();
   resetConversationView();
-  prompt.value = "";
-  fileInput.value = "";
-  selectFiles();
-  if (pending.has(conversationId)) displayReceipt({ state: "unknown" });
+  restoreComposer();
+  if (pending) displayReceipt({ state: "unknown" });
   field("connection").textContent = identity.deviceId;
   field("connection").hidden = false;
   pair.hidden = true;
@@ -576,6 +656,34 @@ document.addEventListener("visibilitychange", refreshOnReturn);
 window.addEventListener("focus", refreshOnReturn);
 fileInput.addEventListener("change", selectFiles);
 
+prompt.addEventListener("input", () => {
+  if (!identity || !conversationId) return;
+  const text = prompt.value;
+  const id = conversationId;
+  const key = bookKey();
+  const selected = editor;
+  selected.saving = selected.saving.then(async () => {
+    const previous = selected.draft;
+    const next = text ? { state: "draft", messageId: previous?.messageId ?? crypto.randomUUID(), text } : undefined;
+    await changeComposer((records) => {
+      const record = records.get(id);
+      if (record?.messageId !== previous?.messageId || record?.text !== previous?.text || record?.state === "pending") {
+        throw new RequestError(409, "This draft changed in another tab. Copy your edits and reopen this conversation.");
+      }
+      if (next) records.set(id, next);
+      else records.delete(id);
+    }, key);
+    selected.draft = next;
+    if (selected === editor && selected.error === status.textContent) status.textContent = "";
+    selected.error = undefined;
+  }).catch((error) => {
+    if (selected !== editor) return;
+    report(error);
+    selected.error = status.textContent;
+  });
+  return selected.saving;
+});
+
 async function whileSending(run) {
   busy = true;
   conversations.disabled = true;
@@ -594,13 +702,12 @@ async function whileSending(run) {
 async function sendPending(id, message) {
   status.textContent = "Sending…";
   let receipt;
-  try { receipt = await post(conversationPath(id) + "/messages", message); }
+  const { messageId, text, attachmentIds } = message;
+  try { receipt = await post(conversationPath(id) + "/messages", { messageId, text, attachmentIds }); }
   catch (error) {
     if (error instanceof RequestError && error.status < 500 && error.status !== 401) {
-      setPending(id, null);
-      uncertain.hidden = true;
-      prompt.value = message.text;
-      if (message.attachmentIds.length) {
+      await settlePending(message, true);
+      if (attachmentIds.length) {
         throw new RequestError(error.status, error.message + " Attach the files again to send this message.");
       }
     } else {
@@ -610,8 +717,7 @@ async function sendPending(id, message) {
   }
   status.textContent = "";
   if (receipt.state === "submitted") {
-    setPending(id, null);
-    uncertain.hidden = true;
+    await settlePending(message);
   } else {
     displayReceipt(receipt);
   }
@@ -631,11 +737,30 @@ field("composer").addEventListener("submit", async (event) => {
   }
   const id = conversationId;
   await whileSending(async () => {
+    await editor.saving;
+    const messageId = editor.draft?.messageId;
+    const current = composerRecords().get(id);
+    if (current?.state === "pending") { await checkReceipt(); return; }
+    if (text && (current?.messageId !== messageId || current?.text !== text)) {
+      throw new RequestError(409, "This draft changed in another tab. Copy your edits and reopen this conversation.");
+    }
     if (selected.length) status.textContent = "Uploading attachments…";
     const attachmentIds = [];
     for (const file of selected) attachmentIds.push(await upload(file, conversationPath(id)));
-    const message = { messageId: crypto.randomUUID(), text, attachmentIds };
-    setPending(id, message);
+    const message = { state: "pending", messageId: messageId ?? crypto.randomUUID(), text, attachmentIds };
+    const claimed = await changeComposer((records) => {
+      const record = records.get(id);
+      if (record?.state === "pending" || record?.messageId !== messageId || record?.text !== (text || undefined)) return false;
+      records.set(id, message);
+      return true;
+    });
+    if (!claimed) {
+      if (composerRecords().get(id)?.state === "pending") await checkReceipt();
+      else throw new RequestError(409, "This draft changed in another tab. Copy your edits and reopen this conversation.");
+      return;
+    }
+    pending = message;
+    editor.draft = undefined;
     prompt.value = "";
     fileInput.value = "";
     selectFiles();
