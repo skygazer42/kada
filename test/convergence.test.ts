@@ -8,7 +8,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, UserEntry, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { LocalRuntime } from "../src/runtime.js";
-import { goalExtension } from "../src/goal.js";
+import { GoalDoc, goalExtension } from "../src/goal.js";
 import { delegationExtension } from "../src/delegation.js";
 import { localEnvironment, localExecution } from "../src/execution.js";
 import { ChatSession, type ChatEvent } from "../src/chat.js";
@@ -17,6 +17,64 @@ import type { HarnessClient, TaskStatus } from "../src/client.js";
 import { scriptedFixture, until } from "./helpers.js";
 
 const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+
+test("task status keeps user requirements intact and expands saved evidence on demand", async () => {
+  const requirement = "Preserve the full clarification, including its last instruction. ".repeat(50);
+  const evidence = "Observe the artifact after checking the end of the report. ".repeat(20);
+  const criterion = "Verify the report and source files. ".repeat(10) + "Keep the source files unchanged.";
+  const f = await scriptedFixture(c => {
+    const statusReads = c.messages.filter(m => m.role === "toolResult" && m.toolName === "task_status").length;
+    if (statusReads === 0) return call("task_status", {});
+    if (statusReads === 1) return call("task_status", { details: true });
+    if (statusReads === 2) return call("task_status", { proofId: "proof-1" });
+    return fauxAssistantMessage("Read the saved task status.");
+  });
+  try {
+    const registry = createRegistry(), goal = goalExtension();
+    registry.install(goal);
+    const storage = await openNodeSqliteStorage(join(f.directory, "status.sqlite"));
+    const harness = await Harness.open(storage, { models: f.models, registry }, ctx);
+    try {
+      const root = await harness.root(ctx, { agent: { model: f.settings.model!, extensions: [goal] } });
+      await harness.commit(async tx => {
+        const state = await tx.doc(GoalDoc);
+        state.objective = "Preserve the report.";
+        state.revision = 4;
+        state.userMessages = [requirement];
+        state.brief = { revision: 1, outcome: "Preserved report", deliverables: ["report.txt"], inputs: [],
+          criteria: [{ text: criterion, method: "inspect" }], scope: ["Keep raw inputs unchanged"], assumptions: [], questions: [], checks: [],
+          budget: { maxDurationMs: 60_000, maxEstimatedCostUsd: 1 } };
+        state.confirmation = { revision: 1, digest: "frozen", at: 100, deadlineAt: 60_100, requestId: "confirm:1" };
+        state.plan = [{ id: "1", title: "Write report", status: "done", evidence }, { id: "2", title: "Review report", status: "pending", evidence: "" }];
+        state.mechanical = { passed: false, results: [{ label: "Review report", passed: false, detail: evidence }], files: [] };
+        state.proofs = { "proof-1": { id: "proof-1", command: "check report", passed: false, exitCode: 1, inputs: [], outputs: [], outputPreview: evidence, detail: evidence } };
+      }, ctx);
+      const input = await root.submit({ type: "input", content: "Read the saved task status." }, ctx);
+      assert.equal((await input.wait(ctx)).status, "done");
+      const results = (await root.context(ctx)).messages.filter(m => m.role === "toolResult" && m.toolName === "task_status")
+        .map(m => JSON.parse(m.content.find(b => b.type === "text")!.text));
+      const [summary, full, proof] = results;
+      assert.equal(summary.objective, "Preserve the report.");
+      assert.deepEqual(summary.userRequirements, [requirement]);
+      assert.equal(summary.revision, 4);
+      assert.deepEqual(summary.plan.map((step: { id: string }) => step.id), ["2"]);
+      assert.equal(summary.confirmed, true);
+      assert.equal(summary.brief.criteria[0].id, 1);
+      assert.equal(summary.brief.criteria[0].text, undefined);
+      assert.equal(summary.brief.criteria[0].preview, criterion.slice(0, 200));
+      assert.equal(summary.failedChecksCount, 1);
+      assert.ok(summary.failedChecks[0].detail.length < evidence.length);
+      assert.equal(summary.proofs["proof-1"].passed, false);
+      assert.ok(!JSON.stringify(summary).includes(evidence));
+      assert.deepEqual(full.brief.scope, ["Keep raw inputs unchanged"]);
+      assert.equal(full.brief.criteria[0].text, criterion);
+      assert.equal(full.plan[0].evidence, evidence);
+      assert.equal(full.failedChecks[0].detail, evidence);
+      assert.equal(proof.proofs["proof-1"].outputPreview, evidence);
+      assert.ok(JSON.stringify(summary).length < JSON.stringify(full).length);
+    } finally { await harness.close(ctx); }
+  } finally { await f.close(); }
+});
 
 test("new tasks keep optional plans advisory while real user and appended checks still trigger repair", async () => {
   const f = await scriptedFixture(c => {

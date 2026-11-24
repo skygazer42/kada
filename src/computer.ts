@@ -157,7 +157,11 @@ export class ComputerBridge {
           this.activeTool = undefined;
         }
         const validLease = !lease || (lease === this.lease && lease.expiresAt > Date.now());
-        if (lease && (!validLease || result.isError || context.abortSignal?.aborted)) lease.observed = false;
+        const discarded = !validLease || generation !== this.generation || context.abortSignal?.aborted;
+        if (discarded || result.isError) {
+          if (lease) lease.observed = false;
+          if (!observation) this.uncertain = true;
+        }
         this.requireAgentControl(generation);
         context.abortSignal?.throwIfAborted();
         if (!validLease) throw new Error("Desktop lease expired. Reacquire and observe before acting.");

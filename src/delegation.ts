@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
-import { AssistantEntry, configure, defineDoc, defineExtension, defineTool, UsageDoc, type ConversationId, type Extension, type Harness } from "@earendil-works/pi-durable";
+import { AssistantEntry, configure, defineDoc, defineExtension, defineTool, UsageDoc, type ConversationId, type Cursor, type EntryId, type Extension, type Harness, type SubmissionRecord, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { taskUsage } from "./budget.js";
 import type { ModelRef } from "./config.js";
 import { mapConcurrent } from "./util.js";
@@ -41,53 +41,87 @@ function requestIdFor(taskId: OwnerTaskId, conversationId: ConversationId): stri
   return ["delegate", taskId, conversationId].join(":");
 }
 
+async function delegatedChildren(reader: Pick<Harness, "snapshot">, records: readonly OwnedConversation[], context: Context) {
+  const index = await reader.snapshot(Delegations, context);
+  const children = await Promise.all(records.map(async ({ id, owner }) => {
+    if (!owner) return;
+    const siblings = index?.byOwner[owner.taskId] ?? (await reader.snapshot(Delegation, owner.taskId, context))?.children;
+    const child = siblings?.find(entry => entry.id === id);
+    if (child) return { ...child, owner };
+  }));
+  return children.filter(child => child !== undefined);
+}
+
+function childStatus(submission?: SubmissionRecord): DelegationSummary["status"] {
+  if (!submission || submission.status === "queued") return "queued";
+  if (submission.status === "unanswered") return /abort|cancel/i.test(submission.reason) ? "cancelled" : "failed";
+  if (submission.status === "done" && submission.type === "input") return "completed";
+  return "running";
+}
+
+async function childAnswer(tx: Tx, answerId: EntryId) {
+  const entry = await tx.entry(AssistantEntry, answerId);
+  const answer = entry?.model?.[0];
+  const text = answer?.role === "assistant" ? answer.content.filter(part => part.type === "text").map(part => part.text).join("\n") : "";
+  return { answer: text.slice(0, 6_000), ...(text.length > 6_000 ? { truncated: true as const } : {}) };
+}
+
+async function childResult(tx: Tx, id: ConversationId, taskId: OwnerTaskId) {
+  const submission = await tx.submissionByRequest(id, requestIdFor(taskId, id));
+  return { status: childStatus(submission),
+    ...(submission?.status === "done" && submission.type === "input" ? await childAnswer(tx, submission.answer) : {}),
+    ...(submission?.status === "unanswered" ? { reason: submission.reason } : {}) };
+}
+
+export async function savedDelegation(api: ToolExecutionApi, selector: "list" | number, context: Context) {
+  if (selector === "list") {
+    const records = await api.commit(async tx => {
+      const records: OwnedConversation[] = [];
+      let cursor: Cursor | undefined;
+      do {
+        const page = await tx.scanConversations({ ownerConversationId: api.conversationId }, 200, cursor);
+        records.push(...page.items);
+        cursor = page.next;
+      } while (cursor);
+      return records;
+    }, context);
+    const children = await delegatedChildren(api, records, context);
+    const delegations = await api.commit(tx => Promise.all(children.map(async ({ id, name, owner }) => ({ conversationId: id, name,
+      status: childStatus(await tx.submissionByRequest(id, requestIdFor(owner.taskId, id))) }))), context);
+    return { delegations };
+  }
+  const record = await api.commit(tx => tx.conversation(selector as ConversationId), context);
+  if (record?.owner?.conversationId !== api.conversationId) return { delegation: null };
+  const [child] = await delegatedChildren(api, [record], context);
+  if (!child) return { delegation: null };
+  const { cwd } = await api.agent(context);
+  const result = await api.commit(tx => childResult(tx, child.id, child.owner.taskId), context);
+  return { delegation: { conversationId: child.id, name: child.name, ...(cwd ? { directory: join(cwd, "agents", String(child.id)) } : {}), ...result } };
+}
+
 export async function listDelegations(
   harness: Harness,
   workspace: string,
   records: readonly OwnedConversation[],
 ): Promise<DelegationSummary[]> {
   const context = BACKGROUND_CONTEXT;
-  const index = await harness.snapshot(Delegations, context);
-  const summaries = await Promise.all(records.map(async (record): Promise<DelegationSummary | undefined> => {
-    const { id, owner } = record;
-    if (!owner) return;
-    const children = index?.byOwner[owner.taskId] ?? (await harness.snapshot(Delegation, owner.taskId, context))?.children;
-    const child = children?.find((entry) => entry.id === id);
-    if (!child) return;
-
+  const children = await delegatedChildren(harness, records, context);
+  return Promise.all(children.map(async ({ id, name, instructions, owner }) => {
     const [result, usage] = await Promise.all([
-      harness.commit(async (tx) => {
-        const submission = await tx.submissionByRequest(id, requestIdFor(owner.taskId, id));
-        if (!submission) return { status: "queued" } as const;
-        if (submission.status === "unanswered") {
-          const reason = submission.reason;
-          const status = /abort|cancel/i.test(reason) ? "cancelled" : "failed";
-          return { status, reason } as const;
-        }
-        if (submission.status === "done" && submission.type === "input") {
-          const entry = await tx.entry(AssistantEntry, submission.answer);
-          const answer = entry?.model?.[0];
-          const text = answer?.role === "assistant"
-            ? answer.content.filter((part) => part.type === "text").map((part) => part.text).join("\n")
-            : "";
-          return { status: "completed", answer: text.slice(0, 6_000), ...(text.length > 6_000 ? { truncated: true as const } : {}) } as const;
-        }
-        return { status: submission.status === "queued" ? "queued" : "running" } as const;
-      }, context),
+      harness.commit(tx => childResult(tx, id, owner.taskId), context),
       harness.snapshot(UsageDoc, id, context),
     ]);
     return {
       delegationTaskId: owner.taskId,
       parentConversationId: owner.conversationId,
       conversationId: id,
-      name: child.name,
-      instructions: child.instructions,
+      name,
+      instructions,
       directory: join(workspace, "agents", String(id)),
       ...result,
       usage: taskUsage(usage ?? { models: {}, tools: {} }),
     };
   }));
-  return summaries.filter((summary) => summary !== undefined);
 }
 
 const Delegation = defineDoc<{ children: { id: ConversationId; name: string; instructions: string }[] }>({
@@ -125,13 +159,10 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
         await mkdir(directory, { recursive: true });
         const conversation = await api.conversation(child.id, ctx);
         if (!conversation) throw new Error(`Missing child conversation ${child.id}`);
-        const submission = await conversation.submit({ type: "input", content: child.instructions, requestId: `delegate:${api.taskId}:${child.id}` }, ctx);
+        const submission = await conversation.submit({ type: "input", content: child.instructions, requestId: requestIdFor(api.taskId, child.id) }, ctx);
         const result = await submission.wait(ctx);
-        const entry = result.status === "done" && result.type === "input"
-          ? await api.commit(tx => tx.entry(AssistantEntry, result.answer), ctx) : undefined;
-        const answer = entry?.model?.[0];
-        const text = answer?.role === "assistant" ? answer.content.filter(b => b.type === "text").map(b => b.text).join("\n") : "";
-        return { name: child.name, conversationId: child.id, directory, status: result.status, answer: text.slice(0, 6000), ...(text.length > 6000 ? { truncated: true } : {}),
+        const answer = result.status === "done" && result.type === "input" ? await api.commit(tx => childAnswer(tx, result.answer), ctx) : { answer: "" };
+        return { name: child.name, conversationId: child.id, directory, status: result.status, ...answer,
           ...(result.status === "unanswered" ? { reason: result.reason } : {}) };
       });
       return { output: [{ type: "text", text: JSON.stringify(results) }], isError: results.some(r => r.status !== "done") };

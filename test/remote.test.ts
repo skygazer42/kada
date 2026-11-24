@@ -280,6 +280,68 @@ test("D04 reconnect replays a resolved wait once across Pi pages and daemon reop
   assert.equal((await after.call(other.token, path)).status, 404);
 });
 
+test("the phone overview puts an older waiting chat first, then shows its delivery", async (t) => {
+  let phase = "prepare";
+  const finishOtherChat = Promise.withResolvers<void>();
+  const fixture = await scriptedFixture(async () => {
+    if (phase === "prepare") return tool("task_prepare", {
+      outcome: "Write a synthetic report.", deliverables: ["report.txt"], inputs: [], scope: ["This workspace"],
+      assumptions: [], questions: [], criteria: [{ text: "Inspect report.txt", method: "inspect" }],
+    });
+    if (phase === "wait") return tool("task_blocked", { reason: "A heading is required.", question: "Which heading?" });
+    if (phase === "other") {
+      await finishOtherChat.promise;
+      return fauxAssistantMessage("Done with the other chat.");
+    }
+    if (phase === "write") {
+      phase = "submit";
+      return tool("write", { path: "report.txt", content: "Verified report." });
+    }
+    return tool("task_submit", { summary: "Report ready.", artifacts: ["report.txt"],
+      criteria: [{ id: 1, status: "passed", evidence: "Inspected report.txt." }] });
+  });
+  t.after(async () => { finishOtherChat.resolve(); await fixture.close(); });
+  const owner = pairing();
+  const tablet = pairing("owner", "tablet");
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [owner.device, tablet.device]);
+  const report = "/conversations/report";
+  const receipt = await (await call(owner.token, report + "/messages", turn("one", "Create a report."))).json();
+  const brief = await until(async () => (await call(owner.token, report)).json(), (view) => view.task?.status === "awaiting_confirmation");
+  phase = "wait";
+  await fixture.runtime.confirm(receipt.taskId, brief.task.brief.revision, brief.task.briefDigest);
+  await until(() => fixture.runtime.status(receipt.taskId), (state) => state.status === "waiting_user");
+  phase = "other";
+  const second = await (await call(owner.token, "/conversations/other/messages", turn("one", "Investigate this next."))).json();
+  await until(() => fixture.runtime.status(second.taskId), (state) => state.status === "running");
+
+  const fullStatus = t.mock.method(fixture.runtime, "status", () => assert.fail("Overview loaded full task status"));
+  const list = async (token = owner.token) => {
+    const response = await call(token, "/conversations");
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const waiting = await list();
+  assert.deepEqual(waiting.map(({ conversationId }: { conversationId: string }) => conversationId), ["report", "other"]);
+  assert.equal(waiting[0].taskId, receipt.taskId);
+  assert.deepEqual(waiting[0].task, { status: "waiting_user", group: "pending", reason: "A heading is required.", question: "Which heading?" });
+  assert.equal(waiting[1].task.status, "running");
+  assert.deepEqual(await list(tablet.token), []);
+  assert.equal((await call(tablet.token, report)).status, 404);
+  assert.equal((await call("unpaired", "/conversations")).status, 401);
+
+  phase = "write";
+  await fixture.runtime.followUp(receipt.taskId, "Use a synthetic heading.");
+  const completed = await until(() => list(), (rows) => rows.some((row: { taskId: string; task?: { status: string } }) =>
+    row.taskId === receipt.taskId && row.task?.status === "completed"));
+  assert.deepEqual(completed.map(({ conversationId }: { conversationId: string }) => conversationId), ["other", "report"]);
+  assert.deepEqual(completed[1].task, { status: "completed", group: "delivered", reason: null, question: null });
+  assert.equal(fullStatus.mock.callCount(), 0);
+  fullStatus.mock.restore();
+  const reopened = await (await call(owner.token, report)).json();
+  assert.equal(reopened.taskId, receipt.taskId);
+  assert.equal(reopened.task.delivery.artifacts[0].name, "report.txt");
+});
+
 test("F14 remote history preserves messages and sequence IDs after native compaction and reopen", async (t) => {
   const fixture = await scriptedFixture((context) => context.messages.some((message) =>
     message.role === "system" && JSON.stringify(message).includes("context summarization assistant"))

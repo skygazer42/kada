@@ -8,6 +8,7 @@ import type { Confirmation, TaskBrief } from "./preparation.js";
 import type { CheckReceipt, CriterionResult } from "./verification.js";
 import type { LearningState } from "./learning.js";
 import type { SkillState } from "./skills.js";
+import { savedDelegation } from "./delegation.js";
 
 export type GoalPhase = "working" | "clarifying" | "awaiting_confirmation" | "submitted" | "verifying" | "completed" | "waiting_user" | "blocked" | "needs_attention" | "failed";
 export type ReviewVerdict = { verdict: "pass" | "rework" | "blocked"; reason: string; evidence: string[] };
@@ -112,19 +113,32 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
   const output = (value: unknown) => [{ type: "text" as const, text: JSON.stringify(value) }];
   return defineExtension({ name: "local_goal", tools: [
     defineTool({
-      name: "task_status", description: "Read durable objective, plan, acceptance checks and last verification. Read this after context compaction or a restart. Proofs are concise summaries; pass proofId to inspect one full command receipt and file hashes.",
-      parameters: Type.Object({ proofId: Type.Optional(Type.String({ minLength: 1 })) }), replay: "safe", executionMode: "sequential",
-      execute: async (args, api, context) => ({ output: output(await api.commit(async tx => {
-        const goal = await tx.doc(GoalDoc);
-        return plain({ objective: goal.objective, revision: goal.revision, userRequirements: goal.userMessages, phase: goal.phase,
-          brief: goal.brief ?? null, confirmation: goal.confirmation ?? null,
-          ...(goal.learning ? { learning: goal.learning } : {}),
-          ...(goal.skills ? { skills: goal.skills } : {}),
-          proofs: args.proofId ? { [args.proofId]: goal.proofs?.[args.proofId] ?? null } : Object.fromEntries(Object.values(goal.proofs ?? {}).map(p => [p.id, { passed: p.passed, exitCode: p.exitCode, command: p.command.slice(0, 120), inputs: p.inputs.length, outputs: p.outputs.length }])),
-          plan: goal.plan, checks: goal.checks, candidate: goal.candidate, verification: goal.verification,
-          reworks: goal.reworks, stalls: goal.stalls, reason: goal.reason, question: goal.question, tokenLimit: goal.tokenLimit, costLimit: goal.costLimit ?? null,
-          failedChecks: goal.mechanical?.results.filter(r => !r.passed) ?? [] });
-      }, context)) }),
+      name: "task_status", description: "Read the durable objective, full user requirements, unfinished steps and recent failures after compaction or restart. Set details=true for the exact brief, acceptance criteria, checks and saved evidence. Use proofId for a full command receipt. Use delegation='list' for your child IDs and statuses, or pass one child conversation ID to read its saved result.",
+      parameters: Type.Object({ details: Type.Optional(Type.Boolean()), proofId: Type.Optional(Type.String({ minLength: 1 })),
+        delegation: Type.Optional(Type.Union([Type.Literal("list"), Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })])) }), replay: "safe", executionMode: "sequential",
+      execute: async (args, api, context) => {
+        if (args.delegation) return { output: output(await savedDelegation(api, args.delegation, context)) };
+        return { output: output(await api.commit(async tx => {
+          const goal = await tx.doc(GoalDoc);
+          const failures = goal.mechanical?.results.filter(result => !result.passed) ?? [];
+          const proofs = args.proofId ? { [args.proofId]: goal.proofs?.[args.proofId] ?? null } :
+            Object.fromEntries(Object.values(goal.proofs ?? {}).map(p => [p.id, { passed: p.passed, exitCode: p.exitCode, command: p.command.slice(0, 120), inputs: p.inputs.length, outputs: p.outputs.length }]));
+          const current = { objective: goal.objective, revision: goal.revision, userRequirements: goal.userMessages, phase: goal.phase,
+            reason: goal.reason, question: goal.question, tokenLimit: goal.tokenLimit, costLimit: goal.costLimit ?? null, proofs };
+          if (args.details) return plain({ ...current, brief: goal.brief ?? null, confirmation: goal.confirmation ?? null,
+            ...(goal.learning ? { learning: goal.learning } : {}), ...(goal.skills ? { skills: goal.skills } : {}),
+            plan: goal.plan, checks: goal.checks, candidate: goal.candidate, verification: goal.verification,
+            reworks: goal.reworks, stalls: goal.stalls, failedChecks: failures });
+          const brief = goal.brief ? { revision: goal.brief.revision, outcomePreview: goal.brief.outcome.slice(0, 200),
+            criteria: goal.brief.criteria.map((criterion, i) => ({ id: i + 1, method: criterion.method, preview: criterion.text.slice(0, 200) })) } : null;
+          return plain({ ...current, brief, confirmed: !!goal.confirmation,
+            ...(goal.learning ? { learning: { offers: goal.learning.offers } } : {}),
+            ...(goal.skills ? { skills: { pins: goal.skills.pins, loaded: goal.skills.loaded } } : {}),
+            plan: goal.plan.filter(step => step.status !== "done").map(({ id, title, status }) => ({ id, title, status })),
+            checkCount: goal.checks.length, failedChecksCount: failures.length,
+            failedChecks: failures.slice(0, 6).map(({ label, passed, detail }) => ({ label: label.slice(0, 240), passed, detail: detail.slice(0, 350) })) });
+        }, context)) };
+      },
     }),
     defineTool({
       name: "task_plan", description: `${options.advisoryPlan ? "Optionally record a concise plan for progress. Plan status does not gate delivery. " : ""}Persist a plan with stable step IDs; retain completed steps. Optionally APPEND executable acceptance checks. Existing checks cannot be removed or weakened. Only mark steps done through task_checkpoint with evidence.`,

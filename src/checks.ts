@@ -48,11 +48,11 @@ function jsonPointer(value: unknown, pointer: string): unknown {
   return value;
 }
 
-/** A concise view of actual failures; the full check results remain in task_status. */
+/** A concise view of actual failures; task_status with details includes every failure. */
 export function failedCheckFeedback(report: MechanicalReport): string {
   const failures = report.results.filter(result => !result.passed);
   const shown = failures.slice(0, 6).map(result => `${result.label.slice(0, 400)}: ${result.detail.slice(0, 700)}`);
-  if (failures.length > shown.length) shown.push(`${failures.length - shown.length} additional failures are available in task_status.failedChecks.`);
+  if (failures.length > shown.length) shown.push(`${failures.length - shown.length} additional failures are available in failedChecks from task_status with details=true.`);
   return shown.join("\n");
 }
 

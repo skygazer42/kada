@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
-import { taskView } from "./task-view.js";
+import { taskGroup, taskView } from "./task-view.js";
 import { readJson, SerialQueue } from "./util.js";
 import { Workspace } from "./workspace.js";
 
@@ -293,17 +293,33 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     return workspace;
   }
 
+  async function conversationTask(conversation: Conversation) {
+    const workspace = await privateWorkspace(conversation, false);
+    const meta = await runtime.metadata(conversation.taskId);
+    if (meta.remotePolicy !== "workspace") throw new HttpError(409, "This conversation predates remote workspace isolation. Start a new conversation.");
+    if (meta.workspace !== workspace.root) throw new HttpError(409, "The original workspace is unavailable.");
+  }
+
   async function taskStatus(conversation: Conversation): Promise<TaskStatus | undefined> {
     if (!conversation.receipts.length) return;
     try {
-      const workspace = await privateWorkspace(conversation, false);
-      const meta = await runtime.metadata(conversation.taskId);
-      if (meta.remotePolicy !== "workspace") throw new HttpError(409, "This conversation predates remote workspace isolation. Start a new conversation.");
-      if (meta.workspace !== workspace.root) throw new HttpError(409, "The original workspace is unavailable.");
+      await conversationTask(conversation);
       return await runtime.status(conversation.taskId);
     }
     catch (error) {
       if (!isMissing(error)) throw error;
+    }
+  }
+
+  async function overview(conversation: Conversation) {
+    try {
+      await conversationTask(conversation);
+      const { status, reason, question } = await runtime.taskOverview(conversation.taskId);
+      const group = taskGroup(status);
+      return { status, group, reason: group === "pending" ? reason : null, question: group === "pending" ? question : null };
+    } catch (error) {
+      if (isMissing(error) || error instanceof HttpError && error.status === 409) return null;
+      throw error;
     }
   }
 
@@ -331,9 +347,14 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     catch (error) { if (isMissing(error)) return []; throw error; }
     const rows = await Promise.all(names.filter((name) => shaPattern.test(name.slice(0, -5)) && name.endsWith(".json"))
       .map((name) => readConversation(join(accountPath(scope), name))));
-    return rows.filter((row): row is Conversation => Boolean(row?.receipts.length && belongs(row, scope)))
-      .sort((a, b) => b.updatedAt - a.updatedAt || a.conversationId.localeCompare(b.conversationId))
-      .map(({ conversationId, taskId, title, updatedAt }) => ({ conversationId, taskId, title, updatedAt }));
+    const conversations = [];
+    for (const row of rows) {
+      if (!row?.receipts.length || !belongs(row, scope)) continue;
+      const { conversationId, taskId, title, updatedAt } = row;
+      conversations.push({ conversationId, taskId, title, updatedAt, task: await overview(row) });
+    }
+    return conversations.sort((a, b) => Number(b.task?.group === "pending") - Number(a.task?.group === "pending") ||
+      b.updatedAt - a.updatedAt || a.conversationId.localeCompare(b.conversationId));
   }
 
   async function history(conversation: Conversation) {

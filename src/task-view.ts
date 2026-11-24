@@ -31,10 +31,14 @@ export function taskView(status: TaskStatus) {
 
 export type TaskView = ReturnType<typeof taskView>;
 
+export function taskGroup(status: TaskStatus['status']) {
+  return ['waiting_user','blocked','needs_attention','clarifying','awaiting_confirmation','failed','paused','budget_limited'].includes(status) ? 'pending'
+    : ['completed','answered'].includes(status) ? 'delivered' : status === 'cancelled' ? 'closed' : 'running';
+}
+
 export function taskHandoff(status:TaskStatus) {
   const goal = status.goal;
-  const group = ['waiting_user','blocked','needs_attention','clarifying','awaiting_confirmation','failed','paused','budget_limited'].includes(status.status) ? 'pending'
-    : ['completed','answered'].includes(status.status) ? 'delivered' : status.status === 'cancelled' ? 'closed' : 'running';
+  const group = taskGroup(status.status);
   const step = goal?.plan.find(step => step.status === 'running')?.title;
   const summary = group === 'pending' ? goal?.question ?? goal?.reason ?? (status.status === 'awaiting_confirmation' ? '等待确认任务说明和预算' : status.status)
     : goal?.candidate?.summary ?? step ?? (status.interaction === 'chat' ? '普通对话' : '执行目标');

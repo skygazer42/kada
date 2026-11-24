@@ -49,11 +49,15 @@
 
 ## P1 · 精简恢复时的任务状态
 
+已实现。常规状态显示完整用户要求和验收条目预览，`details: true` 取回完整确认说明与证据。脚本化回归强制 Pi 压缩到原委派回执退出活动上下文，再关闭并重开会话。主任务按原 ID 取回成功结果和失败原因，读取原产物，子任务执行次数保持原数。 [状态回归](../../test/convergence.test.ts) · [重启回归](../../test/delegation.test.ts)
+
 把 `task_status` 的常规响应收敛到当前目标、完整用户要求、当前修订、待办步骤和失败摘要。冻结任务说明、确认标准编号和详细证据可按需查阅，恢复提示明确告诉模型怎么取回。OpenMausBot 的增量上下文完整保留尚未传递的用户指令和标记为关键的队友结果，Rakazo 的工作清单按预算呈现摘要。状态来自当前 Pi 文档和已经持久化的子任务记录。 [OpenMausBot 增量上下文](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/delta-context.ts#L89) · [Rakazo 工作清单](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/runtime/context/scratchpad-context.ts#L47) · [Kada 状态响应](../../src/goal.ts#L115)
 
 本地重启复现中，宿主能读到原子任务结果，模型调用 `task_status` 时缺少这一入口。可让接回后的主任务按需读取已完成或失败的子任务结果。Pots 的子任务清单和 Suparagent 的部分结果回传给出了实现参考。测试在原委派结果退出活动上下文后接回任务，使用已有子会话身份重新核对产物，并确认没有重复启动子任务。 [Pots 子任务结果](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/children.ts#L560) · [Suparagent 结果回传](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L706) · [Kada 子任务查询](../../src/delegation.ts#L44)
 
 ## P1 · 保留桌面动作的未知结果
+
+已实现。MCP 夹具验证接管、取消和部分失败后的结果不明状态。每个动作只发生一次，重新观察后可读到原效果。agent-browser 0.38.1 本地网页复测通过接管、回交、驱动断开后接回以及页面和产物内容核对。 [电脑接管回归](../../test/computer-handoff.test.ts)
 
 让电脑桥在已发出的动作回复因接管、取消或租约变更被丢弃时报告 `uncertain`。Amuse 会结合动作是否可能已生效判断恢复。本地合成 MCP 驱动已复现一次差异。动作实际追加了一条记录，模型拿不到过期回复，随后观察能读出该记录，接管期间桥的状态却仍显示 `uncertain=false`。 [Amuse 恢复决定](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/robustness.ts#L100) · [Kada 电脑桥](../../src/computer.ts#L152)
 
@@ -61,11 +65,15 @@
 
 ## P2 · 恢复手机断线前的待发送内容
 
+已实现。agent-browser 在模拟手机视口拦截带附件的实际本地请求。刷新后恢复正文和附件引用，再用相同 ID 发送。另一次拦截已受理请求的响应，刷新只查询回执。自动化回归覆盖附件过期、账号和设备隔离以及历史待发送 ID。 [手机网页回归](../../test/remote-pending-page.test.ts)
+
 Codync 在移动端保存待发送正文、附件引用和稳定 nonce，明确重试沿用同一个 nonce。Kada 的服务端已能核对同一请求，移动页目前只保存 `messageId`。用本地脚本拦截请求并重建页面后，页面能查原请求，待发正文已丢失。可在原页面会话里保留正文和已上传的附件 ID，在回执为 `unknown` 时提供明确重试，并沿用原 ID。 [Codync 保存待发送项](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/AppStoreDrafts.kt#L63) · [Codync 复用 nonce](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/AppStoreChat.kt#L225) · [Kada 手机页面](../../src/remote-page.ts#L235) · [Kada 请求受理](../../src/remote.ts#L425)
 
 浏览器回归分别拦掉请求和拦掉响应。前者在刷新后能用原正文、附件引用和 ID 重试一次。后者能接回原请求。附件过期时保留可操作的错误，其他设备无法读取这份待发送内容。
 
 ## P2 · 手机侧优先显示待处理会话
+
+已实现。真实 Chromium 的 390 × 844 视口验证待处理会话优先、手动刷新和返回页面更新状态、保留选中会话、接回原会话下载产物以及同账户的设备隔离。三个列表请求分别来自连接、手动刷新和返回页面，详情轮询继续只处理已选会话。 [手机 API 回归](../../test/remote.test.ts)
 
 OpenMausBot 的通知接口用读取方区分通知状态。Kada 的手机会话选择器目前以标题和更新时间为主，进度读取集中在已选会话。可在设备已可访问的会话列表中加入等待原因和交付状态，优先让用户找到需要答复的会话。复用当前任务视图、设备归属和原会话 ID。 [OpenMausBot 通知读取](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routes/notifications.ts#L45) · [Kada 手机列表](../../src/remote.ts#L328) · [Kada 任务视图](../../src/task-view.ts#L34)
 

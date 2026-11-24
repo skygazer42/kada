@@ -44,6 +44,7 @@ export const remotePage = String.raw`<!doctype html>
     .task li { margin-top: .3rem; }
     .task li button { text-align: left; max-width: 100%; overflow-wrap: anywhere; }
     .receipt { margin-top: .5rem; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem; }
+    .receipt .pending-message { flex-basis: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }
     #composer { margin-bottom: 1.5rem; }
     textarea { min-height: 6rem; line-height: 1.4; resize: vertical; }
     .compose-actions { display: flex; align-items: center; gap: .5rem; margin-top: .7rem; flex-wrap: wrap; }
@@ -74,6 +75,7 @@ export const remotePage = String.raw`<!doctype html>
     <div id="assistant" hidden>
       <div class="controls">
         <label id="conversation-field" for="conversation">Conversation<select id="conversation"></select></label>
+        <button type="button" id="refresh-conversations" aria-label="Refresh conversations">Refresh</button>
         <button type="button" id="new">New chat</button>
       </div>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
@@ -121,6 +123,7 @@ let conversationId = "";
 let pending = new Map();
 let busy = false;
 let refreshVersion = 0;
+let listVersion = 0;
 let shownMessages = [];
 let lastProgressSequence = 0;
 let shownTask = "";
@@ -196,6 +199,13 @@ function choose(id) {
     option.value = conversationId;
     conversations.value = conversationId;
   }
+  resetConversationView();
+  refresh().catch(report);
+  updateComposer();
+}
+
+function resetConversationView() {
+  refreshVersion++;
   shownMessages = [];
   lastProgressSequence = 0;
   shownTask = "";
@@ -203,16 +213,21 @@ function choose(id) {
   taskEvents.replaceChildren();
   taskHistory.hidden = true;
   taskHistory.open = false;
+  task.replaceChildren();
   task.hidden = true;
-  refresh().catch(report);
-  updateComposer();
+  uncertain.hidden = true;
+  uncertain.replaceChildren();
 }
 
 async function refreshList() {
+  const version = ++listVersion;
   const rows = await get("/conversations");
+  if (version !== listVersion || !identity) return;
   conversations.replaceChildren();
   for (const row of rows) {
-    const option = element("option", row.title, conversations);
+    const state = row.task && taskStatusLabel(row.task.status);
+    const reason = row.task?.question ?? row.task?.reason;
+    const option = element("option", [state, row.title, reason].filter(Boolean).join(" · "), conversations);
     option.value = row.conversationId;
   }
   const selected = conversationId || rows[0]?.conversationId;
@@ -230,10 +245,14 @@ async function refreshList() {
 function updateComposer() {
   send.disabled = busy || pending.has(conversationId);
   fileInput.disabled = send.disabled;
+  prompt.readOnly = send.disabled;
 }
 
-function displayReceipt(receipt) {
-  const key = conversationId + "/" + pending.get(conversationId) + "/" + receipt.state;
+function displayReceipt(receipt, checked = false) {
+  const id = conversationId;
+  const message = pending.get(id);
+  const canRetry = Boolean(checked && receipt.state === "unknown" && message?.attachmentIds);
+  const key = id + "/" + message?.messageId + "/" + receipt.state + "/" + canRetry;
   if (!uncertain.hidden && uncertain.dataset.receipt === key) return;
   uncertain.dataset.receipt = key;
   uncertain.hidden = false;
@@ -244,37 +263,59 @@ function displayReceipt(receipt) {
     accepted: "The message was received and is starting.",
   }[receipt.state] || "The message reached the original conversation.";
   element("span", copy, uncertain);
+  if (message?.text) element("p", message.text, uncertain).classList.add("pending-message");
+  const attachments = message?.attachmentIds?.length;
+  if (attachments) element("span", attachments + (attachments === 1 ? " attachment" : " attachments"), uncertain);
   if (receipt.state === "unknown" || receipt.state === "accepted") {
     action("Check delivery", uncertain, async () => { await checkReceipt(); });
   }
+  if (canRetry) {
+    action("Retry send", uncertain, async () => {
+      if (busy || conversationId !== id || pending.get(id) !== message) return;
+      await whileSending(async () => {
+        if ((await checkReceipt())?.state === "unknown") await sendPending(id, message);
+      });
+    }).classList.add("primary");
+  }
   if (receipt.state === "unknown" || receipt.state === "interrupted") {
-    action("Dismiss", uncertain, async () => { setPending(conversationId, null); uncertain.hidden = true; });
+    action(message?.attachmentIds ? "Discard pending message" : "Dismiss", uncertain, async () => {
+      if (busy || conversationId !== id || pending.get(id) !== message) return;
+      setPending(id, null);
+      uncertain.hidden = true;
+    });
   }
 }
 
-function setPending(id, messageId) {
-  if (messageId) pending.set(id, messageId);
+function setPending(id, message) {
+  const key = scopedKey("pending");
+  const storage = message || pending.get(id)?.attachmentIds ? sessionStorage : localStorage;
+  const entries = new Map(JSON.parse(storage.getItem(key) || "[]"));
+  if (message) entries.set(id, message);
+  else entries.delete(id);
+  if (entries.size) storage.setItem(key, JSON.stringify([...entries]));
+  else storage.removeItem(key);
+  if (message) pending.set(id, message);
   else pending.delete(id);
-  localStorage.setItem(scopedKey("pending"), JSON.stringify([...pending]));
   updateComposer();
 }
 
 async function checkReceipt() {
   const id = conversationId;
-  const messageId = pending.get(id);
-  if (!messageId) {
+  const message = pending.get(id);
+  if (!message) {
     uncertain.hidden = true;
     return;
   }
-  const receipt = await get(conversationPath(id) + "?messageId=" + encodeURIComponent(messageId));
-  if (id !== conversationId || pending.get(id) !== messageId) return;
+  const receipt = await get(conversationPath(id) + "?messageId=" + encodeURIComponent(message.messageId));
+  if (id !== conversationId || pending.get(id) !== message) return;
   if (receipt.state === "submitted") {
     setPending(id, null);
     uncertain.hidden = true;
     await refreshList();
     return;
   }
-  displayReceipt(receipt);
+  displayReceipt(receipt, true);
+  return receipt;
 }
 
 async function download(artifact, container) {
@@ -300,17 +341,21 @@ async function download(artifact, container) {
   setTimeout(() => URL.revokeObjectURL(hrefBlob), 1000);
 }
 
+function taskStatusLabel(status) {
+  const labels = {
+    pending: "Pending", running: "Running", working: "Working", clarifying: "Clarifying", awaiting_confirmation: "Ready for confirmation",
+    submitted: "Submitted", verifying: "Verifying", completed: "Completed",
+    waiting_user: "Waiting for you", blocked: "Blocked", needs_attention: "Needs attention",
+    failed: "Failed", paused: "Paused", cancelled: "Cancelled", budget_limited: "Budget limit reached", answered: "Answered",
+  };
+  return labels[status] || String(status || "Task").replace(/_/g, " ");
+}
+
 function presentTask(view, id) {
   task.replaceChildren();
   task.hidden = !view;
   if (!view) return;
-  const labels = {
-    working: "Working", clarifying: "Clarifying", awaiting_confirmation: "Ready for confirmation",
-    submitted: "Submitted", verifying: "Verifying", completed: "Completed",
-    waiting_user: "Waiting for you", blocked: "Blocked", needs_attention: "Needs attention",
-    failed: "Failed", paused: "Paused", cancelled: "Cancelled",
-  };
-  element("h2", labels[view.status] || String(view.status || "Task").replace(/_/g, " "), task);
+  element("h2", taskStatusLabel(view.status), task);
   if (view.question) element("p", view.question, task);
   if (view.reason && view.reason !== view.question) element("p", view.reason, task);
   if (view.progress?.steps?.length) {
@@ -368,7 +413,7 @@ async function refresh() {
   const version = ++refreshVersion;
   const id = conversationId;
   await checkReceipt();
-  if (id !== conversationId) return;
+  if (id !== conversationId || version !== refreshVersion) return;
   let view;
   try { view = await get(conversationPath(id)); }
   catch (error) {
@@ -420,16 +465,28 @@ async function connect(value) {
     throw error;
   }
   sessionStorage.setItem("kada-device-token", token);
-  pending = new Map(JSON.parse(localStorage.getItem(scopedKey("pending")) || "[]"));
+  const key = scopedKey("pending");
+  const legacy = JSON.parse(localStorage.getItem(key) || "[]");
+  pending = new Map([
+    ...legacy.map(([id, messageId]) => [id, { messageId }]),
+    ...JSON.parse(sessionStorage.getItem(key) || "[]"),
+  ]);
   conversationId = localStorage.getItem(scopedKey("conversation")) || "";
+  listVersion++;
+  conversations.replaceChildren();
+  resetConversationView();
+  prompt.value = "";
+  fileInput.value = "";
+  selectFiles();
+  if (pending.has(conversationId)) displayReceipt({ state: "unknown" });
   field("connection").textContent = identity.deviceId;
   field("connection").hidden = false;
   pair.hidden = true;
   assistant.hidden = false;
   signout.hidden = false;
   status.textContent = "";
-  await refreshList();
   updateComposer();
+  await refreshList();
   await refresh();
 }
 
@@ -475,7 +532,61 @@ signout.addEventListener("click", () => {
 
 conversations.addEventListener("change", () => choose(conversations.value));
 field("new").addEventListener("click", () => { choose(""); prompt.focus(); });
+field("refresh-conversations").addEventListener("click", () => refreshList().catch(report));
+let returning = false;
+async function refreshOnReturn() {
+  if (!identity || document.hidden || returning || busy) return;
+  returning = true;
+  try { await refreshList(); }
+  catch (error) { report(error); }
+  finally { returning = false; }
+}
+document.addEventListener("visibilitychange", refreshOnReturn);
+window.addEventListener("focus", refreshOnReturn);
 fileInput.addEventListener("change", selectFiles);
+
+async function whileSending(run) {
+  busy = true;
+  conversations.disabled = true;
+  field("new").disabled = true;
+  updateComposer();
+  try { await run(); }
+  catch (error) { report(error); }
+  finally {
+    busy = false;
+    conversations.disabled = false;
+    field("new").disabled = false;
+    updateComposer();
+  }
+}
+
+async function sendPending(id, message) {
+  status.textContent = "Sending…";
+  let receipt;
+  try { receipt = await post(conversationPath(id) + "/messages", message); }
+  catch (error) {
+    if (error instanceof RequestError && error.status < 500 && error.status !== 401) {
+      setPending(id, null);
+      uncertain.hidden = true;
+      prompt.value = message.text;
+      if (message.attachmentIds.length) {
+        throw new RequestError(error.status, error.message + " Attach the files again to send this message.");
+      }
+    } else {
+      displayReceipt({ state: "unknown" });
+    }
+    throw error;
+  }
+  status.textContent = "";
+  if (receipt.state === "submitted") {
+    setPending(id, null);
+    uncertain.hidden = true;
+  } else {
+    displayReceipt(receipt);
+  }
+  await refreshList();
+  await refresh();
+}
 
 field("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -488,44 +599,27 @@ field("composer").addEventListener("submit", async (event) => {
     return;
   }
   const id = conversationId;
-  const path = conversationPath(id);
-  busy = true;
-  conversations.disabled = true;
-  field("new").disabled = true;
-  updateComposer();
-  status.textContent = selected.length ? "Uploading attachments…" : "Sending…";
-  try {
+  await whileSending(async () => {
+    if (selected.length) status.textContent = "Uploading attachments…";
     const attachmentIds = [];
-    for (const file of selected) attachmentIds.push(await upload(file, path));
-    const messageId = crypto.randomUUID();
-    setPending(id, messageId);
-    const receipt = await post(path + "/messages", { messageId, text, attachmentIds });
+    for (const file of selected) attachmentIds.push(await upload(file, conversationPath(id)));
+    const message = { messageId: crypto.randomUUID(), text, attachmentIds };
+    setPending(id, message);
     prompt.value = "";
     fileInput.value = "";
     selectFiles();
-    status.textContent = "";
-    if (receipt.state === "submitted") setPending(id, null);
-    else if (id === conversationId) displayReceipt(receipt);
-    await refreshList();
-    await refresh();
-  } catch (error) {
-    if (pending.has(id) && error instanceof RequestError && error.status < 500) setPending(id, null);
-    report(error);
-    if (pending.has(id)) displayReceipt({ state: "unknown" });
-  } finally {
-    busy = false;
-    conversations.disabled = false;
-    field("new").disabled = false;
-    updateComposer();
-  }
+    await sendPending(id, message);
+  });
 });
 
 let polling = false;
 setInterval(async () => {
   if (!identity || polling || document.hidden || busy) return;
+  const device = identity;
   polling = true;
   try { await refresh(); }
   catch (error) {
+    if (device !== identity) return;
     if (error instanceof RequestError && error.status === 401) {
       identity = null;
       sessionStorage.removeItem("kada-device-token");
