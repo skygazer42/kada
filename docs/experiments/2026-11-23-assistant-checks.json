@@ -14,8 +14,8 @@
     },
     "windowsFull": {
       "command": "npm run check",
-      "tests": 213,
-      "passed": 213,
+      "tests": 215,
+      "passed": 215,
       "failed": 0,
       "cancelled": 0,
       "skipped": 0
@@ -70,6 +70,12 @@
       "passed": 18,
       "failed": 0,
       "skipped": 0
+    },
+    "interruptedEffects": {
+      "routineRecoveredSameTask": true,
+      "verificationReportedInterruptedBash": true,
+      "observedBeforeRetry": true,
+      "duplicateWrites": 0
     },
     "nativeFileOpen": {
       "artifactTaskApi": true,

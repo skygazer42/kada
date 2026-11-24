@@ -1,9 +1,37 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { scriptedFixture, until } from "./helpers.js";
+import { recoveryTestTimeoutMs, scriptedFixture, startRecoveryWorker, until } from "./helpers.js";
 
 const budget = { maxEstimatedCostUsd: 1, maxDurationMs: 10_000, maxTotalTokens: 10_000 };
+
+for (const [scenario, expectedTool] of [["routine", "bash"], ["verification", "task_verify"]] as const) test(`SIGKILL after a ${scenario} effect recovers the same task and reads the effect once`, { timeout: recoveryTestTimeoutMs }, async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "kada-routine-effect-")));
+  const fixture = new URL("./fixtures/routine-effect-worker.ts", import.meta.url);
+  const labelLog = join(directory, "workspace", "labels.txt");
+  let worker = startRecoveryWorker(fixture, "create", directory, scenario);
+  try {
+    await worker.ready();
+    assert.equal(await worker.stop(), "SIGKILL");
+    assert.equal(await readFile(labelLog, "utf8"), "label-1\n");
+
+    worker = startRecoveryWorker(fixture, "recover", directory, scenario);
+    const recovered = await worker.complete();
+    assert.equal(recovered.type, "completed");
+    assert.equal(recovered.tasks.length, 1);
+    const [taskId] = recovered.tasks;
+    assert.deepEqual(recovered.history, scenario === "routine" ? [["claimed", taskId], ["started", taskId]] : []);
+    const preparation = scenario === "verification" ? [["task_prepare", false]] : [];
+    assert.deepEqual(recovered.tools, [...preparation, [expectedTool, true], ["read", false], ["task_submit", false]]);
+    assert.equal(await readFile(labelLog, "utf8"), "label-1\n");
+  } finally {
+    await worker.stop();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
 
 test("only changed artifacts notify across separate routine workspaces", async () => {
   let content = "same";

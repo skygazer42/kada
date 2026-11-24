@@ -63,13 +63,17 @@ export function verificationExtension(workspace: Workspace, confirmedCriteria = 
       if (!command || !inputs || !paths) throw new Error("Supply criterionId or all of command, inputs and outputs");
       const before = await api.memo("inputs", await hashFiles(workspace, inputs), ctx);
       const run = await api.executeTool("bash", { command, ...(args.timeout === undefined ? {} : { timeout: args.timeout }) }, ctx, { key: "verify", progress: false });
-      const after = await hashFiles(workspace, inputs);
-      const outputs = await hashFiles(workspace, paths);
+      const interruption = run.diagnostics.find(diagnostic => diagnostic.code === "interrupted");
+      const after = interruption ? before : await hashFiles(workspace, inputs);
+      const outputs = interruption ? [] : await hashFiles(workspace, paths);
       const exitCode = (run.structuredOutput as { exitCode?: number } | undefined)?.exitCode ?? null;
       const output = (run.structuredOutput as { output?: unknown } | undefined)?.output;
-      const stable = JSON.stringify(before) === JSON.stringify(after);
+      const stable = !interruption && JSON.stringify(before) === JSON.stringify(after);
+      const detail = interruption ? `${interruption.message}. Inspect actual state before retrying.`
+        : stable ? "Pi bash receipt with observed file hashes. An agent-run check covers only its declared assertions."
+          : "Inputs changed while verification ran. Inspect the inputs and verify again.";
       const receipt: CheckReceipt = { id, command, exitCode, passed: !run.isError && exitCode === 0 && stable,
-        inputs: after, outputs, outputPreview: typeof output === "string" ? output.slice(-2000) : "", detail: stable ? "Actual Pi bash receipt; file hashes observed after the check. This is an agent-run check, not proof of every semantic claim." : "Inputs changed while verification ran; inspect and verify again." };
+        inputs: after, outputs, outputPreview: typeof output === "string" ? output.slice(-2000) : "", detail };
       await api.commit(async tx => {
         const state = await tx.doc(GoalDoc);
         state.proofs ??= {};
