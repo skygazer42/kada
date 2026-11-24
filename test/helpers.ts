@@ -11,6 +11,30 @@ import type { Extension } from "@earendil-works/pi-durable";
 
 export function hasTool(context: TranscriptContext, name: string): boolean { return getCurrentTools(context.messages).some(t => t.name === name); }
 
+export function fakeRoutineClock(start: number) {
+  let now = start;
+  const pending = new Set<{ at: number; callback: () => void }>();
+  return {
+    now: () => now,
+    setTimer(callback: () => void, delay: number) {
+      const timer = { at: now + delay, callback };
+      pending.add(timer);
+      return () => { pending.delete(timer); };
+    },
+    advanceTo(at: number) {
+      now = at;
+      while (true) {
+        const due = [...pending].filter(timer => timer.at <= now).sort((a, b) => a.at - b.at);
+        if (!due.length) return;
+        for (const timer of due) if (pending.delete(timer)) timer.callback();
+      }
+    },
+    waitingAt(at: number) {
+      return [...pending].some(timer => timer.at === at);
+    },
+  };
+}
+
 export async function demoFixture(delayMs = 0, maxDurationMs = 30_000) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "pi-harness-")));
   const workspace = join(directory, "workspace");

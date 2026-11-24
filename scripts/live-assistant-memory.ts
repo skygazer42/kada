@@ -5,16 +5,19 @@ import { join,resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { Agent, request } from 'node:http';
 import { createHash,randomUUID } from 'node:crypto';
-import { createModels,createProvider } from '@earendil-works/pi-ai';
+import { createModels,createProvider,Type } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+import { defineExtension, hook, ToolTask } from '@earendil-works/pi-durable';
 import { cloudModels } from '../src/models.js';
 import { serve } from '../src/server.js';
 import { createClient, type TaskStatus } from '../src/client.js';
 import { ChatSession } from '../src/chat.js';
 import { conversationAnswer } from '../src/conversation.js';
-import { until } from '../test/helpers.js';
+import type { Routine } from '../src/routines.js';
+import { fakeRoutineClock, until } from '../test/helpers.js';
 
 let apiKey = process.env.SILICONFLOW_API_KEY ?? '';
+delete process.env.SILICONFLOW_API_KEY;
 if (!apiKey) {
   assert(process.stdin.isTTY || process.argv.includes('--credential-stdin'),'Set SILICONFLOW_API_KEY or use a terminal.');
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
@@ -57,7 +60,18 @@ await writeFile(join(beta,'AGENTS.md'),'日报回复语言 language 偏好：英
 const socket=createServer();await new Promise<void>(done=>socket.listen(0,'127.0.0.1',done));
 const port=(socket.address() as {port:number}).port;await new Promise<void>(done=>socket.close(()=>done()));
 const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:100_000,review:false,web:false,discovery:true};
-let server=await serve(config,{models,discovery:{home,timezone:'America/New_York'}});
+const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
+const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
+  beforeTool(call) {
+    const allowed = (call.name === 'read' && call.arguments.path === 'reports/inventory.txt') ||
+      (call.name === 'write' && call.arguments.path === 'routine-summary.json') || call.name === 'task_submit';
+    if (!allowed) return {block:'Use read on reports/inventory.txt, write routine-summary.json, then task_submit.'};
+  },
+})]});
+const routineOnly = process.env.KADA_LIVE_CASES === 'F11';
+const serverOptions = {models, discovery:{home,timezone:'America/New_York'}, routineClock,
+  ...(routineOnly ? {extensions:[routineScope]} : {})};
+let server=await serve(config,serverOptions);
 const client=createClient(config);
 const results:Record<string,{passed:boolean;detail?:string}>={};
 const evidence: Record<string, unknown> = {};
@@ -129,7 +143,7 @@ try {
       assert.deepEqual(bytes,Buffer.from(expected),`exact artifact bytes: ${name}`);
       assert(files.some(file=>file.path===path && file.state==='verified' && file.bytes===bytes.length && file.sha256===createHash('sha256').update(bytes).digest('hex')));
     }
-    await server.close();server=await serve(config,{models,discovery:{home,timezone:'America/New_York'}});
+    await server.close();server=await serve(config,serverOptions);
     const terminalOutput: string[] = [];
     const terminal = new ChatSession(createClient(config),event=>terminalOutput.push(event.text));
     await terminal.handle('/tasks pending');
@@ -192,17 +206,59 @@ try {
     evidence.disconnect = {taskId:status.id,requestId:recovered.requestId,clientClosedDuringRequest:true,modelRequests:requests-before,assistantReplies:1};
   });
   await check('F11-F12-reminder-and-change-aware-routine',async()=>{
-    const parsed=await models.complete(model,{messages:[{role:'user',timestamp:Date.now(),content:'Return ONLY strict JSON: {"kind":"once","at":"2026-12-01T17:00:00-05:00"}. This is a synthetic reminder at 5pm New York on December 1, 2026. No markdown.'}]},{maxTokens:100});
-    const text=parsed.content.filter(part=>part.type==='text').map(part=>part.text).join('');
-    const schedule=JSON.parse(text);assert.equal(Date.parse(schedule.at),Date.parse('2026-12-01T22:00:00Z'));
-    const rule=await server.runtime.routines.create({action:'notify',objective:'Synthetic reminder',schedule:{kind:'once',at:new Date(Date.now()+300).toISOString()}});
-    await until(()=>server.runtime.notifications(),events=>events.some(event=>event.routineId===rule.id));
-    await writeFile(join(alpha,'routine-summary.json'),'["synthetic change"]');
-    for(const day of ['01','02']) {
-      const task=await server.runtime.create('Read routine-summary.json. Call task_submit with summary "Directory summary" and artifacts ["routine-summary.json"]. Do not modify files.',alpha,[],{routineOccurrenceId:'live-summary/1/2026-12-'+day+'T22:00:00.000Z',notifyOnChange:true});tasks.add(task.id);
-      await until(()=>server.runtime.status(task.id),status=>status.status==='completed',90_000);
+    const parsed = await models.complete(model, {
+      messages: [{role:'user',timestamp:Date.now(),content:'Remind me at 5 PM in New York on December 1, 2026. Call reminder_time with the corresponding ISO 8601 datetime and its UTC offset.'}],
+      tools: [{name:'reminder_time',description:'Return a single reminder schedule with an explicit UTC offset.',
+        parameters:Type.Object({kind:Type.Literal('once'),at:Type.String()})}],
+    }, {maxTokens:512,toolChoice:{type:'function',function:{name:'reminder_time'}}});
+    const proposal = parsed.content.find(part=>part.type==='toolCall' && part.name==='reminder_time');
+    evidence.reminderParse = {stopReason:parsed.stopReason,tokens:parsed.usage.totalTokens,toolReturned:!!proposal};
+    assert(proposal?.type==='toolCall');
+    const schedule = proposal.arguments;
+    const due = Date.parse('2026-12-01T22:00:00Z');
+    assert.equal(schedule.kind,'once');
+    assert.equal(typeof schedule.at,'string');
+    assert(/(?:Z|[+-]\d{2}:\d{2})$/.test(schedule.at as string));
+    assert.equal(Date.parse(schedule.at as string),due);
+    evidence.reminder = {parsedAt:new Date(due).toISOString(),parseTokens:parsed.usage.totalTokens};
+    const reminder = await client.request<Routine>('/v1/routines','POST',{action:'notify',objective:'Synthetic reminder',schedule});
+    await until(async()=>routineClock.waitingAt(due),Boolean);
+    assert(!(await server.runtime.notifications()).some(event=>event.routineId===reminder.id));
+    routineClock.advanceTo(due);
+    const reminderEvents = await until(()=>server.runtime.notifications(),events=>events.some(event=>event.routineId===reminder.id));
+    assert.deepEqual(reminderEvents.filter(event=>event.routineId===reminder.id).map(event=>event.at),[due]);
+    assert.deepEqual((await server.runtime.routines.history(reminder.id)).filter(event=>event.status==='notified').map(event=>event.scheduledAt),[new Date(due).toISOString()]);
+    evidence.reminder = {...(evidence.reminder as object),routineId:reminder.id,deliveredAt:new Date(due).toISOString(),notifications:1};
+
+    const inputPath = join(alpha,'reports','inventory.txt');
+    await mkdir(join(alpha,'reports'),{recursive:true});
+    const rule = await client.request<Routine>('/v1/routines','POST',{
+      action:'task',workspace:alpha,schedule:{kind:'daily',time:'17:00',timeZone:'America/New_York'},notifyOnChange:true,
+      objective:'Use exactly these three tools in order. 1. Call read with path "reports/inventory.txt". Each nonempty line is already the name of a directory entry. 2. Call write with path "routine-summary.json" and content containing the compact JSON object {"entries":[...names from the file in order...]}. 3. Call task_submit with summary "Inventory complete" and artifacts ["routine-summary.json"]. No shell, directory listing, additional files, or further reads are required.',
+      acceptance:[{type:'file_exists',path:'routine-summary.json'}],
+    });
+    const occurrences = [];
+    for(const [day,entries,notifications] of [[2,['alpha'],1],[3,['alpha'],1],[4,['alpha','beta'],2]] as const) {
+      const input = entries.join('\n');
+      await writeFile(inputPath,input);
+      const at = Date.UTC(2026,11,day,22);
+      await until(async()=>routineClock.waitingAt(at),Boolean);
+      routineClock.advanceTo(at);
+      const history = await until(()=>server.runtime.routines.history(rule.id),rows=>rows.some(row=>Date.parse(row.scheduledAt)===at && ['started','failed','budget_exhausted'].includes(row.status)));
+      const occurrence = history.find(row=>Date.parse(row.scheduledAt)===at && row.status==='started');
+      assert(occurrence?.taskId,'expected a task created by the Pi routine');
+      tasks.add(occurrence.taskId);
+      const status = await until(()=>server.runtime.status(occurrence.taskId!),row=>['completed','failed','budget_limited','waiting_user','needs_attention'].includes(row.status),90_000);
+      assert.equal(status.status,'completed');
+      assert.deepEqual(JSON.parse(await readFile(join(alpha,'routine-summary.json'),'utf8')),{entries:[...entries]});
+      assert.equal(await readFile(inputPath,'utf8'),input);
+      const delivered = (await server.runtime.notifications()).filter(event=>event.routineId===rule.id && event.event==='completed');
+      assert.equal(delivered.length,notifications);
+      const {estimatedCostUsd,priceKnown} = status.budget;
+      occurrences.push({id:occurrence.id,taskId:occurrence.taskId,scheduledAt:occurrence.scheduledAt,notifications,
+        usage:{...status.budget,estimatedCostUsd:priceKnown ? estimatedCostUsd : null}});
     }
-    assert.equal((await server.runtime.notifications()).filter(event=>event.routineId==='live-summary' && event.event==='completed').length,1);
+    evidence.routine = {ruleId:rule.id,occurrences};
   });
   await check('F13-F15-mobile-reconnect-attachment-delivery',async()=>{
     const paired=await client.request<{token:string}>('/v1/remote/devices','POST',{accountId:'live-owner',deviceId:'live-phone'});
@@ -243,7 +299,6 @@ try {
   for(const id of tasks) {try {const state=await server.runtime.status(id);usage.push({id,tokens:state.budget.totalTokens,input:state.budget.inputTokens,output:state.budget.outputTokens,cached:state.budget.cachedTokens});} catch { /* A failed admission has no task ledger. */ }}
   await server.close();
   const report={at:new Date().toISOString(),model:modelId,customCatalog:!original,selection:selectedCases,fullSuite:selectedCases.length===0,passed:Object.values(results).every(result=>result.passed),maxRequests:32,modelRequests:requests,maxOutputTokensPerRequest:1536,estimatedCostUsd:null,results,evidence,tasks:usage,totalTaskTokens:usage.reduce((sum,item)=>sum+item.tokens,0),note:'Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate.'};
-  await mkdir(resolve('docs/experiments'),{recursive:true});
   await writeFile(join(directory,'result.json'),JSON.stringify(report,null,2)+'\n');
   console.log(`Evidence: ${join(directory,'result.json')}`);
   console.log(JSON.stringify({passed:report.passed,requests,totalTaskTokens:report.totalTaskTokens}));

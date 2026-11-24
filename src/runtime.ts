@@ -28,7 +28,7 @@ import { conversationAnswer, conversationInstructions } from "./conversation.js"
 import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ProviderSettings } from "./provider-settings.js";
 import { McpTools, type McpPin } from "./mcp-tools.js";
-import { LocalRoutines } from "./routines.js";
+import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
 import { taskHandoff } from "./task-view.js";
@@ -96,7 +96,7 @@ interface Active {
   /** Disposable cache derived from Pi entries; rebuilt from storage after reopening. */
   compactionCounts: Map<Conversation["id"], { last?: EntryId; count: number }>;
 }
-export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 
 /** Each top-level task owns a Pi session. The host, rather than the model, decides completion. */
 export class LocalRuntime {
@@ -116,7 +116,7 @@ export class LocalRuntime {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({dataDir:config.dataDir,execute:async (occurrence,signal) => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,execute:async (occurrence,signal) => {
       signal.throwIfAborted();
       if (occurrence.action === 'notify') { await this.inbox.notify(occurrence); return {status:'notified'}; }
       const task = await this.create(occurrence.objective,occurrence.workspace,occurrence.acceptance,{id:occurrence.taskId,budget:occurrence.budget,routineOccurrenceId:occurrence.id,notifyOnChange:occurrence.notifyOnChange,signal});

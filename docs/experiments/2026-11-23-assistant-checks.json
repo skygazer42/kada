@@ -54,6 +54,13 @@
       "foldChoiceExplained": true,
       "receiptRetainsAdjustment": true
     },
+    "routineRegression": {
+      "command": "node --import tsx --test test/routines.test.ts test/routine-admission.test.ts",
+      "tests": 18,
+      "passed": 18,
+      "failed": 0,
+      "skipped": 0
+    },
     "nativeFileOpen": {
       "artifactTaskApi": true,
       "emptyFileChinesePath": true,
@@ -77,6 +84,8 @@
     "memory": "2026-11-23-assistant-memory-focused.json",
     "remote": "2026-11-23-assistant-remote-final.json",
     "handoffRoutinesDelegation": "2026-11-23-assistant-memory-attempt-2.json",
+    "reminderAndRoutine": "2026-11-23-assistant-live-routines.json",
+    "reminderAndRoutinePriorAttempts": "2026-11-23-assistant-live-routines-attempts.json",
     "nativePiComparison": "2026-11-23-native-pi-baseline.json",
     "memoryHandoffComparison": "2026-11-23-memory-handoff-comparison.json",
     "concurrentHandoff": "2026-11-23-assistant-live-handoff.json",

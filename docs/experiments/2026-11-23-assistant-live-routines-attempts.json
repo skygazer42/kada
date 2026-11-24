@@ -1,0 +1,74 @@
+{
+  "attempts": [
+    {
+      "at": "2026-11-24T04:25:42.900Z",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "customCatalog": false,
+      "selection": [
+        "F11"
+      ],
+      "fullSuite": false,
+      "passed": false,
+      "maxRequests": 32,
+      "modelRequests": 1,
+      "maxOutputTokensPerRequest": 1536,
+      "estimatedCostUsd": null,
+      "results": {
+        "F11-F12-reminder-and-change-aware-routine": {
+          "passed": false,
+          "detail": "operation_failed"
+        }
+      },
+      "evidence": {},
+      "tasks": [],
+      "totalTaskTokens": 0,
+      "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+    },
+    {
+      "at": "2026-11-24T04:31:56.262Z",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "customCatalog": false,
+      "selection": [
+        "F11"
+      ],
+      "fullSuite": false,
+      "passed": false,
+      "maxRequests": 32,
+      "modelRequests": 14,
+      "maxOutputTokensPerRequest": 1536,
+      "estimatedCostUsd": null,
+      "results": {
+        "F11-F12-reminder-and-change-aware-routine": {
+          "passed": false,
+          "detail": "state_timeout"
+        }
+      },
+      "evidence": {
+        "reminderParse": {
+          "stopReason": "toolUse",
+          "tokens": 564,
+          "toolReturned": true
+        },
+        "reminder": {
+          "parsedAt": "2026-12-01T22:00:00.000Z",
+          "parseTokens": 564,
+          "routineId": "de54378b-b020-4c7d-b406-46d6366d5d56",
+          "deliveredAt": "2026-12-01T22:00:00.000Z",
+          "notifications": 1
+        }
+      },
+      "tasks": [
+        {
+          "id": "c272eea0-3430-89a0-ab5c-e97992762886",
+          "tokens": 65484,
+          "input": 7041,
+          "output": 1227,
+          "cached": 57216
+        }
+      ],
+      "totalTaskTokens": 65484,
+      "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+    }
+  ],
+  "note": "First attempt failed before scheduling. Second delivered one correctly parsed reminder; recurring task attempted Bash on the Windows fixture, where Bash was unavailable, and timed out. The successful run restricted fixture tools to native read/write and task_submit."
+}

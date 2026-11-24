@@ -11,6 +11,7 @@ import { LocalRoutines, nextRoutineTime, type RoutineInput, type RoutineOccurren
 import {LocalRuntime} from '../src/runtime.js';
 import {createModels} from '@earendil-works/pi-ai';
 import {mkdir} from 'node:fs/promises';
+import {fakeRoutineClock} from './helpers.js';
 
 const start = Date.parse("2026-11-23T00:00:00Z");
 const minute = 60_000;
@@ -31,29 +32,7 @@ for(const missedPolicy of ['run_once','skip'] as const) test(`R03 a live Pi slee
   } finally {await routines.close();}
 });
 
-function fakeClock() {
-  let now = start;
-  const pending = new Set<{ at: number; callback: () => void }>();
-  return {
-    now: () => now,
-    setTimer(callback: () => void, delay: number) {
-      const timer = { at: now + delay, callback };
-      pending.add(timer);
-      return () => { pending.delete(timer); };
-    },
-    advanceTo(at: number) {
-      now = at;
-      while (true) {
-        const due = [...pending].filter((timer) => timer.at <= now).sort((a, b) => a.at - b.at);
-        if (!due.length) return;
-        for (const timer of due) if (pending.delete(timer)) timer.callback();
-      }
-    },
-    waitingAt(at: number) {
-      return [...pending].some((timer) => timer.at === at);
-    },
-  };
-}
+const fakeClock = () => fakeRoutineClock(start);
 
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
   for (let checks = 0; checks < 200; checks += 1) {
@@ -102,6 +81,25 @@ test("R01 delivers a moved reminder once and leaves a cancelled reminder inactiv
   } finally {
     await routines.close();
   }
+});
+
+test("R01 the runtime routes the injected clock's due reminder to the inbox", async (t) => {
+  const dataDir = await tempDir(t);
+  const clock = fakeClock();
+  const runtime = new LocalRuntime({ dataDir, port:4317, maxSubagents:1, maxDurationMs:30_000 }, {
+    models:createModels(), routineClock:clock,
+  });
+  try {
+    const rule = await runtime.routines.create(reminder("runtime-clock", first));
+    await until(() => clock.waitingAt(first));
+    assert.deepEqual(await runtime.notifications(), []);
+    clock.advanceTo(first);
+    await until(async () => (await runtime.routines.history(rule.id)).some(event => event.status === "notified"));
+    const notifications = await runtime.notifications();
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0]?.at, first);
+    assert.equal(notifications[0]?.routineId, rule.id);
+  } finally { await runtime.close(); }
 });
 
 async function killFixture(dataDir: string, phase: "sleeping" | "claimed"): Promise<void> {

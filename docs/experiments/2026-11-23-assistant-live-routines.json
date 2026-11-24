@@ -1,0 +1,114 @@
+{
+  "at": "2026-11-24T04:36:47.852Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "F11"
+  ],
+  "fullSuite": false,
+  "passed": true,
+  "maxRequests": 32,
+  "modelRequests": 10,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F11-F12-reminder-and-change-aware-routine": {
+      "passed": true
+    }
+  },
+  "evidence": {
+    "reminderParse": {
+      "stopReason": "toolUse",
+      "tokens": 839,
+      "toolReturned": true
+    },
+    "reminder": {
+      "parsedAt": "2026-12-01T22:00:00.000Z",
+      "parseTokens": 839,
+      "routineId": "f05114ad-df53-4f45-9b07-7fb26c716491",
+      "deliveredAt": "2026-12-01T22:00:00.000Z",
+      "notifications": 1
+    },
+    "routine": {
+      "ruleId": "aea750c8-a47d-484a-8021-dd0a8755d056",
+      "occurrences": [
+        {
+          "id": "aea750c8-a47d-484a-8021-dd0a8755d056/1/2026-12-02T22:00:00.000Z",
+          "taskId": "8a86908d-ae2d-87bb-a383-9c16bfb01cbf",
+          "scheduledAt": "2026-12-02T22:00:00.000Z",
+          "notifications": 1,
+          "usage": {
+            "totalTokens": 14169,
+            "cachedTokens": 9088,
+            "cacheWriteTokens": 0,
+            "inputTokens": 4889,
+            "outputTokens": 192,
+            "estimatedCostUsd": null,
+            "priceKnown": false,
+            "tokenLimit": 100000,
+            "costLimit": 1
+          }
+        },
+        {
+          "id": "aea750c8-a47d-484a-8021-dd0a8755d056/1/2026-12-03T22:00:00.000Z",
+          "taskId": "10be8d70-34da-8c2a-b580-1a7280062d12",
+          "scheduledAt": "2026-12-03T22:00:00.000Z",
+          "notifications": 1,
+          "usage": {
+            "totalTokens": 14203,
+            "cachedTokens": 9088,
+            "cacheWriteTokens": 0,
+            "inputTokens": 4902,
+            "outputTokens": 213,
+            "estimatedCostUsd": null,
+            "priceKnown": false,
+            "tokenLimit": 100000,
+            "costLimit": 1
+          }
+        },
+        {
+          "id": "aea750c8-a47d-484a-8021-dd0a8755d056/1/2026-12-04T22:00:00.000Z",
+          "taskId": "388d06c6-872a-89b3-82e2-08946970609e",
+          "scheduledAt": "2026-12-04T22:00:00.000Z",
+          "notifications": 2,
+          "usage": {
+            "totalTokens": 14223,
+            "cachedTokens": 9088,
+            "cacheWriteTokens": 0,
+            "inputTokens": 4912,
+            "outputTokens": 223,
+            "estimatedCostUsd": null,
+            "priceKnown": false,
+            "tokenLimit": 100000,
+            "costLimit": 1
+          }
+        }
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "id": "8a86908d-ae2d-87bb-a383-9c16bfb01cbf",
+      "tokens": 14169,
+      "input": 4889,
+      "output": 192,
+      "cached": 9088
+    },
+    {
+      "id": "10be8d70-34da-8c2a-b580-1a7280062d12",
+      "tokens": 14203,
+      "input": 4902,
+      "output": 213,
+      "cached": 9088
+    },
+    {
+      "id": "388d06c6-872a-89b3-82e2-08946970609e",
+      "tokens": 14223,
+      "input": 4912,
+      "output": 223,
+      "cached": 9088
+    }
+  ],
+  "totalTaskTokens": 42595,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}
