@@ -31,6 +31,19 @@
       "targetedRerunPassed": true,
       "buildPassed": true
     },
+    "windowsFollowup": {
+      "command": "npm run check",
+      "tests": 218,
+      "passed": 217,
+      "failed": 1,
+      "cancelled": 0,
+      "skipped": 0,
+      "failedTestWasRunBeforeFix": "terminal delivery preserves usage and shows unknown provider prices accurately",
+      "terminalRetestPassed": 8,
+      "subagentRecoveryPassedInSuite": true,
+      "typecheckPassedAfterFix": true,
+      "buildPassedAfterFix": true
+    },
     "typecheck": true,
     "build": true,
     "liveScriptsTypecheck": true,
@@ -106,6 +119,19 @@
     "A": "A01-A02 passed",
     "S": "S01-S02 passed"
   },
+  "skillCapturePublicListRepricing": {
+    "provider": "siliconflow",
+    "model": "deepseek-ai/DeepSeek-V3.2",
+    "priceObservedOn": "2026-11-23",
+    "source": "https://www.siliconflow.cn/pricing",
+    "currency": "CNY",
+    "unitTokens": 1000000,
+    "rates": { "input": 4, "output": 6, "cacheRead": 0.4 },
+    "firstAttemptPersistedUsage": { "input": 23408, "output": 2531, "cacheRead": 55936, "cacheWrite": 0, "totalTokens": 81875 },
+    "usage": { "input": 61513, "output": 10175, "cacheRead": 153344, "cacheWrite": 0, "totalTokens": 225032 },
+    "publicListEstimate": 0.3684396,
+    "actualAmount": null
+  },
   "live": {
     "tools": "2026-11-23-assistant-tools.json",
     "memory": "2026-11-23-assistant-memory-focused.json",
@@ -136,6 +162,7 @@
     "Earlier parallel Windows tests failed; the current serial full suite passes",
     "In the corrected synthetic memory and handoff comparison, only Pi completed; completion-rate and cost benefits for real tasks are unproven",
     "Naturally hour-scale successful execution is unverified",
+    "Windows command cancellation on pause missed the fixture deadline once; stricter follow-up passed but intermittent cause is unresolved",
     "Usage is checked at request boundaries and may overshoot within an admitted request"
   ]
 }

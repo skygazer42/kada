@@ -216,7 +216,9 @@ export class ChatSession {
       const key = `goal:${goal.revision}:${goal.candidate.id}`;
       if (!this.printed.has(key)) {
         this.printed.add(key);
-        this.info(`已提交结果。\n${verificationText(status)}\n估算费用：$${status.budget.estimatedCostUsd.toFixed(4)}；累计 token：${status.budget.totalTokens}（含缓存读取 ${status.budget.cachedTokens}）。`);
+        const { priceKnown, estimatedCostUsd, totalTokens, cachedTokens } = status.budget;
+        const cost = priceKnown === false ? "费用未知。" : `估算费用 $${estimatedCostUsd.toFixed(4)}。`;
+        this.info(`已提交结果。\n${verificationText(status)}\n${cost}累计 ${totalTokens} token（含缓存读取 ${cachedTokens}）。`);
         this.emit({ kind: "answer", text: goal.candidate.summary });
       }
     }

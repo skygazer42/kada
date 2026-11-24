@@ -76,9 +76,9 @@ test("a same-version daemon without ordinary-chat support is rejected before any
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); await f.close(); }
 });
 
-async function chatFixture(delayMs = 0) {
+async function chatFixture(delayMs = 0, provider = "chat-test") {
   const f = await demoFixture();
-  const faux = fauxProvider({ provider: "chat-test", models: [{ id: "scripted" }] });
+  const faux = fauxProvider({ provider, models: [{ id: "scripted" }] });
   faux.setResponses(Array.from({ length: 32 }, () => async (context, options) => {
     if (delayMs) await setTimeout(delayMs, undefined, { signal: options?.signal });
     if (context.messages.some(m => m.role === "system" && m.toolsAdded?.some(t => t.name === "review_result"))) {
@@ -91,11 +91,27 @@ async function chatFixture(delayMs = 0) {
     return fauxAssistantMessage(fauxToolCall("task_submit", { summary: users.length > 1 ? `记得：${code ?? "没有代号"}` : `已记住 ${code ?? "新任务"}`, artifacts: [], criteria: [{ id: 1, status: "passed", evidence: `答复包含 ${code}` }] }), { stopReason: "toolUse" });
   }));
   const models = createModels(); models.setProvider(faux.provider);
-  const config = { ...f.config, port: await freePort(), model: { provider: "chat-test", modelId: "scripted" } };
+  const config = { ...f.config, port: await freePort(), model: { provider, modelId: "scripted" } };
   const server = await serve(config, { models });
   const client = createClient(config);
   return { ...f, config, server, client, async close() { await server.close(); await f.close(); } };
 }
+
+test("terminal delivery preserves usage and shows unknown provider prices accurately", async () => {
+  const f = await chatFixture(0, "siliconflow");
+  const events: ChatEvent[] = [];
+  const chat = new ChatSession(f.client, event => events.push(event));
+  try {
+    await chat.handle("/run 记住代号 CODE_71");
+    const message = await until(async () => {
+      await chat.poll();
+      return events.find(event => event.text.startsWith("已提交结果。"));
+    }, Boolean);
+    assert.match(message!.text, /费用未知/);
+    assert.match(message!.text, /累计 \d+ token/);
+    assert.doesNotMatch(message!.text, /\$0\.0000/);
+  } finally { await f.close(); }
+});
 
 test("terminal messages retain context and slash commands select and control tasks", async () => {
   const f = await chatFixture();

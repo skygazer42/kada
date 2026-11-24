@@ -54,7 +54,7 @@ test("native commands do not inherit daemon credentials and Pi cancels a running
   process.env.PRIVATE_FOR_EXECUTION_TEST = "should-not-reach-command";
   const f = await scriptedFixture(c => {
     const done = c.messages.filter(m => m.role === "toolResult");
-    if (!done.length) return call("bash", { command: "node -e 'const fs=require(\"node:fs\");fs.writeFileSync(\"process.json\",JSON.stringify({pid:process.pid,secret:process.env.PRIVATE_FOR_EXECUTION_TEST??null}));setTimeout(()=>{},300000)'", timeout: 300 });
+    if (!done.length) return call("bash", { command: "node -e 'const fs=require(\"node:fs\");fs.writeFileSync(\"process.json\",JSON.stringify({pid:process.pid,secret:process.env.PRIVATE_FOR_EXECUTION_TEST??null}));setTimeout(()=>fs.writeFileSync(\"natural-exit.txt\",\"exited\"),30000)'", timeout: 45 });
     if (!done.some(m => m.toolName === "read")) return call("read", { path: "process.json" });
     return call("task_submit", { summary: "Inspected the interrupted command state.", artifacts: ["process.json"] });
   });
@@ -64,6 +64,7 @@ test("native commands do not inherit daemon credentials and Pi cancels a running
     assert.equal(data.secret, null);
     await f.runtime.pause(task.id);
     await until(async () => { try { process.kill(data.pid, 0); return true; } catch { return false; } }, alive => !alive);
+    await assert.rejects(readFile(join(f.workspace, "natural-exit.txt")), { code: "ENOENT" });
     await f.runtime.resume(task.id);
     const status = await until(() => f.runtime.status(task.id), s => s.status === "completed");
     assert.equal(status.messages.filter(m => m.role === "assistant").flatMap(m => m.content).filter(b => b.type === "toolCall" && b.name === "bash").length, 1);
