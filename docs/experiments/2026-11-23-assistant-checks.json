@@ -20,6 +20,17 @@
       "cancelled": 0,
       "skipped": 0
     },
+    "windowsPrecheck": {
+      "command": "npm run check",
+      "tests": 217,
+      "passed": 216,
+      "failed": 0,
+      "cancelled": 1,
+      "skipped": 0,
+      "cancelledTest": "SIGKILL during two live subagents recovers without duplicating children",
+      "targetedRerunPassed": true,
+      "buildPassed": true
+    },
     "typecheck": true,
     "build": true,
     "liveScriptsTypecheck": true,
@@ -102,6 +113,7 @@
     "handoffRoutinesDelegation": "2026-11-23-assistant-memory-attempt-2.json",
     "reminderAndRoutine": "2026-11-23-assistant-live-routines.json",
     "reminderAndRoutinePriorAttempts": "2026-11-23-assistant-live-routines-attempts.json",
+    "routinePrecheck": "2026-11-23-live-routine-precheck.json",
     "nativePiComparison": "2026-11-23-native-pi-baseline.json",
     "memoryHandoffComparison": "2026-11-23-memory-handoff-comparison.json",
     "memoryHandoffComparisonRetest": "2026-11-23-memory-handoff-comparison-retest.json",

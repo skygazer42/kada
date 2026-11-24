@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTask, Harness, type ConversationId, type Cursor, type Tx } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { acceptanceChecks, type AcceptanceCheck } from "./checks.js";
+import { localEnvironment, shellEnvironment } from "./execution.js";
 import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, routineTiming, type RoutineTiming, type RoutineSchedule } from "./routine-schedule.js";
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
@@ -27,6 +28,7 @@ export type RoutineInput = {
   budgetPolicy?: "pause" | "skip";
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
+  precheck?: { command: string[] };
 };
 
 type RoutineDefinition = Omit<RoutineInput, "id" | "acceptance" | "missedPolicy" | "budgetPolicy" | "notifyOnChange"> & {
@@ -49,10 +51,15 @@ export type RoutineExecution =
   | { status?: "started"; taskId: string }
   | { status: "notified" | "budget_exhausted" };
 
+type PrecheckResult =
+  | { status: "changed" | "unchanged"; sha256: string }
+  | { status: "failed" | "interrupted"; detail: string };
+
 type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt"> & {
   status: "claimed" | "notified" | "started" | "budget_exhausted" | "skipped" | "failed";
   taskId?: string;
   timing?: RoutineTiming;
+  precheck?: PrecheckResult;
 };
 
 export type RoutineOccurrenceRecord = Receipt & {
@@ -98,7 +105,8 @@ export type Routine = RoutineDefinition & {
 
 type StoredRoutine = Routine & {
   timerId?: Parameters<Harness["abortTask"]>[0];
-  claim?: RoutineOccurrence;
+  claim?: RoutineOccurrence & { precheckResult?: PrecheckResult };
+  lastPrecheckSha256?: string;
 };
 
 export interface LocalRoutineOptions {
@@ -133,7 +141,7 @@ function snapshot<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
-function toRoutine({ timerId: _timer, claim: _claim, ...routine }: StoredRoutine): Routine {
+function toRoutine({ timerId: _timer, claim: _claim, lastPrecheckSha256: _baseline, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
@@ -176,6 +184,13 @@ function definition(input: RoutineInput): RoutineDefinition {
   if (input.notifyOnChange !== undefined && typeof input.notifyOnChange !== "boolean") {
     throw new RoutineError(400, "The notifyOnChange setting must be a boolean.");
   }
+  const precheck = input.precheck;
+  if (precheck !== undefined && (!precheck || input.action !== "task" || !input.workspace ||
+    !Array.isArray(precheck.command) || precheck.command.length > 64 ||
+    typeof precheck.command[0] !== "string" || !precheck.command[0].trim() ||
+    precheck.command.some(arg => typeof arg !== "string" || arg.includes("\0")) || precheck.command.join("").length > 16_000)) {
+    throw new RoutineError(400, "A precheck requires a task workspace and a command argument array.");
+  }
   const budget = input.budget;
   if (budget !== undefined && (
     !budget || input.action !== "task" ||
@@ -188,12 +203,13 @@ function definition(input: RoutineInput): RoutineDefinition {
   return {
     action: input.action,
     objective: input.objective.trim(),
-    ...(input.workspace ? { workspace: input.workspace.trim() } : {}),
+    ...(input.workspace ? { workspace: precheck ? resolve(input.workspace.trim()) : input.workspace.trim() } : {}),
     acceptance,
     schedule,
     missedPolicy,
     budgetPolicy,
     notifyOnChange: input.notifyOnChange ?? false,
+    ...(precheck ? { precheck: { command: [...precheck.command] } } : {}),
     ...(budget ? {
       budget: {
         maxEstimatedCostUsd: budget.maxEstimatedCostUsd,
@@ -222,7 +238,7 @@ function occurrenceFor(rule: StoredRoutine, at: number): RoutineOccurrence {
   const scheduledAt = new Date(at).toISOString();
   const id = [rule.id, rule.revision, scheduledAt].join("/");
   const taskId=taskIdFor(id);
-  const { action, objective, workspace, acceptance, budget, budgetPolicy, notifyOnChange } = rule;
+  const { action, objective, workspace, acceptance, budget, budgetPolicy, notifyOnChange, precheck } = rule;
   const timing=routineTiming(rule.schedule,at);
   return {
     id, routineId: rule.id, revision: rule.revision, scheduledAt, taskId, action, objective, acceptance, budgetPolicy,
@@ -230,6 +246,7 @@ function occurrenceFor(rule: StoredRoutine, at: number): RoutineOccurrence {
     ...(timing?.adjustment ? {timing} : {}),
     ...(workspace ? { workspace } : {}),
     ...(budget ? { budget } : {}),
+    ...(precheck ? { precheck } : {}),
   };
 }
 
@@ -240,6 +257,7 @@ function endSchedule(rule: StoredRoutine, status: "paused" | "completed" | "canc
 
 function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
   const saved = { ...rule, lastOccurrence: receipt };
+  if (receipt.status === "started" && receipt.precheck?.status === "changed") saved.lastPrecheckSha256 = receipt.precheck.sha256;
   if (receipt.status === "budget_exhausted" && rule.budgetPolicy === "pause") {
     return { rule: endSchedule(saved, "paused"), state: completed };
   }
@@ -252,6 +270,17 @@ function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
     rule: { ...record, nextRunAt: new Date(next).toISOString() },
     state: { status: "sleeping", until: next, checkpoint: { phase: "deliver", at: next } } as const,
   };
+}
+
+async function samplePrecheck(workspace: string, command: string[], ctx: typeof context) {
+  const output = createHash("sha256");
+  const result = await localEnvironment(workspace).exec(command, {
+    timeout: 30, inheritEnv: false, env: shellEnvironment(),
+    onOutput(text, _ctx, info) { if (info.stream === "stdout") output.update(text); },
+  }, ctx);
+  if (!result.ok) return { detail: result.error.code === "timeout" ? "Precheck timed out." : "Precheck execution failed." };
+  if (result.value.exitCode !== 0) return { detail: `Precheck exited with code ${result.value.exitCode}.` };
+  return { sha256: output.digest("hex") };
 }
 
 function makeTimer(options: LocalRoutineOptions, openedAt: number) {
@@ -268,12 +297,15 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         const { routineId, revision } = task.input;
         const key = keyFor(routineId);
         let occurrence: RoutineOccurrence | undefined;
+        let precheck: PrecheckResult | undefined;
+        let newClaim = false;
         await runtime.commit(async (tx) => {
           const { rules } = await tx.doc(routinesDoc);
           const rule = snapshot(rules[key]);
           if (!rule || rule.revision !== revision || rule.status !== "scheduled") return completed;
           if (rule.claim) {
             occurrence = { ...rule.claim, notifyOnChange: rule.claim.notifyOnChange ?? false };
+            precheck = rule.claim.precheckResult;
             return;
           }
           const now = runtime.now();
@@ -291,17 +323,39 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           await recordOccurrence(tx,runtime.conversationId,rule,{id:due.id,scheduledAt:due.scheduledAt,status:'claimed',...(due.action==='task' ? {taskId:due.taskId} : {}),...(due.timing ? {timing:due.timing} : {})},now);
           rules[key] = { ...rule, claim: due };
           occurrence = due;
+          newClaim = true;
         }, ctx);
         if (!occurrence || runtime.signal.aborted) return;
 
-        const { id, scheduledAt } = occurrence;
+        const due = occurrence;
+        const { id, scheduledAt } = due;
+        if (due.precheck && newClaim) {
+          const sample = await samplePrecheck(due.workspace!, due.precheck.command, ctx);
+          if (runtime.signal.aborted) return;
+          await runtime.commit(async (tx) => {
+            const { rules } = await tx.doc(routinesDoc);
+            const rule = snapshot(rules[key]);
+            if (!rule || rule.revision !== revision || rule.claim?.id !== id || rule.status !== "scheduled") return completed;
+            precheck = sample.sha256 === undefined ? { status: "failed", detail: sample.detail }
+              : { status: sample.sha256 === rule.lastPrecheckSha256 ? "unchanged" : "changed", sha256: sample.sha256 };
+            rules[key] = { ...rule, claim: { ...rule.claim, precheckResult: precheck } };
+          }, ctx);
+          if (!precheck || runtime.signal.aborted) return;
+        } else if (due.precheck && !precheck) {
+          precheck = { status: "interrupted", detail: "The prior check may have run. Inspect actual state before retrying." };
+        }
         const timing=occurrence.timing ? {timing:occurrence.timing} : {};
+        const evidence = { id, scheduledAt, ...timing, ...(precheck ? { precheck } : {}) };
         let receipt: Receipt;
         try {
-          const result = await options.execute(occurrence, runtime.signal);
-          receipt = { id, scheduledAt, status: result.status ?? "started",...timing, ...("taskId" in result ? { taskId: result.taskId } : {}) };
+          if (precheck && precheck.status !== "changed") {
+            receipt = { ...evidence, status: precheck.status === "unchanged" ? "skipped" : "failed" };
+          } else {
+            const result = await options.execute(due, runtime.signal);
+            receipt = { ...evidence, status: result.status ?? "started", ...("taskId" in result ? { taskId: result.taskId } : {}) };
+          }
         } catch {
-          receipt = { id, scheduledAt, status: "failed",...timing };
+          receipt = { ...evidence, status: "failed" };
         }
         if (runtime.signal.aborted) return;
 
@@ -470,7 +524,8 @@ export class LocalRoutines {
         origin={id:occurrenceId,scheduledAt,status:'claimed',taskId:occurrence.taskId,...(occurrence.timing ? {timing:occurrence.timing} : {}),routineId:rule.id,revision:rule.revision,action:rule.action,objective:rule.objective,missedPolicy:rule.missedPolicy,budgetPolicy:rule.budgetPolicy,...(rule.budget ? {budget:rule.budget} : {}),recordedAt:this.now()};
       }
       if(!origin || origin.action!=='task') return;
-      const lastOccurrence:Receipt={id:occurrenceId,scheduledAt,status:'budget_exhausted',taskId:origin.taskId ?? taskIdFor(occurrenceId),...(origin.timing ? {timing:origin.timing} : {})};
+      const precheck = origin.precheck ?? (rule?.claim?.id === occurrenceId ? rule.claim.precheckResult : undefined);
+      const lastOccurrence:Receipt={id:occurrenceId,scheduledAt,status:'budget_exhausted',taskId:origin.taskId ?? taskIdFor(occurrenceId),...(origin.timing ? {timing:origin.timing} : {}),...(precheck ? {precheck} : {})};
       await tx.appendEntry(conversationId,{kind:occurrenceEntryKind,data:{...origin,...lastOccurrence,recordedAt:this.now()}});
       if(!rule || String(rule.revision)!==revision || rule.action!=='task' || rule.status==='cancelled') return;
       const previous=rule.lastOccurrence;

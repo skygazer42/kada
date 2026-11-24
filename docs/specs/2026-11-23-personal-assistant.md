@@ -176,6 +176,8 @@ Kada 落点为 Pi 1.4.0 sleepUntil/onWake、现有 daemon 与任务存储。
 
 实现流程为 规则与版本 → 发生项认领 → 现有任务执行 → 保存结果 → 计算下一次。
 
+任务规则可配置固定脚本预检，复用 Pi 的本地执行环境。第一个成功样本和变化样本创建任务，相同样本跳过。预检中断后记录发生项和状态，已保存的检查结论可供恢复时使用。
+
 Kada 落点为 Pi 原生等待与恢复，最少的例行规则/发生项业务状态。
 
 源码参考为 [Rakazo · 例行发生项事务认领](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/runs/assembly/run-routines.ts#L238) · [Amuse · recoveryDecision](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/robustness.ts#L100)。
@@ -362,7 +364,7 @@ npm run check:commit
 
 ## 7. 本轮实施状态
 
-F01—F18 已接入首期终端和本地 API，并有确定性验收及硅基流动合成场景记录。U02 使用选定的 agent-browser 验证接管、回交、旧租约拒绝、重新观察及驱动中断恢复。H05 已观察到产物 API 打开的中文目录与空文件窗口。F18 完成显式捕获、回退及原任务接回后的新输入交付。Windows `npm run check` 通过 215 项测试，零跳过。逐功能入口、测试和失败尝试见[实施验证记录](../experiments/2026-11-23-assistant-validation.md)。
+F01—F18 已接入首期终端和本地 API，并有确定性验收及硅基流动合成场景记录。U02 使用选定的 agent-browser 验证接管、回交、旧租约拒绝、重新观察及驱动中断恢复。H05 已观察到产物 API 打开的中文目录与空文件窗口。F12 固定脚本预检已验证未变化触发的模型请求数为零。F18 完成显式捕获、回退及原任务接回后的新输入交付。逐功能入口、Windows 回归和失败尝试见[实施验证记录](../experiments/2026-11-23-assistant-validation.md)。
 
 P5 的首个渠道选为响应式 Web，远程首版限定工作区文件工具；原生 Shell、命令核验、宿主 MCP、全局记忆、Skills 与电脑能力不自动继承。手机历史使用持久 Pi EntryId，产物链接绑定交付版本及证明。完整远程执行能力等待现成隔离宿主。
 

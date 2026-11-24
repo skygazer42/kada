@@ -1,0 +1,46 @@
+{
+  "id": "F12-precheck",
+  "provider": "siliconflow",
+  "modelId": "deepseek-ai/DeepSeek-V3.2",
+  "passed": true,
+  "requests": 4,
+  "usage": {
+    "input": 8026,
+    "output": 331,
+    "cacheRead": 6400,
+    "totalTokens": 14757
+  },
+  "money": null,
+  "runs": [
+    {
+      "slot": 0,
+      "receipt": "started",
+      "precheck": {
+        "status": "changed",
+        "sha256": "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
+      },
+      "taskStatus": "completed",
+      "modelRequests": 2
+    },
+    {
+      "slot": 1,
+      "receipt": "skipped",
+      "precheck": {
+        "status": "unchanged",
+        "sha256": "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
+      },
+      "taskStatus": null,
+      "modelRequests": 0
+    },
+    {
+      "slot": 2,
+      "receipt": "started",
+      "precheck": {
+        "status": "changed",
+        "sha256": "a13c7a401e50a890a7d361a96a3c4963be0dc51b2b9329e2a78db8c1b9a301c5"
+      },
+      "taskStatus": "completed",
+      "modelRequests": 2
+    }
+  ]
+}

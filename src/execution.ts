@@ -5,7 +5,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import type { ModelRef } from "./config.js";
 
 // Local commands get normal user tooling paths, not the daemon's provider credentials.
-function shellEnvironment(): Record<string, string> {
+export function shellEnvironment(): Record<string, string> {
   const names = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "SHELL", "TERM", "SystemRoot", "COMSPEC", "PATHEXT"];
   return Object.fromEntries(names.flatMap(name => process.env[name] === undefined ? [] : [[name, process.env[name]!]]));
 }
