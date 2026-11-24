@@ -43,6 +43,15 @@
       "pairSendReconnectSameConversation": true,
       "synthetic": true
     },
+    "loopbackHttpsProxy": {
+      "protocol": "TLSv1.3",
+      "pairedDevice": true,
+      "unpairedStatus": 401,
+      "foreignOriginStatus": 403,
+      "ownerApiProxyStatus": 404,
+      "confirmedArtifactBytesAndSha256Matched": true,
+      "staleArtifactStatus": 409
+    },
     "routineHistory": {
       "nativePiEntries": true,
       "paginationEntries": 210,
@@ -89,6 +98,7 @@
     "reminderAndRoutinePriorAttempts": "2026-11-23-assistant-live-routines-attempts.json",
     "nativePiComparison": "2026-11-23-native-pi-baseline.json",
     "memoryHandoffComparison": "2026-11-23-memory-handoff-comparison.json",
+    "memoryHandoffComparisonRetest": "2026-11-23-memory-handoff-comparison-retest.json",
     "concurrentHandoff": "2026-11-23-assistant-live-handoff.json",
     "disconnectDuringModelRequest": "2026-11-23-assistant-live-disconnect.json",
     "computerHandoff": "2026-11-23-computer-browser-live.json",
@@ -106,7 +116,7 @@
     "The selected browser driver was verified on a synthetic local page. Normal computer configuration is opt-in.",
     "macOS build/GUI and physical-phone HTTPS access unverified",
     "Earlier parallel Windows tests failed; the current serial full suite passes",
-    "The two recorded model comparisons each failed delivery in both arms; completion-rate and cost benefits are unproven",
+    "In the corrected synthetic memory and handoff comparison, only Pi completed; completion-rate and cost benefits for real tasks are unproven",
     "Naturally hour-scale successful execution is unverified",
     "Usage is checked at request boundaries and may overshoot within an admitted request"
   ]

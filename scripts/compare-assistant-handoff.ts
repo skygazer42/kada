@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { BACKGROUND_CONTEXT as ctx } from '@earendil-works/chord/context';
 import { createModels, createProvider, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, type StreamOptions, type TranscriptContext } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
@@ -50,6 +51,23 @@ async function credential() {
 
 const apiKey = selfTest ? undefined : await credential();
 
+async function persistedFile(path: string): Promise<string | null> {
+  try { return await readFile(path, 'utf8'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function matchesJson(raw: string | null, expected: unknown): boolean {
+  if (raw === null) return false;
+  try { return isDeepStrictEqual(JSON.parse(raw), expected); }
+  catch (error) {
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+
 async function compare(arm: 'pi' | 'kada') {
   const dataDir = join(directory, arm), workspace = join(dataDir, 'workspace'), home = join(dataDir, 'home');
   await Promise.all([mkdir(home, { recursive: true }), mkdir(workspace, { recursive: true })]);
@@ -57,7 +75,7 @@ async function compare(arm: 'pi' | 'kada') {
   const startedAt = Date.now(), deadline = AbortSignal.timeout(limits.maxDurationMs);
   const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0 };
   const evidence = { sessionReopened: false, pausedForOperator: false, retainedQuestion: false, memoryReferenceRetained: null as boolean | null,
-    draftVerified: false, inputsPreserved: false, draftPreserved: false, verifiedResult: false };
+    draftVerified: false };
   const modelUsage: Promise<void>[] = [];
   const nativeCalls: Record<string, number> = {};
   let modelRequests = 0, providerErrors = 0, userContinuationMessages = 0, reworks = 0, stage = 'start', execution = 'pending';
@@ -77,7 +95,7 @@ async function compare(arm: 'pi' | 'kada') {
       if (!used('read')) return call('read', { path: 'sales.json' });
       if (!used('write')) return call('write', { path: 'draft.json', content: JSON.stringify(expectedDraft) });
       if (!context.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('orchid'))) {
-        return managed ? call('task_blocked', { reason: 'Draft saved. Release channel is required.', question }) : fauxAssistantMessage(question);
+        return managed ? call('task_blocked', { reason: 'Draft saved. Release channel is required.', question }) : fauxAssistantMessage('Draft saved. Now, ' + question.toLowerCase());
       }
       if (used('write') < 2) return call('write', { path: 'report.json', content: JSON.stringify(expectedReport) });
       return managed ? call('task_submit', { summary: 'Verified daily report', artifacts: ['report.json'] }) : fauxAssistantMessage('Verified report.json');
@@ -128,15 +146,17 @@ async function compare(arm: 'pi' | 'kada') {
   }, ctx);
   const openKada = () => new LocalRuntime({ dataDir, port: 4317, model, maxSubagents: 1, maxDurationMs: limits.maxDurationMs,
     maxTotalTokens: limits.maxTotalTokens, review: false, web: false, discovery: true }, { models, discovery: { home }, extensions: [scope] });
-  let pi: Harness | undefined, kada: LocalRuntime | undefined, draft: string;
+  let pi: Harness | undefined, kada: LocalRuntime | undefined, draft: string | undefined;
+  let executionPassed = false;
   async function checkDraft() {
     stage = 'verify_draft_before_operator';
-    draft = await readFile(join(workspace, 'draft.json'), 'utf8');
-    assert.deepEqual(JSON.parse(draft), expectedDraft);
+    const snapshot = await readFile(join(workspace, 'draft.json'), 'utf8');
+    assert.deepEqual(JSON.parse(snapshot), expectedDraft);
     await assert.rejects(readFile(join(workspace, 'report.json')), { code: 'ENOENT' });
+    draft = snapshot;
     evidence.draftVerified = true;
   }
-  function sawQuestion(text: string | undefined) { return text?.includes(question) === true; }
+  function sawQuestion(text: string | undefined) { return text?.toLowerCase().includes(question.toLowerCase()) === true; }
   async function wait(taskId: string) {
     for (;;) {
       deadline.throwIfAborted();
@@ -196,14 +216,8 @@ async function compare(arm: 'pi' | 'kada') {
       reworks = result.goal?.reworks ?? 0;
       assert.equal(execution, 'completed');
     }
-    stage = 'independent_verification';
-    for (const [name, content] of Object.entries(inputs)) assert.equal(await readFile(join(workspace, name), 'utf8'), content);
-    evidence.inputsPreserved = true;
-    assert.equal(await readFile(join(workspace, 'draft.json'), 'utf8'), draft!);
-    evidence.draftPreserved = true;
-    assert.deepEqual(JSON.parse(await readFile(join(workspace, 'report.json'), 'utf8')), expectedReport);
     assert.equal(userContinuationMessages, 1);
-    evidence.verifiedResult = true;
+    executionPassed = true;
   } catch (error) {
     console.error(JSON.stringify({ arm, stage, failure: error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed',
       ...(selfTest && error instanceof Error ? { diagnostic: error.message } : {}) }));
@@ -212,7 +226,19 @@ async function compare(arm: 'pi' | 'kada') {
     await kada?.close();
     await Promise.all(modelUsage);
   }
-  return { arm, execution, elapsedMs: Date.now() - startedAt, modelRequests, providerErrors, usage, estimatedCostUsd: null, userContinuationMessages, reworks, nativeCalls, ...evidence, passed: evidence.verifiedResult };
+  const [finalDraft, finalReport, inputMatches] = await Promise.all([
+    persistedFile(join(workspace, 'draft.json')),
+    persistedFile(join(workspace, 'report.json')),
+    Promise.all(Object.entries(inputs).map(async ([name, expected]) => (await persistedFile(join(workspace, name))) === expected)),
+  ]);
+  const inputsPreserved = inputMatches.every(Boolean);
+  const draftPreserved = draft === undefined ? null : finalDraft === draft;
+  const draftMatches = matchesJson(finalDraft, expectedDraft);
+  const reportMatches = matchesJson(finalReport, expectedReport);
+  const verifiedResult = executionPassed && inputsPreserved && draftPreserved === true && reportMatches;
+  return { arm, execution, elapsedMs: Date.now() - startedAt, modelRequests, providerErrors, usage, estimatedCostUsd: null,
+    userContinuationMessages, reworks, nativeCalls, ...evidence, inputsPreserved, draftPreserved, draftMatches, reportMatches,
+    verifiedResult, passed: verifiedResult };
 }
 
 const results = [];
