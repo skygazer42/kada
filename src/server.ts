@@ -191,7 +191,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       }
       const routineEvent = /^\/v1\/routines\/([^/]+)\/events$/.exec(url.pathname);
       if (routineEvent && req.method === 'POST') {
-        const result = await runtime.routines.receiveEvent(decodeURIComponent(routineEvent[1]!), await body(req));
+        const revision = url.searchParams.get('revision');
+        const result = await runtime.routines.receiveEvent(decodeURIComponent(routineEvent[1]!), await body(req), revision === null ? undefined : Number(revision));
         return send(result.outcome === 'accepted' ? 202 : 200, result);
       }
       const routine = /^\/v1\/routines\/([^/]+)$/.exec(url.pathname);

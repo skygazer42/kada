@@ -255,6 +255,9 @@ function definition(input: RoutineInput): RoutineDefinition {
   } catch (error) {
     throw new RoutineError(400, error instanceof Error ? error.message : "Invalid routine schedule.");
   }
+  if (schedule.kind === "event" && input.event === undefined) {
+    throw new RoutineError(400, "An event-only routine requires an event filter.");
+  }
   const missedPolicy = input.missedPolicy === undefined
     ? (schedule.kind === "once" ? "run_once" : "skip")
     : input.missedPolicy;
@@ -410,7 +413,8 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           if (manual) {
             const saved = recordStarted(rule, receipt);
             delete saved.manual;
-            rules[key] = saved;
+            rules[key] = receipt.trigger === "event" && receipt.status === "budget_exhausted" &&
+              saved.schedule.kind === "event" && saved.budgetPolicy === "pause" ? endSchedule(saved, "paused") : saved;
             return completed;
           }
           const advanced = advance(rule, receipt, now);
@@ -615,11 +619,14 @@ export class LocalRoutines {
         }
         return toRoutine(previous);
       }
-      const firstAt = firstTime(details.schedule, this.now());
-      const timerId = await tx.createTask(timer, { routineId: id, revision: 1, firstAt }, {
-        ownership: { kind: "conversation" }, conversationId,
-      });
-      const next = { ...details, id, revision: 1, status: "scheduled", nextRunAt: new Date(firstAt).toISOString(), timerId } as const;
+      const next: StoredRoutine = { ...details, id, revision: 1, status: "scheduled" };
+      if (details.schedule.kind !== "event") {
+        const firstAt = firstTime(details.schedule, this.now());
+        next.nextRunAt = new Date(firstAt).toISOString();
+        next.timerId = await tx.createTask(timer, { routineId: id, revision: 1, firstAt }, {
+          ownership: { kind: "conversation" }, conversationId,
+        });
+      }
       rules[key] = next;
       return toRoutine(next);
     }, context);
@@ -666,11 +673,14 @@ export class LocalRoutines {
     return accepted;
   }
 
-  async receiveEvent(id: string, input: unknown): Promise<{ outcome: "filtered" | "accepted"; receipt?: RoutineOccurrenceRecord }> {
+  async receiveEvent(id: string, input: unknown, expectedRevision?: number): Promise<{ outcome: "filtered" | "accepted"; receipt?: RoutineOccurrenceRecord }> {
     const key = keyFor(inputId(id));
     if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(field =>
       !["source", "type", "eventId", "data"].includes(field))) throw new RoutineError(400, "Invalid event delivery.");
     const value = input as Record<string, unknown>;
+    if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) {
+      throw new RoutineError(400, "Provide a valid expected routine revision.");
+    }
     const event = { source: eventName(value.source), type: eventName(value.type), eventId: inputId(value.eventId as string) };
     const data = eventData(value.data);
     const fingerprint = createHash("sha256").update(JSON.stringify({ ...event, data })).digest("hex");
@@ -684,6 +694,9 @@ export class LocalRoutines {
       if (previous) {
         if (previous.eventFingerprint !== fingerprint) throw new RoutineError(409, "This event ID already has different content.");
         return { outcome: previous.status === "claimed" ? "accepted" as const : "filtered" as const, receipt: previous };
+      }
+      if (expectedRevision !== undefined && rule.revision !== expectedRevision) {
+        throw new RoutineError(409, "The routine changed during event sync. Run the sync again.");
       }
       if (!rule.event) throw new RoutineError(409, "This routine has no event filter.");
       if (rule.event.source !== event.source || rule.event.type !== event.type) return { outcome: "filtered" as const };
@@ -751,14 +764,17 @@ export class LocalRoutines {
         return { routine: toRoutine(previous) };
       }
       const revision = previous.revision + 1;
-      const firstAt = firstTime(details.schedule, this.now());
-      const timerId = await tx.createTask(timer, { routineId: id, revision, firstAt }, {
-        ownership: { kind: "conversation" }, conversationId,
-      });
       const next: StoredRoutine = {
-        ...details, id, revision, status: "scheduled", nextRunAt: new Date(firstAt).toISOString(), timerId,
+        ...details, id, revision, status: "scheduled",
         ...(previous.lastOccurrence ? { lastOccurrence: previous.lastOccurrence } : {}),
       };
+      if (details.schedule.kind !== "event") {
+        const firstAt = firstTime(details.schedule, this.now());
+        next.nextRunAt = new Date(firstAt).toISOString();
+        next.timerId = await tx.createTask(timer, { routineId: id, revision, firstAt }, {
+          ownership: { kind: "conversation" }, conversationId,
+        });
+      }
       await interruptManual(tx, conversationId, previous, this.now());
       rules[key] = next;
       return { routine: toRoutine(next), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
@@ -821,6 +837,11 @@ export class LocalRoutines {
         return { routine: toRoutine(next), previousTimer: rule.timerId, manualTimer: rule.manual?.timerId };
       }
       if (rule.status === "scheduled") return { routine: toRoutine(rule) };
+      if (rule.schedule.kind === "event") {
+        const next = { ...rule, status: "scheduled", firstSlotAfterResume: new Date(this.now()).toISOString() } as const;
+        rules[key] = next;
+        return { routine: toRoutine(next) };
+      }
       const firstAt = nextRoutineTime(rule.schedule, this.now());
       if (firstAt === undefined) throw new RoutineError(409, "This routine has no future occurrence.");
       const timerId = await tx.createTask(timer, { routineId: id, revision: rule.revision, firstAt }, {
@@ -863,6 +884,11 @@ export class LocalRoutines {
       if (manual) {
         if (rule?.manual && claim?.id === occurrenceId) {
           rules[key] = { ...rule, manual: { ...rule.manual, budgetSettled: true } };
+        }
+        if (origin.trigger === "event" && rule?.schedule.kind === "event" && rule.status === "scheduled" &&
+          String(rule.revision) === revision && rule.budgetPolicy === "pause" &&
+          (!rule.firstSlotAfterResume || scheduledAt >= rule.firstSlotAfterResume)) {
+          rules[key] = endSchedule(rules[key]!, "paused");
         }
         return;
       }

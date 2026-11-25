@@ -13,6 +13,7 @@ type IntervalSchedule = {
 };
 
 export type RoutineSchedule =
+  | { kind: "event" }
   | { kind: "once"; at: string }
   | { kind: "daily"; time: string; timeZone: string }
   | { kind: "weekly"; weekday: number; time: string; timeZone: string }
@@ -102,13 +103,17 @@ function normalizeInterval(schedule: IntervalSchedule): IntervalSchedule {
 
 export function normalizeRoutineSchedule(schedule: RoutineSchedule): RoutineSchedule {
   if (!schedule || typeof schedule !== "object") throw new Error("A routine schedule is required.");
+  if (schedule.kind === "event") {
+    if (Object.keys(schedule).length !== 1) throw new Error("An event-only schedule does not accept calendar fields.");
+    return { kind: "event" };
+  }
   if (schedule.kind === "once") {
     return { kind: "once", at: new Date(explicitInstant(schedule.at, "A reminder")).toISOString() };
   }
   if (schedule.kind === "interval") return normalizeInterval(schedule);
   if (schedule.kind === "cron") return normalizeCron(schedule);
   if (schedule.kind !== "daily" && schedule.kind !== "weekly") {
-    throw new Error("A routine schedule must be once, daily, weekly, interval, or cron.");
+    throw new Error("A routine schedule must be once, daily, weekly, interval, cron, or event.");
   }
   if (typeof schedule.time !== "string" || !wallTimePattern.test(schedule.time)) {
     throw new Error("A recurring routine must have a local time in HH:MM format.");
@@ -211,6 +216,7 @@ function intervalTime(schedule: IntervalSchedule, boundary: number, direction: 1
 }
 
 export function nextRoutineTime(schedule: RoutineSchedule, after: number): number | undefined {
+  if (schedule.kind === "event") return undefined;
   if (schedule.kind === "interval") return intervalTime(schedule, after, 1);
   if (schedule.kind === "cron") return cronCalendar(schedule).nextRun(new Date(after))?.getTime();
   if (schedule.kind !== "once") return recurringTime(schedule, after, 1);
@@ -219,6 +225,7 @@ export function nextRoutineTime(schedule: RoutineSchedule, after: number): numbe
 }
 
 export function latestRoutineTime(schedule: RoutineSchedule, through: number): number | undefined {
+  if (schedule.kind === "event") return undefined;
   if (schedule.kind === "interval") return intervalTime(schedule, through, -1);
   if (schedule.kind === "cron") return cronCalendar(schedule).previousRuns(1, new Date(through + 1))[0]?.getTime();
   if (schedule.kind !== "once") return recurringTime(schedule, through, -1);
@@ -237,7 +244,7 @@ export type RoutineTiming = {
 
 /** Describe the same instant calculation used by Pi timers, without adding timer state. */
 export function routineTiming(schedule: RoutineSchedule, at: number): RoutineTiming | undefined {
-  if(schedule.kind==='once' || schedule.kind==='interval' || schedule.kind==='cron') return;
+  if(schedule.kind==='once' || schedule.kind==='interval' || schedule.kind==='cron' || schedule.kind==='event') return;
   const clock=wallClock(schedule.timeZone),local=new Date(wallTime(clock,at));
   const localDate=local.toISOString().slice(0,10),localTime=local.toISOString().slice(11,16);
   const requested=Date.parse(localDate+'T'+schedule.time+':00Z');

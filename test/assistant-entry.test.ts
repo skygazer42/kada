@@ -1,15 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { fauxAssistantMessage, fauxToolCall, fauxProvider } from '@earendil-works/pi-ai';
 import { serve } from '../src/server.js';
 import { createClient } from '../src/client.js';
 import { LocalRuntime } from '../src/runtime.js';
 import { artifactTarget } from '../src/artifacts.js';
 import { ChatSession } from '../src/chat.js';
+import { syncGithubRoutineEvents } from '../src/github-routine-events.js';
 import { scriptedFixture, until } from './helpers.js';
 
 async function portNumber() {
@@ -278,6 +282,82 @@ test('the authenticated event endpoint only runs the saved rule for a matching e
     const events = await until(() => server.runtime.notifications(), rows => rows.some(row => row.routineId === id));
     assert.deepEqual(events.filter(row => row.routineId === id).map(row => row.detail), ['Check the inventory report']);
     assert.equal((await server.runtime.routines.list()).find(rule => rule.id === id)?.nextRunAt, at);
+  } finally { await server.close(); await f.close(); }
+});
+
+test('GitHub feed receipt loss replays through the daemon without starting another Pi task', async () => {
+  const f = await scriptedFixture(() => fauxAssistantMessage(fauxToolCall('task_submit', {
+    summary: 'Reviewed the GitHub queue.', artifacts: [],
+  }), { stopReason: 'toolUse' }));
+  const settings = { ...f.settings, port: await portNumber() };
+  const open = () => serve(settings, { models: f.models });
+  const client = createClient(settings);
+  let server = await open();
+  const id = 'github-triage';
+  const path = `/v1/routines/${id}/events?revision=1`;
+  const issue = (id: string, number: number) => ({
+    id, type: 'IssuesEvent', repo: { name: 'fixture/repo' }, payload: { action: 'opened', issue: { number } },
+  });
+  const previous = issue('100', 1);
+  let rows = [previous];
+  let dropReply = true;
+  const receipts: unknown[] = [];
+  const preload = join(f.directory, 'github-feed.mjs');
+  const feed = join(f.directory, 'github-feed.json');
+  const configFile = join(f.directory, 'github-sync.config.json');
+  const syncCli = async () => {
+    await writeFile(feed, JSON.stringify(rows));
+    const { stdout } = await promisify(execFile)(process.execPath, [
+      '--import', import.meta.resolve('tsx'), '--import', pathToFileURL(preload).href,
+      fileURLToPath(new URL('../src/cli.ts', import.meta.url)), '--config', configFile, 'routines', 'github-sync', id,
+    ], {
+      cwd: f.directory,
+      env: { ...process.env, HARNESS_PORT: String(settings.port), HARNESS_DATA_DIR: settings.dataDir },
+      timeout: 20_000,
+    });
+    return JSON.parse(stdout);
+  };
+  const sync = () => syncGithubRoutineEvents({
+    dataDir: settings.dataDir, routineId: id, repository: 'fixture/repo',
+    fetch: async () => Response.json(rows),
+    deliver: async event => {
+      receipts.push(await client.request(path, 'POST', event));
+      if (dropReply) throw new Error('fixture lost the receipt');
+    },
+  });
+  try {
+    await writeFile(configFile, JSON.stringify(settings));
+    await writeFile(preload, [
+      "import { readFile } from 'node:fs/promises';",
+      "const fetchNetwork = globalThis.fetch;",
+      "globalThis.fetch = async (url, init) => new URL(url).hostname === 'api.github.com'",
+      "  ? Response.json(JSON.parse(await readFile(new URL('./github-feed.json', import.meta.url), 'utf8')))",
+      "  : fetchNetwork(url, init);",
+    ].join('\n'));
+    await client.request('/v1/routines', 'POST', {
+      id, action: 'task', objective: 'Review the saved issue queue', schedule: { kind: 'event' },
+      event: { source: 'github', type: 'issues.opened', equals: { repository: 'fixture/repo' } },
+    });
+    assert.equal((await syncCli()).baseline, true);
+    assert.deepEqual(await server.runtime.list(), []);
+    rows = [issue('101', 2), previous];
+    await assert.rejects(sync(), /fixture lost the receipt/);
+    await until(() => server.runtime.list(), tasks => tasks.some(task => task.status === 'completed'));
+    await server.close();
+    server = await open();
+    dropReply = false;
+    assert.equal((await sync()).delivered, 1);
+    assert.equal((await sync()).delivered, 0);
+    assert.deepEqual(receipts, [receipts[0], receipts[0]]);
+    const tasks = await server.runtime.list();
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0]?.objective, 'Review the saved issue queue');
+    rows = [issue('103', 4), ...rows];
+    assert.equal((await syncCli()).delivered, 1);
+    await until(() => server.runtime.list(), runs => runs.length === 2 && runs.every(run => run.status === 'completed'));
+    await assert.rejects(client.request(path.replace('revision=1', 'revision=2'), 'POST', {
+      source: 'github', type: 'issues.opened', eventId: '102', data: { repository: 'fixture/repo', number: 3 },
+    }), /routine changed/i);
   } finally { await server.close(); await f.close(); }
 });
 

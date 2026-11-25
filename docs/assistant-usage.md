@@ -164,6 +164,27 @@ Cron 规则使用五字段和显式 IANA 时区。下面的示例在每个工作
 npm run harness -- routines event 规则ID event.json
 ```
 
+只由事件触发的规则使用 `"schedule":{"kind":"event"}`，并填写 `event` 过滤条件。这种规则没有下次定时时间，仍可手动运行、暂停和恢复。
+
+可用 `routines github-sync` 同步公开 GitHub 仓库的新 Issue。先将这份规则保存为 `github-triage.json`，把 `owner/repo` 改成全小写仓库名，再添加规则。
+
+```json
+{
+  "id": "github-triage",
+  "action": "notify",
+  "objective": "检查 GitHub 仓库的新 Issue",
+  "schedule": {"kind": "event"},
+  "event": {"source": "github", "type": "issues.opened", "equals": {"repository": "owner/repo"}}
+}
+```
+
+```powershell
+npm run harness -- routines add github-triage.json
+npm run harness -- routines github-sync github-triage
+```
+
+首次同步记录当前最新事件，后续按从旧到新的顺序处理。同步只提交事件 ID、仓库和 Issue 编号。丢失受理回执时，再次同步会用原事件 ID 查询同一次受理。命令每次同步一次，可交给现有的系统计划任务重复调用。GitHub 的公开事件流可能延迟或限流。游标超出 GitHub 保留窗口时，命令报告缺口并保留原游标。 [GitHub 事件接口](https://docs.github.com/en/rest/activity/events#list-repository-events)
+
 有明确 `workspace` 的任务规则可添加 `"precheck": {"command":["node","checks/project-fingerprint.mjs"]}`。脚本在该目录中以本地用户权限运行，使用参数数组直接启动，时限为 30 秒。使用只读脚本，并向标准输出写出稳定的 UTF-8 检查结果。首次成功或输出的 SHA-256 变化会创建任务，输出相同的发生项记为 `skipped`。更新规则版本会重新建立基线。预检失败或中断会记录原因，当前发生项到此结束。`routines history` 可查看预检状态和成功样本的哈希。
 
 周期任务可设置 `"overlapPolicy": "skip"`。如果同一规则版本的上一次任务仍在运行或等待处理，本次直接跳过。回执的 `blockedBy` 保存上一次发生项、任务 ID 和当时的状态。`--task-status` 按原任务 ID 查询当前状态，并在有值时显示待答问题、原因或交付摘要。若回执有关联 ID 但任务尚未建立，当前状态显示 `missing`。

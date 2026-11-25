@@ -92,6 +92,67 @@ test("event filtering creates no tasks and stays final when a rule is edited", a
   } finally { await routines.close(); }
 });
 
+test("an event-only rule schedules no calendar runs and preserves receipts across pause and reopen", async t => {
+  const dataDir = await temporaryDirectory(t);
+  const clock = fakeRoutineClock(start);
+  const calls: RoutineOccurrence[] = [];
+  const options = { dataDir, ...clock, execute: async (occurrence: RoutineOccurrence) => {
+    calls.push(occurrence);
+    return { taskId: occurrence.taskId };
+  } };
+  let routines = new LocalRoutines(options);
+  try {
+    const rule = { ...input, schedule: { kind: "event" as const } };
+    await assert.rejects(routines.create({ ...rule, event: undefined }), { status: 400 });
+    assert.equal((await routines.create(rule)).nextRunAt, undefined);
+    clock.advanceTo(first + 86_400_000);
+    assert.deepEqual(await routines.history(rule.id), []);
+    const accepted = await routines.receiveEvent(rule.id, event);
+    await until(() => routines.history(rule.id), rows => rows.some(row => row.status === "started"));
+    await routines.pause(rule.id);
+    await routines.close();
+    routines = new LocalRoutines(options);
+    await routines.recover();
+    assert.equal((await routines.list())[0]?.status, "paused");
+    assert.deepEqual(await routines.receiveEvent(rule.id, event), accepted);
+    await assert.rejects(routines.receiveEvent(rule.id, { ...event, eventId: "during-pause" }), { status: 409 });
+    assert.equal((await routines.resume(rule.id)).nextRunAt, undefined);
+    await routines.runNow(rule.id, "manual");
+    await until(() => routines.history(rule.id), rows => rows.some(row => row.trigger === "manual" && row.status === "started"));
+    assert.deepEqual(calls.map(row => row.trigger), ["event", "manual"]);
+    const timed = await routines.update(rule.id, { ...rule, schedule: input.schedule });
+    assert.notEqual(timed.nextRunAt, undefined);
+    const only = await routines.update(rule.id, rule);
+    assert.equal(only.nextRunAt, undefined);
+    await assert.rejects(routines.receiveEvent(rule.id, { ...event, eventId: "old-revision" }, timed.revision), { status: 409 });
+    assert.deepEqual(await routines.receiveEvent(rule.id, event, timed.revision), accepted);
+    clock.advanceTo(start + 3 * 86_400_000);
+    assert.deepEqual(calls.map(row => row.trigger), ["event", "manual"]);
+  } finally { await routines.close(); }
+});
+
+test("a budget stop pauses an event-only rule and its saved event can still be replayed", async t => {
+  const dataDir = await temporaryDirectory(t);
+  const clock = fakeRoutineClock(start);
+  const routines = new LocalRoutines({
+    dataDir, ...clock,
+    execute: async occurrence => ({ taskId: occurrence.taskId }),
+  });
+  try {
+    const rule = { ...input, schedule: { kind: "event" as const } };
+    await routines.create(rule);
+    const accepted = await routines.receiveEvent(rule.id, event);
+    await until(() => routines.history(rule.id), rows => rows.some(row => row.status === "started"));
+    await routines.settleBudget(accepted.receipt!.id);
+    assert.equal((await routines.list())[0]?.status, "paused");
+    assert.deepEqual(await routines.receiveEvent(rule.id, event), accepted);
+    await assert.rejects(routines.receiveEvent(rule.id, { ...event, eventId: "fresh" }), { status: 409 });
+    await routines.resume(rule.id);
+    await routines.settleBudget(accepted.receipt!.id);
+    assert.equal((await routines.list())[0]?.status, "scheduled");
+  } finally { await routines.close(); }
+});
+
 test("event rules and deliveries reject unbounded or non-scalar options", async t => {
   const dataDir = await temporaryDirectory(t);
   const routines = new LocalRoutines({ dataDir, execute: async () => assert.fail("Invalid events must never start a task") });
