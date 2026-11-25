@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { fauxAssistantMessage, fauxToolCall, fauxProvider } from '@earendil-works/pi-ai';
 import { serve } from '../src/server.js';
+import { loadConfig } from '../src/config.js';
 import { createClient } from '../src/client.js';
 import { LocalRuntime } from '../src/runtime.js';
 import { artifactTarget } from '../src/artifacts.js';
@@ -358,6 +359,61 @@ test('GitHub feed receipt loss replays through the daemon without starting anoth
     await assert.rejects(client.request(path.replace('revision=1', 'revision=2'), 'POST', {
       source: 'github', type: 'issues.opened', eventId: '102', data: { repository: 'fixture/repo', number: 3 },
     }), /routine changed/i);
+  } finally { await server.close(); await f.close(); }
+});
+
+test('the opt-in GitHub watcher resumes the saved feed on daemon restart', async t => {
+  const f = await scriptedFixture(() => fauxAssistantMessage(fauxToolCall('task_submit', {
+    summary: 'Reviewed the incoming issue.', artifacts: [],
+  }), { stopReason: 'toolUse' }));
+  const settings = { ...f.settings, port: await portNumber() };
+  const ruleId = 'watch-issues';
+  const previous = { id: '100', type: 'PushEvent' };
+  const added = { id: '101', type: 'IssuesEvent', repo: { name: 'fixture/repo' },
+    payload: { action: 'opened', issue: { number: 2 } } };
+  const network = globalThis.fetch;
+  const configFile = join(f.directory, 'github-watcher.json');
+  let requestAborted = false;
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request, init?: RequestInit) => {
+    if (!String(url).startsWith('https://api.github.com/')) return network(url, init);
+    assert.equal(String(url), 'https://api.github.com/repos/fixture/repo/events?per_page=100&page=1');
+    requests++;
+    if (requests === 2) {
+      assert(init?.signal);
+      try {
+        await setTimeout(60_000, undefined, { signal: init.signal, ref: false });
+      } finally {
+        requestAborted = init.signal.aborted;
+      }
+    }
+    return Response.json([added, previous], { headers: { 'X-Poll-Interval': '60' } });
+  });
+  let server = await serve(settings, { models: f.models });
+  try {
+    await server.runtime.routines.create({
+      id: ruleId, action: 'task', objective: 'Review a new issue', schedule: { kind: 'event' },
+      event: { source: 'github', type: 'issues.opened', equals: { repository: 'fixture/repo' } },
+    });
+    await syncGithubRoutineEvents({ dataDir: settings.dataDir, routineId: ruleId, repository: 'fixture/repo',
+      fetch: async () => Response.json([previous]), deliver: async () => assert.fail('Baseline cannot start a task') });
+    assert.equal(requests, 0);
+    await server.close();
+    await writeFile(configFile, JSON.stringify({ ...settings, githubIssuePolling: [ruleId, ruleId] }));
+    const { githubIssuePolling } = await loadConfig(configFile);
+    assert.deepEqual(githubIssuePolling, [ruleId]);
+    const openWatcher = () => serve({ ...settings, githubIssuePolling }, { models: f.models });
+    server = await openWatcher();
+    const [delivered] = await until(() => server.runtime.list(), tasks => tasks.length === 1 && tasks[0]?.status === 'completed');
+    await server.close();
+    server = await openWatcher();
+    await until(async () => requests, count => count === 2);
+    await server.close();
+    assert.equal(requestAborted, true);
+    assert.equal(await syncGithubRoutineEvents({ dataDir: settings.dataDir, routineId: ruleId, repository: 'fixture/repo',
+      deliver: async () => assert.fail('The watcher must acknowledge the event') }).then(result => result.delivered), 0);
+    server = await serve(settings, { models: f.models });
+    assert.deepEqual((await server.runtime.list()).map(task => task.id), [delivered!.id]);
   } finally { await server.close(); await f.close(); }
 });
 

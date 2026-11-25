@@ -17,6 +17,7 @@ import { artifactTarget, openLocalPath } from './artifacts.js';
 import type { SkillSelection } from './skills.js';
 import type { McpDefinition } from './mcp-tools.js';
 import type { RoutineInput } from './routines.js';
+import { watchGithubIssues } from "./github-routine-events.js";
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -40,6 +41,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   let remote: ReturnType<typeof createRemoteHandler>;
   let pushRun: Promise<void> | undefined;
   let pushTimer: NodeJS.Timeout | undefined;
+  const githubAbort = new AbortController();
+  let githubRun: Promise<void> | undefined;
   let token: string;
   const tokenFile = join(config.dataDir, "token");
   try { token = (await readFile(tokenFile, "utf8")).trim(); }
@@ -310,6 +313,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       }, 5000);
       pushTimer.unref();
     }
+    if (config.githubIssuePolling?.length) {
+      githubRun = watchGithubIssues(config.dataDir, config.githubIssuePolling, runtime.routines, githubAbort.signal)
+        .catch(error => console.error("GitHub issue watcher stopped. " + errorText(error)));
+    }
   } catch (error) {
     server.close();
     await runtime?.close();
@@ -325,9 +332,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       closing = true;
       ready = false;
       clearInterval(pushTimer);
+      githubAbort.abort();
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      try { await pushRun; await runtime!.close(); await computer.close(); } finally { await release(); }
+      try { await Promise.all([pushRun, githubRun]); await runtime!.close(); await computer.close(); } finally { await release(); }
     },
   };
 }

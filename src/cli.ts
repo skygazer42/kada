@@ -147,14 +147,13 @@ try {
         const routineId = rest[0];
         if (!routineId || rest.length !== 1) throw new Error('Use routines github-sync <routine-id>.');
         const rule = (await request<Routine[]>('/v1/routines')).find(item => item.id === routineId);
-        if (!rule || rule.status !== 'scheduled' || rule.event?.source !== 'github' ||
-          rule.event.type !== 'issues.opened' || typeof rule.event.equals.repository !== 'string' ||
-          rule.event.equals.repository !== rule.event.equals.repository.toLowerCase()) {
+        const { githubIssueRepository, syncGithubRoutineEvents } = await import('./github-routine-events.js');
+        const repository = githubIssueRepository(rule);
+        if (!rule || !repository) {
           throw new Error('Select an active github/issues.opened routine with a lowercase repository filter.');
         }
-        const { syncGithubRoutineEvents } = await import('./github-routine-events.js');
         result = await syncGithubRoutineEvents({
-          dataDir: config.dataDir, routineId, repository: rule.event.equals.repository,
+          dataDir: config.dataDir, routineId, repository,
           deliver: event => request('/v1/routines/' + segment(routineId) + '/events?revision=' + rule.revision, 'POST', event),
         });
       }

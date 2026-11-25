@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { syncGithubRoutineEvents, type GithubRoutineEvent } from "../src/github-routine-events.js";
+import { syncGithubRoutineEvents, watchGithubIssues, type GithubRoutineEvent } from "../src/github-routine-events.js";
+import type { LocalRoutines, Routine } from "../src/routines.js";
 
 const issue = (id: string, number: number, action = "opened") => ({
   id, type: "IssuesEvent", repo: { name: "Team/Repo" }, payload: { action, issue: { number } },
@@ -48,4 +49,36 @@ test("a public feed starts from its latest event and resumes oldest first after 
   await assert.rejects(syncGithubRoutineEvents(options), /429/);
   pages = [page([issue("13", 4)])];
   assert.equal((await syncGithubRoutineEvents(options)).delivered, 0);
+});
+
+test("the watcher stops pagination when a page uses the last GitHub request", async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), "kada-github-limit-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const baseline = { dataDir, routineId: "triage", repository: "team/repo",
+    fetch: async () => page([issue("10", 1)]), deliver: async () => assert.fail("The cursor must stay at the baseline") };
+  await syncGithubRoutineEvents(baseline);
+  const rule = { id: "triage", revision: 1, status: "scheduled",
+    event: { source: "github", type: "issues.opened", equals: { repository: "team/repo" } } } as const;
+  const routines: Pick<LocalRoutines, "list" | "receiveEvent"> = {
+    list: async () => [rule as Routine],
+    receiveEvent: async () => assert.fail("A partial feed must not deliver an event"),
+  };
+  const urls: string[] = [];
+  const controller = new AbortController();
+  const mock = t.mock.method(globalThis, "fetch", async (url: URL | string) => {
+    urls.push(String(url));
+    if (urls.length > 1) {
+      controller.abort();
+      return page([issue("10", 1)]);
+    }
+    const response = page([issue("11", 2)], true);
+    response.headers.set("X-RateLimit-Remaining", "0");
+    return response;
+  });
+  const logged = t.mock.method(console, "error", () => controller.abort());
+  await watchGithubIssues(dataDir, ["triage"], routines, controller.signal);
+  assert.equal(urls.length, 1);
+  assert.match(String(logged.mock.calls[0]?.arguments[0]), /GitHub request limit/);
+  mock.mock.restore();
+  assert.equal((await syncGithubRoutineEvents(baseline)).delivered, 0);
 });

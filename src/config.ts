@@ -32,6 +32,7 @@ export interface Config {
   /** Canonical origin of an already configured HTTPS reverse proxy. */
   remoteOrigin?: string;
   remotePush?: boolean;
+  githubIssuePolling?: string[];
 }
 
 export function positiveInt(value: unknown, name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -80,6 +81,11 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     computer = c;
   }
   if (raw.dataDir !== undefined && typeof raw.dataDir !== "string") throw new Error("dataDir must be a string");
+  const githubIssuePolling = raw.githubIssuePolling;
+  if (githubIssuePolling !== undefined && (!Array.isArray(githubIssuePolling) ||
+      githubIssuePolling.some(id => typeof id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(id)))) {
+    throw new Error("githubIssuePolling must be an array of routine IDs.");
+  }
   if (raw.remoteOrigin !== undefined) {
     if (typeof raw.remoteOrigin !== 'string') throw new Error('remoteOrigin must be an HTTPS origin.');
     const origin = new URL(raw.remoteOrigin);
@@ -101,6 +107,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     learning: optionalBoolean(raw.learning, "learning", false),
     discovery: optionalBoolean(raw.discovery, "discovery", true),
     ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),
+    ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
     maxReworks: raw.maxReworks === 0 ? 0 : positiveInt(raw.maxReworks, "maxReworks", 3, 20),
     maxStalls: positiveInt(raw.maxStalls, "maxStalls", 2, 20),
     computer,

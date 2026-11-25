@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import lockfile from "proper-lockfile";
-import { atomicJson, readJson } from "./util.js";
+import type { LocalRoutines, Routine } from "./routines.js";
+import { atomicJson, errorText, readJson } from "./util.js";
 
 export type GithubRoutineEvent = {
   source: "github";
@@ -10,6 +12,13 @@ export type GithubRoutineEvent = {
   eventId: string;
   data: { repository: string; number: number };
 };
+
+export function githubIssueRepository(rule?: Routine) {
+  const event = rule?.event;
+  const repository = event?.equals.repository;
+  if (rule?.status === "scheduled" && event?.source === "github" && event.type === "issues.opened" &&
+      typeof repository === "string" && repository === repository.toLowerCase()) return repository;
+}
 
 type SyncOptions = {
   dataDir: string;
@@ -104,5 +113,62 @@ export async function syncGithubRoutineEvents(options: SyncOptions) {
     return { repository, baseline: false, delivered };
   } finally {
     await release();
+  }
+}
+
+/** Polling only reads GitHub. The routine owns task admission and its budget. */
+export async function watchGithubIssues(dataDir: string, routineIds: readonly string[], routines: Pick<LocalRoutines, "list" | "receiveEvent">, signal: AbortSignal) {
+  while (!signal.aborted) {
+    let nextPoll = Date.now() + 60_000;
+    let rateLimited = false;
+    const pollFetch: typeof fetch = async (url, init) => {
+      if (rateLimited) throw new Error("GitHub request limit reached before the complete feed could be read.");
+      const response = await fetch(url, {
+        ...init, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
+      });
+      const now = Date.now();
+      const pollSeconds = Number(response.headers.get("X-Poll-Interval"));
+      if (Number.isFinite(pollSeconds) && pollSeconds > 0) nextPoll = Math.max(nextPoll, now + pollSeconds * 1_000);
+      const retryAfter = response.headers.get("Retry-After");
+      if (retryAfter) {
+        const retryAt = /^\d+$/.test(retryAfter) ? now + Number(retryAfter) * 1_000 : Date.parse(retryAfter);
+        if (Number.isFinite(retryAt)) nextPoll = Math.max(nextPoll, retryAt);
+      }
+      const exhausted = response.headers.get("X-RateLimit-Remaining") === "0";
+      if (exhausted) {
+        const resetAt = Number(response.headers.get("X-RateLimit-Reset")) * 1_000;
+        if (Number.isFinite(resetAt)) nextPoll = Math.max(nextPoll, resetAt);
+      }
+      rateLimited = exhausted || response.status === 429 || response.status === 403 && retryAfter !== null;
+      return response;
+    };
+    try {
+      for (const rule of await routines.list()) {
+        if (signal.aborted || rateLimited) break;
+        if (!routineIds.includes(rule.id)) continue;
+        const repository = githubIssueRepository(rule);
+        if (!repository) continue;
+        try {
+          await syncGithubRoutineEvents({ dataDir, routineId: rule.id, repository, fetch: pollFetch,
+            deliver: event => {
+              signal.throwIfAborted();
+              return routines.receiveEvent(rule.id, event, rule.revision);
+            },
+          });
+        } catch (error) {
+          if (!signal.aborted && (error as NodeJS.ErrnoException).code !== "ELOCKED") {
+            console.error(`GitHub sync for ${rule.id} failed. ${errorText(error)}`);
+          }
+        }
+      }
+    } catch (error) {
+      if (!signal.aborted) console.error("Could not list GitHub issue routines. " + errorText(error));
+    }
+    if (signal.aborted) return;
+    try {
+      await sleep(Math.min(2_147_483_647, Math.max(0, nextPoll - Date.now())), undefined, { signal, ref: false });
+    } catch (error) {
+      if (!signal.aborted) throw error;
+    }
   }
 }
