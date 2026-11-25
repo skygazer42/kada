@@ -19,7 +19,7 @@ const fakeServer = `
     if (request.method === 'initialize' && JSON.parse(fs.readFileSync(sample,'utf8')).holdInit) {
       fs.appendFileSync(calls, JSON.stringify({tool:'initializing',pid:process.pid})+'\\n');
       const waiting = setInterval(() => {
-        if (JSON.parse(fs.readFileSync(sample,'utf8')).holdInit) return;
+        if (!fs.existsSync(sample + '.ready')) return;
         clearInterval(waiting);
         console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result}));
       }, 20);
@@ -83,6 +83,7 @@ async function app(t: TestContext) {
     runtime: () => server.runtime, modelCalls: () => modelCalls,
     calls: async () => (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { tool: string; pid: number }),
     sample: (value: object, meta = 1, fail = false, holdInit = false) => atomicJson(sample, { value, meta, fail, holdInit }),
+    releaseInitialize: () => writeFile(sample + '.ready', ''),
     async restart() { await server.close(); server = await open(); },
   };
 }
@@ -175,7 +176,7 @@ test("an MCP precheck cannot dispatch after its project tool is revoked during c
   const accepted = await (await f.request("/v1/routines/inbox-watch/run", "POST", { requestId: "connecting" })).json();
   await until(f.calls, calls => calls.some(call => call.tool === "initializing"));
   await f.runtime().mcp.setProjectTools(f.fixture.workspace, []);
-  await f.sample({ count: 1 });
+  await f.releaseInitialize();
   const receipt = await until(async () => (await f.runtime().routines.history("inbox-watch")).find(row => row.id === accepted.id && row.status !== "claimed"), Boolean);
   assert.equal(receipt?.status, "failed");
   assert.deepEqual((await f.calls()).map(call => call.tool), ["initializing"]);

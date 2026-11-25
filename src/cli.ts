@@ -32,6 +32,7 @@ try {
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("\nMCP 账户登录（HTTP 定义中设置 oauth: true）\n  mcp login 连接ID\n打开返回的 authorizationUrl，完成后运行 mcp test，再按返回修订 enable 工具。mcp logout 连接ID 清除本机凭据并停用工具；服务端授权需在对应应用撤销。");
+    console.log("预注册客户端可将 oauth 配为 { clientId, issuer, clientSecretEnv?, scope? }。clientSecretEnv 是 daemon 环境变量名；不在配置中填入 secret。issuer 必须与服务发现的授权服务器一致。");
   } else if (command === "chat") {
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");

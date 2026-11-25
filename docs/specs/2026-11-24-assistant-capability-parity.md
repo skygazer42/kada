@@ -19,6 +19,7 @@
 | 自动化规则手动运行 | 从现有规则立即受理一次独立发生项，保持原下次自动执行时间。验证相同请求 ID、重启、预检、防重叠和预算回执。 | [OpenMausBot runNow](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routines.ts#L738) · [手动执行沿用预检](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routine-checks-engine.test.ts#L376) |
 | 已连接应用的 MCP 变更预检 | 规则可用固定版本、参数的 MCP 工具做无模型预检。工具须在当前项目启用、由服务声明只读且无需单次审批；实际派发前再次核对。只保存内容指纹，不注入外部工具正文；结果未变时不启动任务。Pi 保留预检、基线和发生项恢复。 | [Rakazo 连接器预检与权限](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L735) · [稳定结果指纹](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L792) · [原 MCP 边界](../../src/mcp-tools.ts) · [API 与恢复回归](../../test/routine-mcp-precheck.test.ts) |
 | MCP 应用账户 OAuth 登录 | 本机用户显式开启 HTTP OAuth，取得授权 URL 并在浏览器登录。SDK 负责 PKCE、发现、动态客户端注册、issuer 绑定与令牌刷新。一次性 state 有效期 10 分钟，回调绑定原尝试及端点。登录完成后重新测试和启用工具；后台不会打开授权页面。退出清除本机凭据、停用工具并取消旧调用。 | [Rakazo SDK provider](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L605) · [原尝试回调](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L1518) · [Suparagent owner 连接入口](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/routers/integrations.py#L116) · [协议与恢复回归](../../test/mcp-oauth.test.ts) |
+| MCP 预注册客户端 | 不支持动态注册的服务可配置客户端 ID、指定 issuer 和可选 secret 环境变量。SDK 按服务声明选择 public、Basic 或 POST 认证，并检查 issuer。预注册模式不提供动态注册回退，secret 不写入连接配置或 OAuth 材料。修改客户端配置使旧回调和工具修订失效。 | [Rakazo 预注册客户端绑定](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L369) · [provider 采用原客户端](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L674) · [协议回归](../../test/mcp-oauth.test.ts) |
 | 手机上次草稿与待发恢复 | 用相同配对重新打开会话可恢复原文和待发消息。待发记录保留消息 ID 和已上传的附件引用。双标签发送时，同一草稿只会转换成一条待发消息。 | [Codync 发送与草稿 ID](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/AppStoreDrafts.kt#L63) · [远程页面回归](../../test/remote-pending-page.test.ts) |
 | 本地项目工具子集 | 按项目从全局已启用的 MCP 工具中选择。任务创建时固定实际工具和连接修订。验证配置重开、原任务快照、空集、全局继承和实际模型可见工具。 | [Rakazo 组装运行工具](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/runs/assembly/run-assembly-capabilities.ts#L734) · [MCP 回归](../../test/mcp-tools.test.ts) |
 | 子任务异步回传 | 主任务收到回执后可继续独立工作。当前批次由 Pi 后台任务持有子会话，结果沿原 ID 回查，交付等待批次回传。验证重开、提前提交与取消。 | [Pi 后台委派](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/test/examples/23-subagent-background.ts#L57) · [Suparagent 委派回执与回传](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L378) · [委派回归](../../test/delegation.test.ts) |
@@ -67,7 +68,27 @@ HTTP MCP 连接可设置 `oauth: true`，与环境变量凭据头互斥。例如
 
 OAuth 材料保存在数据目录的 `mcp-oauth/`，沿用原子写入和适用平台的受限文件权限，不经过模型。该目录默认被 Git 忽略，强制暂存也会被提交检查拒绝。登录与回调使用 SDK 的网络流程，不引入新授权服务。授权码交换结果未知时要求重新登录，已持久化令牌但尚未完成本机受理时可用原回调恢复；过期、重放、退出和端点编辑后的回调均不恢复旧凭据。同一连接的 OAuth 操作串行，关闭会等待凭据加载、网络及清理完成。
 
-本地合成 OAuth/MCP 服务验收了 owner CLI 登录、Chromium PKCE 回调、测试、启用和退出。回归另覆盖重启、并发刷新、迟到回调不影响新账号、错误 state、拒绝登录、未知交换结果、损坏材料安全报错、client secret/令牌回显拦截和关闭竞态。真实第三方服务、预注册客户端和设备码授权尚未验收；当前连接方式要求服务支持 SDK 动态注册。
+本地合成 OAuth/MCP 服务验收了 owner CLI 登录、Chromium PKCE 回调、测试、启用和退出。回归另覆盖重启、并发刷新、迟到回调不影响新账号、错误 state、拒绝登录、未知交换结果、损坏材料安全报错、client secret/令牌回显拦截和关闭竞态。真实第三方服务及设备码授权尚未验收。
+
+对于已在服务端注册的客户端，使用以下连接定义，仍通过原 `mcp add/login/test/enable/logout` 操作。public client 省略 `clientSecretEnv`；需要 secret 时，daemon 的该环境变量必须存在。`scope` 为可选后备值，SDK 优先使用服务返回的 scope；应用注册时须允许本机 daemon 端口对应的 `/v1/settings/mcp/oauth/callback` 地址。
+
+```json
+{
+  "id": "connected-app",
+  "transport": "http",
+  "url": "https://service.example/mcp",
+  "oauth": {
+    "clientId": "registered-client-id",
+    "issuer": "https://auth.example/oauth",
+    "clientSecretEnv": "APP_CLIENT_SECRET",
+    "scope": "read"
+  }
+}
+```
+
+预注册对象仅接受上述字段，issuer 必填且不能包含查询、凭据或片段。secret 只在原 MCP 操作生命周期内从环境解析并登记脱敏，不复制到持久文件或公开状态。回归用不提供注册端点的合成服务分别验证 public、Basic、POST 登录、跨重启回调、刷新和退出；还验证 issuer 不匹配不派发令牌/注册请求、末尾 `/` 兼容、缺失环境变量、配置变更、回调补齐环境后恢复以及 secret 回显拦截。退出仍不修改环境变量或撤销服务端客户端注册。
+
+预注册 POST 客户端另通过 owner CLI 与 Chromium 合成验收，完成加连接、登录回调、发现、启用及退出，动态注册请求数为零。此证据限于本机合成服务，不能替代具体第三方账号的兼容性验证。
 
 手机控制在 Chromium 的 390 × 844 视口验证暂停、接回、取消确认以及原消息和草稿保留。服务端回归另外验证，取消已暂停的任务时 Pi 不会重新启动独立评审。项目模型的重启回归使用两个脚本化模型，重新打开旧会话后发新消息核对实际执行模型。 [手机 API 回归](../../test/remote.test.ts) · [页面回归](../../test/remote-pending-page.test.ts) · [项目模型回归](../../test/assistant-entry.test.ts)
 
@@ -78,7 +99,7 @@ Chromium 双标签发送同一草稿时，拦掉首个回执后仍只有一次�
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |
 | --- | --- | --- | --- |
 | macOS 子任务控制实机验收 | macOS 任务卡已接入定向答复、单独停止和指定调用的中断。Windows 已验证本地 API 和 Swift 语法，原生交互待运行。 | 在运行和待答时打开任务卡，停止一个子任务，或中断指定调用并观察原子会话继续。 | [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823) · [本地 API 回归](../../test/delegation.test.ts) · [任务卡解码回归](../../desktop/PetCoreTests.swift) |
-| 应用连接器与主动检查 | 公开 GitHub Issue 已支持后台轮询；MCP 可做只读变更预检及 HTTP OAuth 本机登录。具体第三方账户实测、预注册客户端、原生事件订阅与按用户活动触发仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo 连接器预检](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L735) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
+| 应用连接器与主动检查 | 公开 GitHub Issue 已支持后台轮询；MCP 可做只读变更预检，HTTP OAuth 支持动态及预注册客户端。具体第三方账户实测、原生事件订阅与按用户活动触发仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo 连接器预检](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L735) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
 | 手机后台通知实机验收 | Web Push 与会话跳转已有本地回归。仍需通过真实推送服务，在实体 iOS 与 Android 设备验收。 | 订阅的手机在页面关闭时收到提醒，打开后进入具备访问权限的原会话。 | [Codync Android 通知](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |
 
 应用原生入口、渠道和更广义的桌面操作继续按项目源码核对。AppuBot 的公开仓库提供产品说明与发布资料，无法用它验证 Telegram 实现。 [AppuBot 公开资料](https://github.com/sarthakguptadev/appubot/blob/e0a25494a7c0/README.md)

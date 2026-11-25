@@ -10,11 +10,11 @@ import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { CallToolResult, Tool as ServerTool } from '@modelcontextprotocol/sdk/types.js';
 import { memoryProject } from './memory-sources.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
-import { McpOAuth, McpAuthError, loopback, oauthUrl, type McpAuthSession } from './mcp-oauth.js';
+import { McpOAuth, McpAuthError, loopback, oauthUrl, normalizeOAuth, type McpAuthSession, type McpOAuthSetting } from './mcp-oauth.js';
 
 export type McpDefinition = { id: string } & (
   | { transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
-  | { transport: 'http'; url: string; headers?: Record<string, string>; oauth?: boolean }
+  | { transport: 'http'; url: string; headers?: Record<string, string>; oauth?: McpOAuthSetting }
 );
 export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[]; approvalTools?: string[] };
 export type ProjectMcpTool = { id: string; tool: string };
@@ -101,13 +101,13 @@ function normalize(def: McpDefinition): McpDefinition {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
       throw new Error('Use an HTTP or HTTPS MCP endpoint with credentials supplied by environment-backed headers.');
     }
-    if (def.oauth !== undefined && typeof def.oauth !== 'boolean') throw new Error('The MCP OAuth setting must be a boolean.');
+    const oauth = normalizeOAuth(def.oauth, url);
     const headers = envRefs(def.headers, headerPattern);
-    if (def.oauth) {
+    if (oauth) {
       oauthUrl(url, true);
       if (Object.keys(headers ?? {}).length) throw new Error('Use OAuth or environment-backed MCP headers, one per connection.');
     }
-    return { id: def.id, transport: def.transport, url: url.href, headers, ...(def.oauth ? { oauth: true } : {}) };
+    return { id: def.id, transport: def.transport, url: url.href, headers, ...(oauth ? { oauth } : {}) };
   }
   throw new Error('Unsupported MCP transport.');
 }
@@ -235,10 +235,13 @@ export class McpTools {
     let definition: McpDefinition | undefined;
     const changed = await this.update(id, old => {
       const saved = this.require(old);
-      if (saved.definition.transport !== 'http' || !saved.definition.oauth) throw new McpAuthError(400, 'Configure an HTTP MCP connection with oauth: true first.');
+      if (saved.definition.transport !== 'http' || !saved.definition.oauth) throw new McpAuthError(400, 'Enable OAuth for this HTTP MCP connection first.');
       definition = saved.definition;
       return { ...saved, revision: randomUUID(), enabled: false, allowedTools: [], test: undefined };
-    }, async next => { session = await this.oauth.begin(id, this.binding(next.definition), redirectUrl, (next.definition as Extract<McpDefinition, { transport: 'http' }>).url); });
+    }, async next => {
+      const definition = next.definition as Extract<McpDefinition, { transport: 'http' }>;
+      session = await this.oauth.begin(id, this.binding(definition), redirectUrl, definition.url, definition.oauth);
+    });
     const attempt = session!;
     try {
       await this.connect(definition!, 15_000, undefined, async () => undefined, { session: attempt });
@@ -264,7 +267,7 @@ export class McpTools {
       throw new McpAuthError(400, 'MCP sign-in was denied. Start sign-in again.');
     }
     if (!code || code.length > 4096 || code.includes('\0')) throw new McpAuthError(400, 'Invalid MCP authorization callback.');
-    const { session, needsExchange } = await this.oauth.claim(id, binding, state);
+    const { session, needsExchange } = await this.oauth.claim(id, binding, state, saved.definition.oauth);
     if (needsExchange) {
       try { await this.connect(saved.definition, 15_000, undefined, async () => undefined, { session, code }); }
       catch { throw new McpAuthError(502, 'MCP authorization could not be completed. Start sign-in again if its result is unknown.'); }
@@ -498,7 +501,7 @@ export class McpTools {
     const work = async () => {
       signal.throwIfAborted();
       const settings = resolveEnv(definition.transport === 'stdio' ? definition.env : definition.headers);
-      const session = authenticated ? oauth?.session ?? await this.oauth.active(definition.id, this.binding(definition)) : undefined;
+      const session = authenticated ? oauth?.session ?? await this.oauth.active(definition.id, this.binding(definition), definition.oauth) : undefined;
       signal.throwIfAborted();
       const credentials = session?.credentials ?? [];
       credentials.push(...Object.values(settings).flatMap(value => {

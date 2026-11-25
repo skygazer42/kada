@@ -8,20 +8,21 @@ import { fauxAssistantMessage } from '@earendil-works/pi-ai';
 import { serve } from '../src/server.js';
 import { scriptedFixture } from './helpers.js';
 
-async function oauthServer(t: TestContext) {
+async function oauthServer(t: TestContext, registered?: { method: 'none' | 'client_secret_basic' | 'client_secret_post'; secret?: string }) {
   let origin = '', currentAccess = '', currentRefresh = '', refreshes = 0, exchanges = 0, echo: false | 'access' | 'client' = false, loseResponse = false;
   const clientSecret = 'synthetic-client-secret-' + randomUUID();
+  let registrations = 0, tokenRequests = 0;
   const codes = new Map<string, { challenge: string; redirect: string }>();
   const server = createServer(async (req, res) => {
     const url = new URL(req.url!, origin);
     const send = (status: number, body: object) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
     const body = async () => { const parts: Buffer[] = []; for await (const part of req) parts.push(part); return Buffer.concat(parts).toString(); };
-    if (url.pathname.includes('.well-known/oauth-protected-resource')) return send(200, { resource: origin + '/mcp', authorization_servers: [origin + '/oauth'], scopes_supported: ['read'] });
+    if (url.pathname.includes('.well-known/oauth-protected-resource')) return send(200, { resource: origin + '/mcp', authorization_servers: [origin + '/oauth'], ...(registered ? {} : { scopes_supported: ['read'] }) });
     if (url.pathname.includes('.well-known/oauth-authorization-server') || url.pathname.includes('.well-known/openid-configuration')) {
-      return send(200, { issuer: origin + '/oauth', authorization_endpoint: origin + '/authorize', token_endpoint: origin + '/token', registration_endpoint: origin + '/register',
-        response_types_supported: ['code'], code_challenge_methods_supported: ['S256'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['read'] });
+      return send(200, { issuer: origin + '/oauth', authorization_endpoint: origin + '/authorize', token_endpoint: origin + '/token', ...(registered ? {} : { registration_endpoint: origin + '/register' }),
+        response_types_supported: ['code'], code_challenge_methods_supported: ['S256'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: [registered?.method ?? 'none'], scopes_supported: ['read'] });
     }
-    if (url.pathname === '/register') return send(201, { ...JSON.parse(await body()), client_id: 'synthetic-client', client_secret: clientSecret });
+    if (url.pathname === '/register') { registrations++; return send(201, { ...JSON.parse(await body()), client_id: 'synthetic-client', client_secret: clientSecret }); }
     if (url.pathname === '/authorize') {
       const code = randomUUID(), redirect = url.searchParams.get('redirect_uri')!;
       assert.equal(new URL(redirect).hostname, '127.0.0.1');
@@ -33,7 +34,15 @@ async function oauthServer(t: TestContext) {
       res.writeHead(302, { Location: next.href }); res.end(); return;
     }
     if (url.pathname === '/token') {
+      tokenRequests++;
       const input = new URLSearchParams(await body());
+      if (registered) {
+        const expectedId = 'registered-client';
+        const valid = registered.method === 'client_secret_basic'
+          ? req.headers.authorization === 'Basic ' + Buffer.from(expectedId + ':' + registered.secret).toString('base64') && !input.has('client_secret')
+          : !req.headers.authorization && input.get('client_id') === expectedId && (registered.method === 'none' ? !input.has('client_secret') : input.get('client_secret') === registered.secret);
+        if (!valid) return send(401, { error: 'invalid_client' });
+      }
       if (input.get('grant_type') === 'authorization_code') {
         exchanges++;
         const code = input.get('code')!, saved = codes.get(code);
@@ -60,7 +69,7 @@ async function oauthServer(t: TestContext) {
       const results: Record<string, object> = {
         initialize: { protocolVersion: input.params.protocolVersion, serverInfo: { name: 'oauth-fixture', version: '1' }, capabilities: { tools: {} } },
         'tools/list': { tools: [{ name: 'read', annotations: { readOnlyHint: true }, inputSchema: { type: 'object' } }] },
-        'tools/call': { content: [{ type: 'text', text: echo === 'client' ? clientSecret : echo ? currentAccess : 'Connected.' }] },
+        'tools/call': { content: [{ type: 'text', text: echo === 'client' ? registered?.secret ?? clientSecret : echo ? currentAccess : 'Connected.' }] },
       };
       return send(200, { jsonrpc: '2.0', id: input.id, result: results[input.method] });
     }
@@ -71,6 +80,7 @@ async function oauthServer(t: TestContext) {
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
   return { origin, expire() { currentAccess = 'expired'; }, echo(kind: 'access' | 'client' = 'access') { echo = kind; }, refreshes: () => refreshes, exchanges: () => exchanges,
     loseResponse() { loseResponse = true; },
+    registrations: () => registrations, tokenRequests: () => tokenRequests,
     secrets: () => [currentAccess, currentRefresh, clientSecret] };
 }
 
@@ -281,4 +291,123 @@ test('closing MCP waits for pending OAuth credential loading and forbids network
     assert.equal(await operation, 'cancelled');
     assert.equal(requests, 0);
   } finally { release.resolve(); await Promise.all([operation, closing]); held.mock.restore(); network.mock.restore(); }
+});
+
+for (const method of ['none', 'client_secret_basic', 'client_secret_post'] as const) {
+  test(`a pre-registered ${method} client logs in, reopens and refreshes without dynamic registration`, async t => {
+    const secret = method === 'none' ? undefined : 'synthetic-registered-secret';
+    const authority = await oauthServer(t, { method, secret }), f = await app(t);
+    const variable = 'KADA_TEST_REGISTERED_SECRET';
+    const previous = process.env[variable];
+    if (secret) process.env[variable] = secret;
+    t.after(() => { if (previous === undefined) delete process.env[variable]; else process.env[variable] = previous; });
+    const configured = await f.request('/v1/settings/mcp', 'POST', { id: 'inbox', transport: 'http', url: authority.origin + '/mcp',
+      oauth: { clientId: 'registered-client', issuer: authority.origin + '/oauth' + (method === 'none' ? '/' : ''), scope: 'read', ...(secret ? { clientSecretEnv: variable } : {}) } });
+    assert.equal(configured.status, 201, await configured.clone().text());
+    const loginResponse = await f.request('/v1/settings/mcp/inbox/login', 'POST', {});
+    assert.equal(loginResponse.status, 200, await loginResponse.clone().text());
+    const login = await loginResponse.json(), authorization = new URL(login.authorizationUrl);
+    assert.equal(authorization.searchParams.get('client_id'), 'registered-client');
+    assert.equal(authorization.searchParams.get('scope'), 'read');
+    await f.restart();
+    const callback = (await fetch(authorization, { redirect: 'manual' })).headers.get('location')!;
+    assert.equal((await fetch(callback)).status, 200);
+    const tested = await f.runtime().mcp.test('inbox');
+    assert.equal(tested.test?.status, 'ok');
+    await f.runtime().mcp.enable('inbox', ['read'], tested.revision);
+    await f.restart();
+    const [pin] = await f.runtime().mcp.pins();
+    authority.expire();
+    const result = await f.runtime().mcp.executeApproved(pin!, 'read', {});
+    assert.deepEqual(result.output, [{ type: 'text', text: 'Connected.' }]);
+    assert.equal(authority.refreshes(), 1);
+    assert.equal(authority.registrations(), 0);
+    if (secret) {
+      authority.echo('client');
+      const hidden = await f.runtime().mcp.executeApproved(pin!, 'read', {});
+      assert.equal(hidden.isError, true);
+      const stored = await readFile(join(f.directory, 'mcp-oauth', 'inbox.json'), 'utf8');
+      const definition = await readFile(join(f.directory, 'mcp-connections.json'), 'utf8');
+      assert.equal(stored.includes(secret), false);
+      assert.equal(definition.includes(secret), false);
+      assert.equal(JSON.stringify([hidden, await (await f.request('/v1/settings/mcp')).json()]).includes(secret), false);
+    }
+    assert.equal((await f.request('/v1/settings/mcp/inbox/logout', 'POST', {})).status, 200);
+    assert.deepEqual(await f.runtime().mcp.pins(), []);
+  });
+}
+
+test('a registered client refuses another issuer and never silently falls back to dynamic registration', async t => {
+  const authority = await oauthServer(t), f = await app(t);
+  const configured = await f.request('/v1/settings/mcp', 'POST', { id: 'inbox', transport: 'http', url: authority.origin + '/mcp',
+    oauth: { clientId: 'registered-client', issuer: authority.origin + '/different-issuer' } });
+  assert.equal(configured.status, 201);
+  assert.equal((await f.request('/v1/settings/mcp/inbox/login', 'POST', {})).status, 502);
+  assert.equal(authority.registrations(), 0);
+  assert.equal(authority.tokenRequests(), 0);
+});
+
+test('registered OAuth configuration rejects inline secrets, missing issuer and absent secret environment values', async t => {
+  const authority = await oauthServer(t), f = await app(t);
+  const base = { id: 'inbox', transport: 'http', url: authority.origin + '/mcp' };
+  for (const oauth of [ {}, { clientId: 'registered-client' }, { clientId: 'registered-client', issuer: authority.origin + '/oauth', clientSecret: 'forbidden' },
+    { clientId: 'registered-client', issuer: authority.origin + '/oauth', clientSecretEnv: 'invalid env name' },
+    { clientId: 'registered-client', issuer: 'http://example.test/oauth' }, { clientId: 'registered-client', issuer: authority.origin + '/oauth', scope: 'read\nwrite' } ]) {
+    assert.equal((await f.request('/v1/settings/mcp', 'POST', { ...base, oauth })).status, 400);
+  }
+  delete process.env.KADA_TEST_MISSING_REGISTERED_SECRET;
+  const oauth = { clientId: 'registered-client', issuer: authority.origin + '/oauth', clientSecretEnv: 'KADA_TEST_MISSING_REGISTERED_SECRET' };
+  assert.equal((await f.request('/v1/settings/mcp', 'POST', { ...base, oauth })).status, 201);
+  const response = await f.request('/v1/settings/mcp/inbox/login', 'POST', {});
+  assert.equal(response.status, 400);
+  assert.equal(authority.registrations(), 0);
+  assert.equal(authority.tokenRequests(), 0);
+  assert.equal((await (await f.request('/v1/settings/mcp')).json())[0].oauth.authorizationPending, false);
+});
+
+test('editing a registered client invalidates saved grants and callbacks instead of reusing the previous account', async t => {
+  const authority = await oauthServer(t, { method: 'none' }), f = await app(t);
+  const definition = { id: 'inbox', transport: 'http', url: authority.origin + '/mcp',
+    oauth: { clientId: 'registered-client', issuer: authority.origin + '/oauth' } };
+  await f.request('/v1/settings/mcp', 'POST', definition);
+  const begin = async () => {
+    const response = await f.request('/v1/settings/mcp/inbox/login', 'POST', {});
+    assert.equal(response.status, 200, await response.clone().text());
+    const login = await response.json();
+    return (await fetch(login.authorizationUrl, { redirect: 'manual' })).headers.get('location')!;
+  };
+  await fetch(await begin());
+  const tested = await f.runtime().mcp.test('inbox');
+  await f.runtime().mcp.enable('inbox', ['read'], tested.revision);
+  const [oldPin] = await f.runtime().mcp.pins();
+  const pending = await begin();
+  const changed = await f.request('/v1/settings/mcp', 'POST', { ...definition, oauth: { ...definition.oauth, clientId: 'replacement-client' } });
+  assert.equal(changed.status, 201);
+  const status = await changed.json();
+  assert.deepEqual(status.oauth, { credentialsSaved: false, authorizationPending: false });
+  assert.equal(status.enabled, false);
+  await f.restart();
+  assert.equal((await fetch(pending)).status, 400);
+  await assert.rejects(f.runtime().mcp.executeApproved(oldPin!, 'read', {}), /changed/i);
+  assert.equal(authority.registrations(), 0);
+  assert.equal(authority.exchanges(), 1);
+});
+
+test('a missing registered secret at callback time can be corrected without consuming the authorization code', async t => {
+  const variable = 'KADA_TEST_CALLBACK_REGISTERED_SECRET', secret = 'synthetic-callback-secret';
+  const previous = process.env[variable];
+  process.env[variable] = secret;
+  t.after(() => { if (previous === undefined) delete process.env[variable]; else process.env[variable] = previous; });
+  const authority = await oauthServer(t, { method: 'client_secret_post', secret }), f = await app(t);
+  await f.request('/v1/settings/mcp', 'POST', { id: 'inbox', transport: 'http', url: authority.origin + '/mcp',
+    oauth: { clientId: 'registered-client', issuer: authority.origin + '/oauth', clientSecretEnv: variable } });
+  const login = await (await f.request('/v1/settings/mcp/inbox/login', 'POST', {})).json();
+  const callback = (await fetch(login.authorizationUrl, { redirect: 'manual' })).headers.get('location')!;
+  delete process.env[variable];
+  assert.equal((await fetch(callback)).status, 400);
+  assert.equal(authority.tokenRequests(), 0);
+  process.env[variable] = secret;
+  assert.equal((await fetch(callback)).status, 200);
+  assert.equal(authority.tokenRequests(), 1);
+  assert.equal(authority.registrations(), 0);
 });
