@@ -63,6 +63,13 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','task-handoff','remote-web','routines'] });
       if (await remote(req,res)) return;
+      if (url.pathname === '/v1/settings/mcp/oauth/callback' && req.method === 'GET') {
+        if (req.headers.host !== new URL(`http://127.0.0.1:${config.port}`).host) return send(403, { error: 'Use the local OAuth callback address.' });
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+        await runtime.mcp.finishLogin(url.searchParams.get('state') ?? '', url.searchParams.get('code') ?? '', url.searchParams.has('error'));
+        return send(200, { message: 'MCP account authorized. Return to Kada, test this connection and enable its tools.' });
+      }
       const supplied = Buffer.from(req.headers.authorization?.replace(/^Bearer /, "") ?? "");
       const expected = Buffer.from(token);
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return send(401, { error: "Unauthorized" });
@@ -153,11 +160,13 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           return send(200, { tools: await runtime.mcp.setProjectTools(workspace, tools) });
         }
       }
-      const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable|approval)$/.exec(url.pathname);
+      const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable|approval|login|logout)$/.exec(url.pathname);
       if (mcp && req.method === 'POST') {
         const id = decodeURIComponent(mcp[1]!);
         if (mcp[2] === 'test') return send(200,await runtime.mcp.test(id));
         if (mcp[2] === 'disable') return send(200,await runtime.mcp.disable(id));
+        if (mcp[2] === 'login') return send(200, await runtime.mcp.login(id, `http://127.0.0.1:${config.port}/v1/settings/mcp/oauth/callback`));
+        if (mcp[2] === 'logout') return send(200, await runtime.mcp.logout(id));
         const input = await body(req);
         if (!Array.isArray(input.tools) || !input.tools.every(tool => typeof tool === 'string') || typeof input.revision !== 'string') throw new Error('Enable the displayed tools with their tested revision.');
         if (mcp[2] === 'approval') return send(200, await runtime.mcp.setApproval(id, input.tools, input.revision));

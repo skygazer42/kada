@@ -6,13 +6,15 @@ import type { Context } from '@earendil-works/chord/context';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { CallToolResult, Tool as ServerTool } from '@modelcontextprotocol/sdk/types.js';
 import { memoryProject } from './memory-sources.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
+import { McpOAuth, McpAuthError, loopback, oauthUrl, type McpAuthSession } from './mcp-oauth.js';
 
 export type McpDefinition = { id: string } & (
   | { transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
-  | { transport: 'http'; url: string; headers?: Record<string, string> }
+  | { transport: 'http'; url: string; headers?: Record<string, string>; oauth?: boolean }
 );
 export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[]; approvalTools?: string[] };
 export type ProjectMcpTool = { id: string; tool: string };
@@ -26,6 +28,7 @@ type SavedConnection = { definition: McpDefinition; revision: string; allowedToo
 export type McpConnection = Omit<SavedConnection, 'definition' | 'test'> & {
   id: string;
   transport: McpDefinition['transport'];
+  oauth?: { credentialsSaved: boolean; authorizationPending: boolean };
   test?: Omit<McpTest, 'tools'> & { message?: string; tools?: Array<Pick<FoundTool, 'name' | 'description' | 'readOnly'>> };
 };
 
@@ -83,6 +86,7 @@ function envRefs(entries: Record<string, string> | undefined, keyPattern: RegExp
 function normalize(def: McpDefinition): McpDefinition {
   if (!def || typeof def.id !== 'string' || !idPattern.test(def.id)) throw new Error('MCP id must be 1–32 lowercase letters, digits or hyphens.');
   if (def.transport === 'stdio') {
+    if ('oauth' in def && def.oauth) throw new Error('OAuth requires an HTTP MCP connection.');
     if (typeof def.command !== 'string' || !def.command.trim()) throw new Error('A local MCP command is required.');
     if (def.args !== undefined && (!Array.isArray(def.args) || def.args.some(arg => typeof arg !== 'string'))) throw new Error('MCP command arguments must be strings.');
     return { id: def.id, transport: def.transport, command: def.command, args: def.args ?? [], env: envRefs(def.env, envPattern) };
@@ -97,7 +101,13 @@ function normalize(def: McpDefinition): McpDefinition {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
       throw new Error('Use an HTTP or HTTPS MCP endpoint with credentials supplied by environment-backed headers.');
     }
-    return { id: def.id, transport: def.transport, url: url.href, headers: envRefs(def.headers, headerPattern) };
+    if (def.oauth !== undefined && typeof def.oauth !== 'boolean') throw new Error('The MCP OAuth setting must be a boolean.');
+    const headers = envRefs(def.headers, headerPattern);
+    if (def.oauth) {
+      oauthUrl(url, true);
+      if (Object.keys(headers ?? {}).length) throw new Error('Use OAuth or environment-backed MCP headers, one per connection.');
+    }
+    return { id: def.id, transport: def.transport, url: url.href, headers, ...(def.oauth ? { oauth: true } : {}) };
   }
   throw new Error('Unsupported MCP transport.');
 }
@@ -158,10 +168,23 @@ export class McpTools {
   private readonly changes = new SerialQueue();
   private readonly active = new Set<{ id: string; controller: AbortController; done: Promise<unknown> }>();
   private closed = false;
+  private readonly oauth: McpOAuth;
+  private readonly oauthSessions = new Map<string, SerialQueue>();
 
   constructor(dataDir: string) {
     this.path = join(dataDir, 'mcp-connections.json');
     this.projectsPath = join(dataDir, 'mcp-projects.json');
+    this.oauth = new McpOAuth(dataDir);
+  }
+
+  private binding(definition: McpDefinition) { return createHash('sha256').update(JSON.stringify(definition)).digest('hex'); }
+
+  private async summary(connection: SavedConnection): Promise<McpConnection> {
+    const result = status(connection);
+    if (connection.definition.transport === 'http' && connection.definition.oauth) {
+      result.oauth = await this.oauth.status(connection.definition.id, this.binding(connection.definition));
+    }
+    return result;
   }
 
   private async read(): Promise<SavedConnection[]> {
@@ -173,17 +196,18 @@ export class McpTools {
     }
   }
 
-  private async update(id: string, change: (old?: SavedConnection) => SavedConnection): Promise<McpConnection> {
+  private async update(id: string, change: (old?: SavedConnection) => SavedConnection | Promise<SavedConnection>, after?: (next: SavedConnection, old?: SavedConnection) => Promise<void>): Promise<McpConnection> {
     return this.changes.run(async () => {
       const connections = await this.read();
       const previous = connections.find(connection => connection.definition.id === id);
-      const next = change(previous);
+      const next = await change(previous);
       await atomicJson(this.path, [...connections.filter(connection => connection !== previous), next]);
       const revoked = previous?.enabled && (!next.enabled || previous.allowedTools.some(name => !next.allowedTools.includes(name)));
       if (previous && (next.revision !== previous.revision || revoked)) {
         this.cancel(id);
       }
-      return status(next);
+      await after?.(next, previous);
+      return this.summary(next);
     });
   }
 
@@ -193,14 +217,68 @@ export class McpTools {
   }
 
   async list(): Promise<McpConnection[]> {
-    return (await this.read()).map(status).sort((a, b) => a.id.localeCompare(b.id));
+    return Promise.all((await this.read()).sort((a, b) => a.definition.id.localeCompare(b.definition.id)).map(connection => this.summary(connection)));
   }
 
   configure(definition: McpDefinition): Promise<McpConnection> {
     const normalized = normalize(definition);
     return this.update(normalized.id, old => old && JSON.stringify(old.definition) === JSON.stringify(normalized)
       ? old
-      : { definition: normalized, revision: randomUUID(), enabled: false, allowedTools: [] });
+      : { definition: normalized, revision: randomUUID(), enabled: false, allowedTools: [] }, async (next, old) => {
+        if (JSON.stringify(old?.definition) !== JSON.stringify(next.definition) &&
+          (next.definition.transport === 'http' && next.definition.oauth || old?.definition.transport === 'http' && old.definition.oauth)) await this.oauth.clear(normalized.id);
+      });
+  }
+
+  async login(id: string, redirectUrl: string) {
+    let session: McpAuthSession | undefined;
+    let definition: McpDefinition | undefined;
+    const changed = await this.update(id, old => {
+      const saved = this.require(old);
+      if (saved.definition.transport !== 'http' || !saved.definition.oauth) throw new McpAuthError(400, 'Configure an HTTP MCP connection with oauth: true first.');
+      definition = saved.definition;
+      return { ...saved, revision: randomUUID(), enabled: false, allowedTools: [], test: undefined };
+    }, async next => { session = await this.oauth.begin(id, this.binding(next.definition), redirectUrl, (next.definition as Extract<McpDefinition, { transport: 'http' }>).url); });
+    const attempt = session!;
+    try {
+      await this.connect(definition!, 15_000, undefined, async () => undefined, { session: attempt });
+      throw new Error('The MCP server did not request OAuth.');
+    } catch (error) {
+      if (!(error instanceof UnauthorizedError) || !attempt.authorizationUrl) {
+        await this.oauth.cancel(id, this.binding(definition!), attempt.state!);
+        throw new McpAuthError(502, 'MCP sign-in could not be started. Check its OAuth server configuration.');
+      }
+    }
+    await this.changes.run(async () => { this.current(await this.read(), { id, revision: changed.revision, tools: [] }); });
+    return { authorizationUrl: attempt.authorizationUrl, expiresAt: attempt.expiresAt };
+  }
+
+  async finishLogin(state: string, code: string, denied = false) {
+    const match = /^([a-z0-9][a-z0-9-]{0,31})\.[A-Za-z0-9_-]{43}$/.exec(state);
+    if (!match) throw new McpAuthError(400, 'Invalid MCP authorization callback.');
+    const id = match[1]!, saved = this.require((await this.read()).find(connection => connection.definition.id === id));
+    if (saved.definition.transport !== 'http' || !saved.definition.oauth) throw new McpAuthError(400, 'This MCP authorization is no longer configured.');
+    const binding = this.binding(saved.definition);
+    if (denied) {
+      await this.oauth.cancel(id, binding, state);
+      throw new McpAuthError(400, 'MCP sign-in was denied. Start sign-in again.');
+    }
+    if (!code || code.length > 4096 || code.includes('\0')) throw new McpAuthError(400, 'Invalid MCP authorization callback.');
+    const { session, needsExchange } = await this.oauth.claim(id, binding, state);
+    if (needsExchange) {
+      try { await this.connect(saved.definition, 15_000, undefined, async () => undefined, { session, code }); }
+      catch { throw new McpAuthError(502, 'MCP authorization could not be completed. Start sign-in again if its result is unknown.'); }
+    }
+    return this.update(id, async old => {
+      const current = this.require(old);
+      if (this.binding(current.definition) !== binding) throw new McpAuthError(400, 'This MCP authorization is no longer configured.');
+      await this.oauth.ready(id, binding, state);
+      return { ...current, revision: randomUUID(), enabled: false, allowedTools: [], test: undefined };
+    }, () => this.oauth.complete(id, binding, state));
+  }
+
+  async logout(id: string) {
+    return this.update(id, old => ({ ...this.require(old), revision: randomUUID(), enabled: false, allowedTools: [], test: undefined }), () => this.oauth.clear(id));
   }
 
   async test(id: string, signal?: AbortSignal): Promise<McpConnection> {
@@ -410,28 +488,40 @@ export class McpTools {
     }
   }
 
-  private async connect<T>(definition: McpDefinition, timeout: number, parentSignal: AbortSignal | undefined, action: (client: Client, signal: AbortSignal, credentials: string[]) => Promise<T>): Promise<T> {
+  private async connect<T>(definition: McpDefinition, timeout: number, parentSignal: AbortSignal | undefined, action: (client: Client, signal: AbortSignal, credentials: string[]) => Promise<T>, oauth?: { session: McpAuthSession; code?: string }): Promise<T> {
     if (this.closed) throw new Error('MCP connections have been closed.');
     const controller = new AbortController();
     const signals = [controller.signal, AbortSignal.timeout(timeout), ...(parentSignal ? [parentSignal] : [])];
     const signal = AbortSignal.any(signals);
     signal.throwIfAborted();
-    const settings = resolveEnv(definition.transport === 'stdio' ? definition.env : definition.headers);
-    const credentials = Object.values(settings).flatMap(value => {
-      const headerValue = /^(?:Bearer|Basic) (.+)$/i.exec(value)?.[1];
-      return headerValue ? [value, headerValue] : [value];
-    });
-    const transport = definition.transport === 'stdio'
-      ? new StdioClientTransport({ command: definition.command, args: definition.args, env: settings, stderr: 'ignore' })
-      : new StreamableHTTPClientTransport(new URL(definition.url), { requestInit: { headers: settings, redirect: 'error' } });
-    const client = new Client({ name: 'kada', version: '1' });
-    let closing: Promise<void> | undefined;
-    const close = () => closing ??= client.close();
-    const closeOnAbort = () => { void close().catch(() => {}); };
-    signal.addEventListener('abort', closeOnAbort, { once: true });
-    const done = (async () => {
+    const authenticated = definition.transport === 'http' && definition.oauth;
+    const work = async () => {
+      signal.throwIfAborted();
+      const settings = resolveEnv(definition.transport === 'stdio' ? definition.env : definition.headers);
+      const session = authenticated ? oauth?.session ?? await this.oauth.active(definition.id, this.binding(definition)) : undefined;
+      signal.throwIfAborted();
+      const credentials = session?.credentials ?? [];
+      credentials.push(...Object.values(settings).flatMap(value => {
+        const headerValue = /^(?:Bearer|Basic) (.+)$/i.exec(value)?.[1];
+        return headerValue ? [value, headerValue] : [value];
+      }));
+      const network: typeof fetch = async (input, init) => {
+        oauthUrl(input instanceof Request ? input.url : String(input), definition.transport === 'http' && loopback(new URL(definition.url)));
+        return fetch(input, { ...init, redirect: init?.redirect ?? 'manual', signal: AbortSignal.any([signal, ...(init?.signal ? [init.signal] : [])]) });
+      };
+      const transport = definition.transport === 'stdio'
+        ? new StdioClientTransport({ command: definition.command, args: definition.args, env: settings, stderr: 'ignore' })
+        : new StreamableHTTPClientTransport(new URL(definition.url), { requestInit: { headers: authenticated ? undefined : settings, redirect: 'error' },
+          ...(session ? { authProvider: session.provider, fetch: network } : {}) });
+      const client = new Client({ name: 'kada', version: '1' });
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= oauth?.code !== undefined ? transport.close() : client.close();
+      const closeOnAbort = () => { void close().catch(() => {}); };
+      signal.addEventListener('abort', closeOnAbort, { once: true });
       try {
-        await client.connect(transport, { signal });
+        signal.throwIfAborted();
+        if (oauth?.code !== undefined) await (transport as StreamableHTTPClientTransport).finishAuth(oauth.code);
+        else await client.connect(transport, { signal });
         signal.throwIfAborted();
         const result = await action(client, signal, credentials);
         signal.throwIfAborted();
@@ -440,7 +530,13 @@ export class McpTools {
         signal.removeEventListener('abort', closeOnAbort);
         await close();
       }
-    })();
+    };
+    let queue: SerialQueue | undefined;
+    if (authenticated) {
+      queue = this.oauthSessions.get(definition.id) ?? new SerialQueue();
+      this.oauthSessions.set(definition.id, queue);
+    }
+    const done = queue ? queue.run(work) : Promise.resolve().then(work);
     const tracked = { id: definition.id, controller, done };
     this.active.add(tracked);
     try {

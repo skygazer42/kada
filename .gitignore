@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .harness/
+mcp-oauth/
 harness.config.json
 .env
 .env.*

@@ -31,6 +31,7 @@ try {
     console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
+    console.log("\nMCP 账户登录（HTTP 定义中设置 oauth: true）\n  mcp login 连接ID\n打开返回的 authorizationUrl，完成后运行 mcp test，再按返回修订 enable 工具。mcp logout 连接ID 清除本机凭据并停用工具；服务端授权需在对应应用撤销。");
   } else if (command === "chat") {
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
@@ -141,8 +142,8 @@ try {
         result = action === 'project'
           ? await request(projectPath + '?workspace=' + encodeURIComponent(workspace))
           : await request(projectPath, 'PUT', { workspace, tools: action === 'project-clear' ? null : await json(rest[0]) });
-      } else if (['test','enable','disable','approval'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',['enable','approval'].includes(action) ? {revision:rest[1],tools:rest.slice(2)} : {});
-      else throw new Error('Use mcp list, add, test, enable, disable, approval, project, project-set or project-clear.');
+      } else if (['test','enable','disable','approval','login','logout'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',['enable','approval'].includes(action) ? {revision:rest[1],tools:rest.slice(2)} : {});
+      else throw new Error('Use mcp list, add, test, enable, disable, approval, login, logout, project, project-set or project-clear.');
     } else if (command === 'routines') {
       if (action === 'list') result = await request('/v1/routines');
       else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences'+(args.values['task-status'] ? '?includeTaskStatus=true' : ''));

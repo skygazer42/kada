@@ -1,6 +1,6 @@
 import{test}from'node:test';
 import assert from'node:assert/strict';
-import{mkdtemp,writeFile,rm}from'node:fs/promises';
+import{mkdtemp,writeFile,readFile,mkdir,rm}from'node:fs/promises';
 import{tmpdir}from'node:os';
 import{join}from'node:path';
 import{fileURLToPath,pathToFileURL}from'node:url';
@@ -30,6 +30,22 @@ test('commit check detects a credential pasted into source, not just credential 
     await writeFile(join(path,'index.ts'),'export const credential='+JSON.stringify(key)+';\n');
     await assert.rejects(execute(process.execPath,['--import',loader,script],{cwd:path}),error=>{
       const text=String((error as any).stderr);assert(text.includes('index.ts'));assert(!text.includes(key));return true;
+    });
+  }finally{await rm(path,{recursive:true,force:true});}
+});
+
+test('OAuth credentials are ignored in custom data directories and a forced staging is rejected without printing tokens',async()=>{
+  const path=await mkdtemp(join(tmpdir(),'pi-oauth-commit-'));
+  try{
+    await execute('git',['init','-q'],{cwd:path});
+    await writeFile(join(path,'.gitignore'),await readFile(new URL('../.gitignore',import.meta.url),'utf8'));
+    await mkdir(join(path,'runtime','mcp-oauth'),{recursive:true});
+    const token='synthetic-opaque-oauth-credential';
+    await writeFile(join(path,'runtime','mcp-oauth','inbox.json'),JSON.stringify({tokens:{access_token:token}}));
+    assert.equal((await execute('git',['ls-files','--others','--exclude-standard'],{cwd:path})).stdout.includes('inbox.json'),false);
+    await execute('git',['add','-f','runtime/mcp-oauth/inbox.json'],{cwd:path});
+    await assert.rejects(execute(process.execPath,['--import',loader,script],{cwd:path}),error=>{
+      const text=String((error as any).stderr);assert(text.includes('mcp-oauth/inbox.json'));assert(!text.includes(token));return true;
     });
   }finally{await rm(path,{recursive:true,force:true});}
 });

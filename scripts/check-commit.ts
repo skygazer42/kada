@@ -6,7 +6,7 @@ import { lstat, readFile } from "node:fs/promises";
 const execute = promisify(execFile);
 const { stdout } = await execute("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { maxBuffer: 4_000_000 });
 const paths = [...new Set(stdout.split("\0").filter(Boolean))], issues: string[] = [];
-const privatePath = /(?:^|\/)(?:\.harness|local-context|node_modules|dist|auth\.json|token|harness\.config\.json)(?:\/|$)|(?:^|\/)\.env(?:$|\.(?!example$))/;
+const privatePath = /(?:^|\/)(?:\.harness|mcp-oauth|local-context|node_modules|dist|auth\.json|token|harness\.config\.json)(?:\/|$)|(?:^|\/)\.env(?:$|\.(?!example$))/;
 const secrets = [
   /\bsk-[A-Za-z0-9_-]{24,}\b/,
   /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/,
