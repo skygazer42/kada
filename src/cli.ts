@@ -98,7 +98,12 @@ try {
       else if (action === 'run') result = await request(path + '/' + segment(rest[0]) + '/runs', 'POST', {
         revision: Number(rest[1]), requestId: rest[2] ?? randomUUID(), confirmed: args.values.yes,
       });
-      else throw new Error('Use work-items list, add, edit, runs or run.');
+      else if (action === 'share' || action === 'unshare') {
+        const [id, accountId, deviceId] = rest;
+        if (rest.length !== 3) throw new Error('Use work-items ' + action + ' <work-item-id> <account-id> <device-id>.');
+        result = await request(path + '/' + segment(id) + '/' + action, 'POST', { accountId, deviceId });
+      }
+      else throw new Error('Use work-items list, add, edit, runs, run, share or unshare.');
     }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {

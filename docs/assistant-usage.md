@@ -120,6 +120,13 @@ npm run harness -- work-items runs 工作项ID
 
 新运行先准备任务说明和预算。已有明确授权时可附加 `--yes`。断线后用同一请求 ID 和原修订重试，返回原任务。
 
+把工作项分享给指定配对设备后，手机可以在 **Shared work items** 查看当前目标、修订和原运行的状态。需要处理的运行排在前面。分享按工作项 ID 生效，包含后续修订和运行。撤销分享后，设备刷新时会移除该工作项。
+
+```powershell
+npm run harness -- work-items share 工作项ID 账户ID 设备ID
+npm run harness -- work-items unshare 工作项ID 账户ID 设备ID
+```
+
 ## 提醒与例行任务
 
 单次提醒可直接用聊天 `/remind`，规则可通过 JSON 管理。每日、每周保存明确时区与补跑政策：

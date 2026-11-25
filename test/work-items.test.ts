@@ -76,6 +76,72 @@ test("the authenticated work item API replays original tasks after editing and r
   } finally { await server.close(); }
 });
 
+test("a paired phone can read only explicitly shared work items and their original runs", async t => {
+  const { directory, workspace } = await directories(t);
+  let needsInput = true;
+  const fixture = await scriptedFixture(() => fauxAssistantMessage(
+    needsInput
+      ? fauxToolCall("task_blocked", { reason: "Inventory date missing", question: "Which date should I use?" })
+      : fauxToolCall("task_submit", { summary: "Inventory verified", artifacts: [] }),
+    { stopReason: "toolUse" },
+  ));
+  t.after(() => fixture.close());
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const open = () => serve({ ...fixture.settings, port, dataDir: directory }, { models: fixture.models });
+  let server = await open();
+  try {
+    const adminToken = (await readFile(join(directory, "token"), "utf8")).trim();
+    const request = (token: string, path: string, method = "GET", value?: object) => fetch("http://127.0.0.1:" + port + path, {
+      method, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: value === undefined ? undefined : JSON.stringify(value),
+    });
+    const owner = (path: string, method: string, value?: object) => request(adminToken, path, method, value);
+    const pair = async (deviceId: string) => (await (await owner("/v1/remote/devices", "POST", { accountId: "owner", deviceId })).json()).token;
+    const phone = await pair("phone");
+    const tablet = await pair("tablet");
+    const item = await server.runtime.workItems.create({ workspace, title: "Inventory", objective: "Verify the inventory" });
+    const privateItem = await server.runtime.workItems.create({ workspace, title: "Private item", objective: "Private objective" });
+    const waiting = await server.runtime.workItems.run(item.id, { revision: item.revision, requestId: "early-run", confirmed: true });
+    await until(() => server.runtime.status(waiting.id), status => status.status === "waiting_user");
+    const remote = "/remote/api/work-items";
+    const details = remote + "/" + item.id;
+    const share = "/v1/work-items/" + item.id + "/share";
+    const recipient = { accountId: "owner", deviceId: "phone" };
+    const before = await request(phone, remote);
+    assert.equal(before.status, 200);
+    assert.deepEqual(await before.json(), []);
+    assert.equal((await request(phone, details)).status, 404);
+    assert.equal((await request(tablet, share, "POST", recipient)).status, 401);
+    assert.equal((await owner(share, "POST", recipient)).status, 200);
+    const updated = await server.runtime.workItems.update(item.id, { revision: item.revision, objective: "Verify the latest inventory" });
+    needsInput = false;
+    const run = await server.runtime.workItems.run(item.id, { revision: updated.revision, requestId: "later-run", confirmed: true });
+    await until(() => server.runtime.status(run.id), status => status.status === "completed");
+    await server.close();
+    server = await open();
+    const { id, title, revision, updatedAt, objective } = updated;
+    assert.deepEqual(await (await request(phone, remote)).json(), [{ id, title, revision, updatedAt }]);
+    assert.deepEqual(await (await request(phone, details)).json(), { id, title, revision, updatedAt, objective,
+      runs: [
+        { id: waiting.id, revision: item.revision, status: "waiting_user", reason: "Inventory date missing", question: "Which date should I use?", summary: null },
+        { id: run.id, revision, status: "completed", reason: null, question: null, summary: "Inventory verified" },
+      ],
+    });
+    assert.equal((await request(phone, remote + "/" + privateItem.id)).status, 404);
+    assert.equal((await request(tablet, details)).status, 404);
+    assert.equal((await request(phone, details, "POST", {})).status, 405);
+    assert.equal((await owner(share.replace(/\/share$/, "/unshare"), "POST", recipient)).status, 200);
+    assert.equal((await request(phone, details)).status, 404);
+    await owner(share, "POST", recipient);
+    await owner("/v1/remote/devices/owner/phone", "DELETE");
+    assert.equal((await request(phone, details)).status, 401);
+    assert.equal((await request(await pair("phone"), details)).status, 404);
+  } finally { await server.close(); }
+});
+
 test("a project work item persists independently and resolves subdirectories to the same project", async t => {
   const { directory, project, workspace, other } = await directories(t);
   const adapter = {

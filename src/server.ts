@@ -167,13 +167,19 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'GET') return send(200, await runtime.workItems.list(url.searchParams.get('workspace')));
         if (req.method === 'POST') return send(201, await runtime.workItems.create(await body(req)));
       }
-      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(\/runs)?$/.exec(url.pathname);
+      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|share|unshare))?$/.exec(url.pathname);
       if (workItem) {
         const id = workItem[1]!;
-        if (workItem[2]) {
+        if (workItem[2] === 'runs') {
           if (req.method === 'GET') return send(200, await runtime.workItems.runs(id));
           if (req.method === 'POST') return send(201, await runtime.workItems.run(id, await body(req)));
-        } else if (req.method === 'PATCH') return send(200, await runtime.workItems.update(id, await body(req)));
+        } else if (workItem[2] && req.method === 'POST') {
+          const { accountId, deviceId } = await body(req);
+          if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide accountId and deviceId.');
+          const shared = workItem[2] === 'share';
+          if (shared) await runtime.workItems.get(id);
+          return send(200, await devices.setSharedWorkItem(accountId, deviceId, id, shared));
+        } else if (!workItem[2] && req.method === 'PATCH') return send(200, await runtime.workItems.update(id, await body(req)));
       }
       if (url.pathname === '/v1/routines') {
         if (req.method === 'GET') return send(200,await runtime.routines.list());
@@ -310,7 +316,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
     runtime = new LocalRuntime(config, { ...options, models: options?.models ?? cloudModels(), extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
-    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),approvalDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
+    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),sharedDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
     await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));
     await runtime.recover();

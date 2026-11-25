@@ -89,6 +89,15 @@ export class WorkItems<T extends WorkItemRun> {
     return (await this.load()).filter(item => item.project === project);
   }
 
+  async get(id: string): Promise<WorkItem> {
+    return this.find(await this.load(), id);
+  }
+
+  async shared(ids: readonly string[]): Promise<WorkItem[]> {
+    if (!ids.length) return [];
+    return (await this.load()).filter(item => ids.includes(item.id));
+  }
+
   async create(input: unknown): Promise<WorkItem> {
     const value = fields(input, ["workspace", "title", "objective"]);
     const title = text(value.title, "title", 120);
@@ -123,7 +132,7 @@ export class WorkItems<T extends WorkItemRun> {
   }
 
   async runs(id: string): Promise<T[]> {
-    this.find(await this.load(), id);
+    await this.get(id);
     return (await this.runtime.tasks()).filter(task => task.workItem?.id === id);
   }
 

@@ -52,8 +52,12 @@ export const remotePage = String.raw`<!doctype html>
     .task li button { text-align: left; max-width: 100%; overflow-wrap: anywhere; }
     #child-questions form + form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
     #child-questions label { margin-top: .55rem; }
-    #pending-tasks { display: grid; gap: .4rem; list-style: none; margin: 0; padding: 0; }
-    #pending-tasks button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+    #pending-tasks, #work-item-list { display: grid; gap: .4rem; list-style: none; margin: 0; padding: 0; }
+    #pending-tasks button, #work-item-list button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+    #work-item-list button[aria-expanded=true] { border-color: var(--accent); }
+    #work-item-detail { margin-top: .8rem; overflow-wrap: anywhere; }
+    #work-item-detail li + li { margin-top: .45rem; }
+    #work-item-detail p { white-space: pre-wrap; }
     #approval-list { display: grid; gap: .8rem; list-style: none; margin: 0; padding: 0; overflow-wrap: anywhere; }
     #approval-list li + li { border-top: 1px solid var(--line); padding-top: .8rem; }
     #approval-list pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow: auto; }
@@ -102,6 +106,11 @@ export const remotePage = String.raw`<!doctype html>
         <h2 id="approval-heading">Action approvals</h2>
         <ul id="approval-list"></ul>
       </section>
+      <section id="shared-work-items" class="panel" hidden aria-labelledby="work-items-heading">
+        <h2 id="work-items-heading">Shared work items</h2>
+        <ul id="work-item-list"></ul>
+        <div id="work-item-detail" hidden></div>
+      </section>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
       <section id="child-questions" class="panel task" hidden aria-label="Child task questions"></section>
       <details id="task-history" class="panel task" hidden>
@@ -138,6 +147,9 @@ const pendingWork = field("pending-work");
 const pendingTasks = field("pending-tasks");
 const approvalsPanel = field("action-approvals");
 const approvalList = field("approval-list");
+const workItemsPanel = field("shared-work-items");
+const workItemList = field("work-item-list");
+const workItemDetail = field("work-item-detail");
 const task = field("task");
 const childQuestions = field("child-questions");
 const taskHistory = field("task-history");
@@ -161,6 +173,9 @@ let listVersion = 0;
 let approvalVersion = 0;
 let approvalSnapshot = "";
 const approvalDecisions = new Map();
+let workItemsVersion = 0;
+let workItemVersion = 0;
+let selectedWorkItem = "";
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -328,7 +343,7 @@ function resetConversationView() {
 
 async function refreshList() {
   const version = ++listVersion;
-  const [rows] = await Promise.all([get("/conversations"), refreshApprovals()]);
+  const [rows] = await Promise.all([get("/conversations"), refreshApprovals(), refreshWorkItems()]);
   if (version !== listVersion || !identity) return;
   conversations.replaceChildren();
   pendingTasks.replaceChildren();
@@ -372,6 +387,97 @@ function clearApprovals() {
   approvalDecisions.clear();
   approvalList.replaceChildren();
   approvalsPanel.hidden = true;
+}
+
+function selectWorkItem(id) {
+  selectedWorkItem = id;
+  workItemVersion++;
+  workItemDetail.replaceChildren();
+  workItemDetail.hidden = !id;
+  for (const row of workItemList.children) {
+    const button = row.children[0];
+    button.setAttribute("aria-expanded", String(button.value === id));
+  }
+}
+
+function clearWorkItems() {
+  workItemsVersion++;
+  workItemList.replaceChildren();
+  workItemsPanel.hidden = true;
+  selectWorkItem("");
+}
+
+async function refreshWorkItems() {
+  const device = identity;
+  if (!device?.workItems) return;
+  const version = ++workItemsVersion;
+  const current = () => device === identity && version === workItemsVersion;
+  let rows;
+  try {
+    rows = await get("/work-items");
+  } catch (error) {
+    if (!current()) return;
+    clearWorkItems();
+    report(error);
+    return;
+  }
+  if (!current()) return;
+  const selected = rows.some(row => row.id === selectedWorkItem) ? selectedWorkItem : "";
+  workItemList.replaceChildren();
+  for (const row of rows) {
+    const item = element("li", "", workItemList);
+    const button = action(row.title + " · Revision " + row.revision, item, async () => {
+      if (device !== identity || item.parentNode !== workItemList) return;
+      const id = selectedWorkItem === row.id ? "" : row.id;
+      selectWorkItem(id);
+      if (id) {
+        element("p", "Loading work item…", workItemDetail).setAttribute("role", "status");
+        await refreshWorkItem(id, device);
+      }
+    });
+    button.value = row.id;
+    button.setAttribute("aria-controls", "work-item-detail");
+    button.setAttribute("aria-expanded", String(row.id === selected));
+  }
+  workItemsPanel.hidden = !rows.length;
+  if (selected) await refreshWorkItem(selected, device);
+  else selectWorkItem("");
+}
+
+async function refreshWorkItem(id, device) {
+  const version = ++workItemVersion;
+  const current = () => device === identity && id === selectedWorkItem && version === workItemVersion;
+  let workItem;
+  try {
+    workItem = await get("/work-items/" + encodeURIComponent(id));
+  } catch (error) {
+    if (!current()) return;
+    if (error instanceof RequestError && error.status === 401) clearWorkItems();
+    else if (error instanceof RequestError && error.status === 404) {
+      selectWorkItem("");
+      await refreshWorkItems();
+    } else {
+      selectWorkItem("");
+      report(error);
+    }
+    return;
+  }
+  if (!current()) return;
+  workItemDetail.replaceChildren();
+  element("h3", workItem.title + " · Revision " + workItem.revision, workItemDetail);
+  element("p", workItem.objective, workItemDetail);
+  if (!workItem.runs.length) {
+    element("p", "No runs yet.", workItemDetail);
+    return;
+  }
+  const runs = element("ul", "", workItemDetail);
+  for (const run of workItem.runs) {
+    const row = element("li", "", runs);
+    element("strong", taskStatusLabel(run.status) + " · Revision " + run.revision, row);
+    for (const note of new Set([run.question, run.reason, run.summary])) {
+      if (note) element("p", note, row);
+    }
+  }
 }
 
 async function refreshApprovals() {
@@ -911,6 +1017,7 @@ async function connect(value) {
   pendingTasks.replaceChildren();
   pendingWork.hidden = true;
   clearApprovals();
+  clearWorkItems();
   resetConversationView();
   restoreComposer();
   if (pending) displayReceipt({ state: "unknown" });
@@ -1009,6 +1116,7 @@ signout.addEventListener("click", async () => {
   sessionStorage.removeItem("kada-device-token");
   identity = null;
   clearApprovals();
+  clearWorkItems();
   childAnswerForms.clear();
   try {
     if (pushSettings?.publicKey) {
@@ -1160,6 +1268,7 @@ setInterval(async () => {
     if (error instanceof RequestError && error.status === 401) {
       identity = null;
       clearApprovals();
+      clearWorkItems();
       childAnswerForms.clear();
       sessionStorage.removeItem("kada-device-token");
       assistant.hidden = true;

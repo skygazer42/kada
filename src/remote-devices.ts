@@ -30,11 +30,25 @@ export class RemoteDevices {
     });
   }
 
-  async withSharedApprovals<T>(tokenHash: string, action: (grants: readonly SharedApproval[]) => Promise<T>) {
+  async setSharedWorkItem(accountId: string, deviceId: string, id: string, shared: boolean) {
+    this.validate(accountId, deviceId);
+    return this.changes.run(async () => {
+      const devices = await this.credentials();
+      const device = devices.find(item => item.accountId === accountId && item.deviceId === deviceId);
+      if (!device) throw Object.assign(new Error('Device pairing not found.'), { status: 404 });
+      const items = device.sharedWorkItems ?? [];
+      if (items.includes(id) === shared) return { shared };
+      device.sharedWorkItems = shared ? [...items, id] : items.filter(item => item !== id);
+      await atomicJson(this.path, devices);
+      return { shared };
+    });
+  }
+
+  async withPairedDevice<T>(tokenHash: string, action: (device: RemoteDevice) => Promise<T>) {
     return this.changes.run(async () => {
       const device = (await this.credentials()).find(item => item.tokenHash === tokenHash);
       if (!device) return;
-      return action(device.sharedApprovals ?? []);
+      return action(device);
     });
   }
 

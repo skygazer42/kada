@@ -956,7 +956,7 @@ export class LocalRuntime {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
       const { status, goal } = await this.taskState(active, meta);
-      const childQuestion = meta.remotePolicy && status === "running" && goal?.phase === "working"
+      const childQuestion = status === "running" && goal?.phase === "working"
         ? await firstChildQuestion(active.harness, active.root.id, goal, ctx) : undefined;
       return {
         status, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null, childQuestion,

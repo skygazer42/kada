@@ -47,11 +47,12 @@ function storage(values: Map<string, string>, beforeSet?: (key: string) => void)
 
 type Message = { messageId: string; text: string; attachmentIds: string[] };
 type ApprovalFixture = (init: RequestInit, url: string) => Response | Promise<Response>;
+type WorkItemsFixture = (url: string, bearer: string) => Response | Promise<Response>;
 const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }, workItems?: WorkItemsFixture) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -109,14 +110,18 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
         setInterval(callback: () => Promise<void>) { poll = callback; },
         async fetch(url: string, init: RequestInit) {
           requests.push(url);
+          const deviceToken = (init.headers as Record<string, string>).Authorization.slice("Bearer ".length);
           if (url === "/remote/api/push" && push) return push.request(init);
           if (url.startsWith("/remote/api/action-approvals") && approvals) return approvals.request(init, url);
+          if (url.startsWith("/remote/api/work-items") && workItems) return workItems(url, deviceToken);
           if (url === "/remote/api/session") {
-            const deviceToken = (init.headers as Record<string, string>).Authorization.slice("Bearer ".length);
             await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
             const pairingId = createHash("sha256").update("fixture:" + deviceToken).digest("hex");
-            return Response.json({ channel: "web", accountId, deviceId, pairingId, ...(approvals ? { actionApprovals: true } : {}) });
+            return Response.json({
+              channel: "web", accountId, deviceId, pairingId,
+              ...(approvals ? { actionApprovals: true } : {}), ...(workItems ? { workItems: true } : {}),
+            });
           }
           if (url === "/remote/api/conversations") {
             return listUnavailable ? Response.json({ error: "List unavailable." }, { status: 503 }) : list();
@@ -354,6 +359,55 @@ test("late approval lists and decisions cannot change a replacement pairing", as
   assert.equal(page.field("action-approvals").hidden, true);
   assert.deepEqual(list.children, []);
   assert.equal(page.field("status").textContent, "");
+});
+
+const workItemsUrl = "/remote/api/work-items";
+const workItemRow = { id: "release-notes", title: "Release notes", revision: 2, updatedAt: 10 };
+
+function visibleText(node: Element): string {
+  return [node.textContent, ...node.children.map(visibleText)].join(" ");
+}
+
+test("shared work items display their revision and run status without changing conversations", async () => {
+  let shared = true;
+  const page = await harness(undefined, undefined, undefined, undefined, (url) => {
+    if (url === workItemsUrl) return Response.json(shared ? [workItemRow] : []);
+    return Response.json({ ...workItemRow, objective: "Prepare the next release", runs: [
+      { id: "current", revision: 2, status: "waiting_user", question: "Which version?" },
+      { id: "previous", revision: 1, status: "completed", summary: "Notes drafted." },
+    ] });
+  }).open();
+  await page.type("Keep this draft");
+  assert.equal(page.field("shared-work-items").hidden, false);
+  const item = page.field("work-item-list").children[0]!.children[0]!;
+  assert.match(item.textContent, /Release notes.*Revision 2/);
+  await item.trigger("click");
+  const detail = page.field("work-item-detail");
+  assert.match(visibleText(detail), /Prepare the next release.*Waiting for you.*Which version\?.*Completed.*Notes drafted\./);
+  assert.equal(page.field("prompt").value, "Keep this draft");
+  shared = false;
+  await page.field("refresh-conversations").trigger("click");
+  assert.equal(page.field("shared-work-items").hidden, true);
+  assert.deepEqual(detail.children, []);
+});
+
+test("a late work item detail cannot restore revoked data after a list refresh", async () => {
+  const delayed = Promise.withResolvers<Response>();
+  const requested = Promise.withResolvers<void>();
+  let shared = true;
+  const page = await harness(undefined, undefined, undefined, undefined, (url) => {
+    if (url === workItemsUrl) return Response.json(shared ? [workItemRow] : []);
+    requested.resolve();
+    return delayed.promise;
+  }).open();
+  const opening = page.field("work-item-list").children[0]!.children[0]!.trigger("click");
+  await requested.promise;
+  shared = false;
+  await page.field("refresh-conversations").trigger("click");
+  delayed.resolve(Response.json({ ...workItemRow, objective: "Revoked objective", runs: [] }));
+  await opening;
+  assert.equal(page.field("shared-work-items").hidden, true);
+  assert.deepEqual(page.field("work-item-detail").children, []);
 });
 
 test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {

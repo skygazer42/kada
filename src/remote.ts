@@ -20,6 +20,7 @@ export interface RemoteDevice {
   deviceId: string;
   tokenHash: string;
   sharedApprovals?: SharedApproval[];
+  sharedWorkItems?: string[];
 }
 
 export interface RemoteOptions {
@@ -29,7 +30,7 @@ export interface RemoteOptions {
   devices: readonly RemoteDevice[] | (() => readonly RemoteDevice[] | Promise<readonly RemoteDevice[]>);
   push?: boolean;
   pushSender?: PushSender;
-  approvalDevices?: Pick<RemoteDevices, "withSharedApprovals">;
+  sharedDevices?: Pick<RemoteDevices, "withPairedDevice">;
 }
 
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -702,12 +703,35 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       const { pairingId, tokenHash, ...scope } = await authenticate(request);
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
+      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36}))?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
-        send(response, 200, { ...scope, pairingId, ...(options.approvalDevices ? { actionApprovals: true } : {}) });
-      } else if (options.approvalDevices && method === "GET" && route === "/remote/api/action-approvals") {
-        const rows = await options.approvalDevices.withSharedApprovals(tokenHash, async grants => {
+        send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true } : {}) });
+      } else if (options.sharedDevices && workItem) {
+        if (method !== "GET") throw new HttpError(405, "Shared work items are read-only.");
+        const id = workItem[1];
+        const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
+          const grants = device.sharedWorkItems ?? [];
+          if (id === undefined) {
+            return (await runtime.workItems.shared(grants)).map(({ id, title, revision, updatedAt }) => ({ id, title, revision, updatedAt }));
+          }
+          if (!grants.includes(id)) throw new HttpError(404, "Shared work item not found.");
+          const { title, revision, updatedAt, objective } = await runtime.workItems.get(id);
+          const runs = await Promise.all((await runtime.workItems.runs(id)).map(async run => {
+            const { status, reason, question, childQuestion, summary } = await runtime.taskOverview(run.id);
+            return {
+              id: run.id, revision: run.workItem!.revision, status, reason, question: question ?? childQuestion ?? null, summary,
+              pending: Boolean(childQuestion) || taskGroup(status) === "pending", createdAt: run.createdAt,
+            };
+          }));
+          runs.sort((a, b) => Number(b.pending) - Number(a.pending) || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+          return { id, title, revision, updatedAt, objective, runs: runs.map(({ pending, createdAt, ...run }) => run) };
+        });
+        if (!result) throw new HttpError(401, "Enter this device’s pairing token.");
+        send(response, 200, result);
+      } else if (options.sharedDevices && method === "GET" && route === "/remote/api/action-approvals") {
+        const rows = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const previews = [];
-          for (const grant of grants) {
+          for (const grant of device.sharedApprovals ?? []) {
             const approval = await runtime.sharedApproval(grant.taskId, grant.approvalId, grant.digest);
             if (approval) previews.push(approval);
           }
@@ -715,14 +739,14 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         });
         if (!rows) throw new HttpError(401, "Enter this device’s pairing token.");
         send(response, 200, rows);
-      } else if (options.approvalDevices && method === "POST" && actionApproval) {
+      } else if (options.sharedDevices && method === "POST" && actionApproval) {
         const [, taskId, approvalId] = actionApproval;
         const { decision, digest } = await json(request);
         if ((decision !== "allow" && decision !== "deny") || typeof digest !== "string" || !shaPattern.test(digest)) {
           throw new HttpError(400, "Provide the decision and displayed digest.");
         }
-        const receipt = await options.approvalDevices.withSharedApprovals(tokenHash, async grants => {
-          const grant = grants.find(item => item.taskId === taskId && item.approvalId === approvalId);
+        const receipt = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
+          const grant = device.sharedApprovals?.find(item => item.taskId === taskId && item.approvalId === approvalId);
           if (!grant) throw new HttpError(404, "Shared action approval not found.");
           if (grant.digest !== digest) throw new HttpError(409, "The displayed action does not match this approval.");
           return runtime.decideApproval(taskId!, approvalId!, decision, digest);
