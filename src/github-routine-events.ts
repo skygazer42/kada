@@ -6,6 +6,14 @@ import lockfile from "proper-lockfile";
 import type { LocalRoutines, Routine } from "./routines.js";
 import { atomicJson, errorText, readJson } from "./util.js";
 
+export type GithubIssue = { repository: string; number: number };
+
+export function githubIssueTarget(repository: unknown, number: unknown): GithubIssue | undefined {
+  if (typeof repository !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/.test(repository) ||
+    repository.endsWith("/.") || repository.endsWith("/..") || typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) return;
+  return { repository: repository.toLowerCase(), number };
+}
+
 export type GithubRoutineEvent = {
   source: "github";
   type: "issues.opened";

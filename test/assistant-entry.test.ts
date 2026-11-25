@@ -353,6 +353,7 @@ test('GitHub feed receipt loss replays through the daemon without starting anoth
     const tasks = await server.runtime.list();
     assert.equal(tasks.length, 1);
     assert.equal(tasks[0]?.objective, 'Review the saved issue queue');
+    assert.deepEqual(tasks[0]?.routineIssue, { repository: 'fixture/repo', number: 2 });
     rows = [issue('103', 4), ...rows];
     assert.equal((await syncCli()).delivered, 1);
     await until(() => server.runtime.list(), runs => runs.length === 2 && runs.every(run => run.status === 'completed'));

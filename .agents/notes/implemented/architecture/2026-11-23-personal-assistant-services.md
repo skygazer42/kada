@@ -90,6 +90,10 @@ macOS 任务卡从原任务视图读取子任务问题，每张卡以父任务�
 
 纯事件规则只在接受事件或手动运行时创建 Pi 执行任务。公开 GitHub Issue 支持本机 CLI 手动同步，也可由 daemon 按用户配置的规则 ID 持续轮询。两种入口针对同一规则和仓库共用文件锁及游标。规则按原修订受理后推进游标，原事件重投可取回已有回执。轮询遵循 GitHub 的限流和重试间隔，daemon 关闭时取消在途网络请求。 [DuskBot 游标实现](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451)
 
+GitHub Issue Webhook 在 owner 配置的规则路径启用，secret 只引用环境变量，对最多 1 MiB 原始字节做 HMAC-SHA256 验证；不接受 daemon 令牌代替验签。UTF-8 JSON 验证后仅投影仓库和正整数编号，规则修订交给原 receiveEvent 再核对。事件身份来自签名正文哈希，不能使用未签名 delivery header，否则复制签名、改 header 就能重复受理。回执和待执行 Pi 任务由原事件事务一起保存，响应未知返回可重试的 503，重投不建立第二套队列。 [Rakazo 原始验签与正文防重](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L163)
+
+GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生项保存，再通过 task metadata 的 routineIssue 恢复到模型提示。否则 Webhook 会启动助手却无法告诉它具体 Issue。原规则目标、工具与预算不变；仓库正文仍须用现有工具读取并当作不可信数据。任务创建摘要包含该投影，原 ID 不得换绑其他 Issue。其他事件数据仍只用于匹配，避免把外部任意字段提升为指令。
+
 手机 Web Push 以 Pi 的原会话事件为来源，每个配对保存订阅和已受理的事件位置。锁屏内容只显示通用提醒，通知点击经配对与会话归属检查后打开原会话。浏览器推送中继仅接受已知 HTTPS 服务，服务端密钥留在本机数据目录。 [Codync 通知处理](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179)
 
 远程子任务登记问题时，在同一个 Pi 事务中向父会话追加通用待答事件。重放同一工具调用沿用原问题和事件。问题正文只在已完成会话归属校验的详情接口中提供。 [Suparagent 待答通知](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L483)

@@ -10,6 +10,7 @@ import { localEnvironment, shellEnvironment } from "./execution.js";
 import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, routineTiming, type RoutineTiming, type RoutineSchedule } from "./routine-schedule.js";
 import type { LocalRuntime } from "./runtime.js";
 import { normalizeMcpPrecheck, type McpPrecheck, type McpTools } from "./mcp-tools.js";
+import { githubIssueTarget, type GithubIssue } from "./github-routine-events.js";
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -18,7 +19,7 @@ export type RoutineBudget = {
   maxDurationMs: number;
   maxTotalTokens?: number;
 };
-type EventIdentity = { source: string; type: string; eventId: string };
+type EventIdentity = { source: string; type: string; eventId: string; issue?: GithubIssue };
 type EventData = Record<string, string | number | boolean | null>;
 type RoutineEvent = { source: string; type: string; equals: EventData };
 
@@ -728,8 +729,10 @@ export class LocalRoutines {
       const matches = Object.entries(rule.event.equals).every(([field, expected]) => Object.hasOwn(data, field) && data[field] === expected);
       if (matches && rule.manual) throw new RoutineError(409, "An immediate run for this rule is still being admitted.");
       const now = this.now();
-      const occurrence = { ...occurrenceFor(rule, now, requestKey), trigger: "event" as const, event };
-      const receipt: Receipt = { id: occurrence.id, scheduledAt: occurrence.scheduledAt, trigger: "event", event,
+      const issue = event.source === "github" && event.type === "issues.opened" ? githubIssueTarget(data.repository, data.number) : undefined;
+      const identity = { ...event, ...(issue ? { issue } : {}) };
+      const occurrence = { ...occurrenceFor(rule, now, requestKey), trigger: "event" as const, event: identity };
+      const receipt: Receipt = { id: occurrence.id, scheduledAt: occurrence.scheduledAt, trigger: "event", event: identity,
         eventFingerprint: fingerprint, status: matches ? "claimed" : "skipped",
         ...(matches && occurrence.action === "task" ? { taskId: occurrence.taskId } : {}) };
       if (matches) {

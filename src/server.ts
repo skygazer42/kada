@@ -18,6 +18,7 @@ import type { SkillSelection } from './skills.js';
 import type { McpDefinition } from './mcp-tools.js';
 import type { RoutineInput } from './routines.js';
 import { watchGithubIssues } from "./github-routine-events.js";
+import { githubWebhook } from './github-webhook.js';
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -62,6 +63,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','task-handoff','remote-web','routines'] });
+      const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
+      if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
       if (url.pathname === '/v1/settings/mcp/oauth/callback' && req.method === 'GET') {
         if (req.headers.host !== new URL(`http://127.0.0.1:${config.port}`).host) return send(403, { error: 'Use the local OAuth callback address.' });
