@@ -50,6 +50,8 @@ macOS 任务卡通过本机任务视图展示脱敏参数，决定提交原动�
 
 手机工作项授权绑定当前配对和工作项 ID，覆盖后续修订和关联运行。详情从原任务读取状态、待答和交付摘要，待处理项优先。同一配对的授权读取和撤回串行。 [Suparagent 工作项待处理状态](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L232) · [运行状态读取](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_execution.py#L49)
 
+展开历史运行先用原任务元数据核对工作项归属，再打开 Pi 状态。手机详情只投影该次运行的目标、步骤、待答和摘要。撤回分享后的请求在授权检查处结束，页面也丢弃此前未返回的详情。
+
 后台子任务把问题和用户答复保存在 Pi 子会话文档。父任务的监督循环检查修订和预算后，用固定请求 ID 提交到原子会话。等待期间批次以 Pi 持久休眠释放执行阶段。重启时使用原批次、问题和已受理的回复，其他子任务仍可独立完成。
 
 `delegate_send` 在同一子会话文档保存追加指令，用主助手的工具任务 ID 生成固定请求 ID。父任务监督循环在检查预算后通过 Pi 的 `steer` 派发，批次按提交状态等待结果。用户待答优先于未派发的指令。若已有指令进入 Pi 队列，子助手会先收到该指令，再决定是否需要提问。 [Pots 追加指令](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/children.ts#L578)

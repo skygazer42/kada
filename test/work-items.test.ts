@@ -120,6 +120,10 @@ test("a paired phone can read only explicitly shared work items and their origin
     needsInput = false;
     const run = await server.runtime.workItems.run(item.id, { revision: updated.revision, requestId: "later-run", confirmed: true });
     await until(() => server.runtime.status(run.id), status => status.status === "completed");
+    const privateRun = await server.runtime.workItems.run(privateItem.id, {
+      revision: privateItem.revision, requestId: "private-run", confirmed: true,
+    });
+    await until(() => server.runtime.status(privateRun.id), status => status.status === "completed");
     await server.close();
     server = await open();
     const { id, title, revision, updatedAt, objective } = updated;
@@ -132,13 +136,32 @@ test("a paired phone can read only explicitly shared work items and their origin
     });
     assert.equal((await request(phone, remote + "/" + privateItem.id)).status, 404);
     assert.equal((await request(tablet, details)).status, 404);
+    const runDetails = details + "/runs/" + waiting.id;
+    const opened = await request(phone, runDetails);
+    assert.equal(opened.status, 200);
+    assert.deepEqual(await opened.json(), {
+      id: waiting.id, revision: item.revision, objective: item.objective, status: "waiting_user",
+      reason: "Inventory date missing", question: "Which date should I use?", summary: null, steps: [], childQuestions: [],
+    });
+    assert.equal((await request(tablet, runDetails)).status, 404);
+    assert.equal((await request(phone, remote + "/" + privateItem.id + "/runs/" + waiting.id)).status, 404);
+    assert.equal((await request(phone, details + "/runs/" + privateItem.id)).status, 404);
+    const readStatus = t.mock.method(server.runtime, "status");
+    try {
+      assert.equal((await request(phone, details + "/runs/" + privateRun.id)).status, 404);
+      assert.equal(readStatus.mock.callCount(), 0);
+    } finally { readStatus.mock.restore(); }
+    assert.equal((await request(phone, runDetails, "POST", {})).status, 405);
     assert.equal((await request(phone, details, "POST", {})).status, 405);
     assert.equal((await owner(share.replace(/\/share$/, "/unshare"), "POST", recipient)).status, 200);
     assert.equal((await request(phone, details)).status, 404);
+    assert.equal((await request(phone, runDetails)).status, 404);
     await owner(share, "POST", recipient);
     await owner("/v1/remote/devices/owner/phone", "DELETE");
     assert.equal((await request(phone, details)).status, 401);
-    assert.equal((await request(await pair("phone"), details)).status, 404);
+    const replacement = await pair("phone");
+    assert.equal((await request(replacement, details)).status, 404);
+    assert.equal((await request(replacement, runDetails)).status, 404);
   } finally { await server.close(); }
 });
 

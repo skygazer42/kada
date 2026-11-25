@@ -176,6 +176,7 @@ const approvalDecisions = new Map();
 let workItemsVersion = 0;
 let workItemVersion = 0;
 let selectedWorkItem = "";
+let selectedWorkItemRun = "";
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -391,6 +392,7 @@ function clearApprovals() {
 
 function selectWorkItem(id) {
   selectedWorkItem = id;
+  selectedWorkItemRun = "";
   workItemVersion++;
   workItemDetail.replaceChildren();
   workItemDetail.hidden = !id;
@@ -466,17 +468,69 @@ async function refreshWorkItem(id, device) {
   workItemDetail.replaceChildren();
   element("h3", workItem.title + " · Revision " + workItem.revision, workItemDetail);
   element("p", workItem.objective, workItemDetail);
+  if (!workItem.runs.some(run => run.id === selectedWorkItemRun)) selectedWorkItemRun = "";
   if (!workItem.runs.length) {
     element("p", "No runs yet.", workItemDetail);
     return;
   }
   const runs = element("ul", "", workItemDetail);
+  let selectedPanel;
   for (const run of workItem.runs) {
     const row = element("li", "", runs);
-    element("strong", taskStatusLabel(run.status) + " · Revision " + run.revision, row);
+    const panelId = "work-item-run-" + run.id;
+    const button = action(taskStatusLabel(run.status) + " · Revision " + run.revision, row, async () => {
+      if (!current() || runs.parentNode !== workItemDetail) return;
+      selectedWorkItemRun = selectedWorkItemRun === run.id ? "" : run.id;
+      for (const entry of runs.children) {
+        const [control, panel] = [entry.children[0], entry.children[entry.children.length - 1]];
+        control.setAttribute("aria-expanded", String(control.value === selectedWorkItemRun));
+        panel.hidden = control.value !== selectedWorkItemRun;
+        panel.replaceChildren();
+      }
+      if (selectedWorkItemRun) await refreshWorkItemRun(id, run.id, panel, current);
+    });
+    button.value = run.id;
+    button.setAttribute("aria-controls", panelId);
+    button.setAttribute("aria-expanded", String(run.id === selectedWorkItemRun));
     for (const note of new Set([run.question, run.reason, run.summary])) {
       if (note) element("p", note, row);
     }
+    const panel = element("div", "", row);
+    panel.id = panelId;
+    panel.hidden = run.id !== selectedWorkItemRun;
+    if (!panel.hidden) selectedPanel = panel;
+  }
+  if (selectedPanel) await refreshWorkItemRun(id, selectedWorkItemRun, selectedPanel, current);
+}
+
+async function refreshWorkItemRun(workItemId, runId, panel, currentWorkItem) {
+  const status = element("p", "Loading run…", panel);
+  status.setAttribute("role", "status");
+  const current = () => currentWorkItem() && selectedWorkItemRun === runId && status.parentNode === panel;
+  let run;
+  try {
+    const path = "/work-items/" + encodeURIComponent(workItemId) + "/runs/" + encodeURIComponent(runId);
+    run = await get(path);
+  } catch (error) {
+    if (!current()) return;
+    if (error instanceof RequestError && error.status === 401) clearWorkItems();
+    else if (error instanceof RequestError && error.status === 404) {
+      selectedWorkItemRun = "";
+      await refreshWorkItems();
+    } else status.textContent = "Could not load this run. Close it and try again.";
+    return;
+  }
+  if (!current()) return;
+  panel.replaceChildren();
+  element("p", run.objective, panel);
+  for (const note of new Set([run.question, run.reason, run.summary])) {
+    if (note) element("p", note, panel);
+  }
+  presentSteps(run.steps, panel);
+  for (const question of run.childQuestions) {
+    const entry = element("p", "", panel);
+    element("strong", question.name, entry);
+    element("span", " · " + question.text, entry);
   }
 }
 
@@ -720,6 +774,15 @@ function taskStatusLabel(status) {
   return labels[status] || String(status || "Task").replace(/_/g, " ");
 }
 
+function presentSteps(items, parent) {
+  if (!items?.length) return;
+  const steps = element("ol", "", parent);
+  for (const step of items) {
+    const state = step.status === "done" ? "Done" : step.status === "running" ? "In progress" : "Pending";
+    element("li", step.title + " · " + state, steps);
+  }
+}
+
 function childAnswerForm(id, question) {
   const device = identity;
   const { childId, questionId, name, text } = question;
@@ -856,13 +919,7 @@ function presentTask(view, id) {
   element("h2", taskStatusLabel(view.status), task);
   if (view.question) element("p", view.question, task);
   if (view.reason && view.reason !== view.question) element("p", view.reason, task);
-  if (view.progress?.steps?.length) {
-    const steps = element("ol", "", task);
-    for (const step of view.progress.steps) {
-      const state = step.status === "done" ? "Done" : step.status === "running" ? "In progress" : "Pending";
-      element("li", step.title + " · " + state, steps);
-    }
-  }
+  presentSteps(view.progress?.steps, task);
   if (view.progress?.tools?.length) {
     element("p", "Running " + [...new Set(view.progress.tools.map((tool) => tool.name))].join(", "), task);
   }

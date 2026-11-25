@@ -703,18 +703,35 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       const { pairingId, tokenHash, ...scope } = await authenticate(request);
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
-      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36}))?$/.exec(route);
+      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36}))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true } : {}) });
       } else if (options.sharedDevices && workItem) {
         if (method !== "GET") throw new HttpError(405, "Shared work items are read-only.");
-        const id = workItem[1];
+        const [, id, runId] = workItem;
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const grants = device.sharedWorkItems ?? [];
           if (id === undefined) {
             return (await runtime.workItems.shared(grants)).map(({ id, title, revision, updatedAt }) => ({ id, title, revision, updatedAt }));
           }
           if (!grants.includes(id)) throw new HttpError(404, "Shared work item not found.");
+          if (runId) {
+            const meta = await runtime.metadata(runId).catch(error => {
+              if (isMissing(error)) throw new HttpError(404, "Shared work item run not found.");
+              throw error;
+            });
+            if (meta.workItem?.id !== id) throw new HttpError(404, "Shared work item run not found.");
+            const run = await runtime.status(runId);
+            const childQuestions = run.status === "running" ? run.delegations.flatMap(child => child.question
+              ? [{ name: child.name, text: child.question.text }] : []) : [];
+            return {
+              id: run.id, revision: meta.workItem.revision, objective: run.objective, status: run.status,
+              reason: run.goal?.reason ?? run.initializationError ?? null, question: run.goal?.question ?? null,
+              summary: run.status === "completed" ? run.goal?.candidate?.summary ?? null : null,
+              steps: (run.goal?.plan ?? []).map(({ id, title, status }) => ({ id, title, status })),
+              childQuestions,
+            };
+          }
           const { title, revision, updatedAt, objective } = await runtime.workItems.get(id);
           const runs = await Promise.all((await runtime.workItems.runs(id)).map(async run => {
             const { status, reason, question, childQuestion, summary } = await runtime.taskOverview(run.id);

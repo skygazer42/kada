@@ -410,6 +410,59 @@ test("a late work item detail cannot restore revoked data after a list refresh",
   assert.deepEqual(page.field("work-item-detail").children, []);
 });
 
+test("opening a shared run shows its original goal and steps without switching chats", async () => {
+  const itemPath = workItemsUrl + "/" + workItemRow.id;
+  const device = harness(undefined, undefined, undefined, undefined, (url) => {
+    if (url === workItemsUrl) return Response.json([workItemRow]);
+    if (url === itemPath) return Response.json({ ...workItemRow, objective: "Current work-item goal", runs: [
+      { id: "previous", revision: 1, status: "running", question: "Which date?" },
+    ] });
+    assert.equal(url, itemPath + "/runs/previous");
+    return Response.json({ id: "previous", revision: 1, status: "running", objective: "Original run goal",
+      steps: [{ id: "draft", title: "Draft the notes", status: "done" }],
+      childQuestions: [{ name: "Reviewer", text: "Which date?" }],
+    });
+  });
+  const page = await device.open();
+  const selectedConversation = page.field("conversations").value;
+  const conversationRequests = device.requests.filter(url => url.startsWith("/remote/api/conversations/"));
+  await page.type("Keep this chat draft");
+  await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
+  const detail = page.field("work-item-detail");
+  const run = detail.children[2]!.children[0]!.children[0]!;
+  await run.trigger("click");
+  assert.match(visibleText(detail), /Current work-item goal.*Original run goal.*Draft the notes.*Done.*Reviewer.*Which date\?/);
+  assert.equal(page.field("conversations").value, selectedConversation);
+  assert.deepEqual(device.requests.filter(url => url.startsWith("/remote/api/conversations/")), conversationRequests);
+  assert.equal(page.field("prompt").value, "Keep this chat draft");
+});
+
+test("a late shared run response cannot restore a revoked work item", async () => {
+  const delayed = Promise.withResolvers<Response>();
+  const requested = Promise.withResolvers<void>();
+  let shared = true;
+  const page = await harness(undefined, undefined, undefined, undefined, (url) => {
+    if (url === workItemsUrl) return Response.json(shared ? [workItemRow] : []);
+    if (url.endsWith("/runs/current")) {
+      requested.resolve();
+      return delayed.promise;
+    }
+    return Response.json({ ...workItemRow, objective: "Work-item goal", runs: [
+      { id: "current", revision: 2, status: "waiting_user" },
+    ] });
+  }).open();
+  await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
+  const detail = page.field("work-item-detail");
+  const opening = detail.children[2]!.children[0]!.children[0]!.trigger("click");
+  await Promise.race([requested.promise, opening]);
+  shared = false;
+  await page.field("refresh-conversations").trigger("click");
+  delayed.resolve(Response.json({ objective: "Revoked run goal", steps: [], childQuestions: [] }));
+  await opening;
+  assert.equal(page.field("shared-work-items").hidden, true);
+  assert.deepEqual(detail.children, []);
+});
+
 test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {
   const initial = { role: "user", sequence: 1, text: "Original request" };
   const reply = { role: "assistant", sequence: 4, text: "Original reply" };
