@@ -13,6 +13,7 @@ Kada's LICENSE applies to Kada-owned code and repository-owned character artwork
 | jsonc-parser | 3.3.1 | MIT |
 | proper-lockfile | 4.1.2 | MIT |
 | smol-toml | 1.9.1 | BSD-3-Clause |
+| web-push | 3.6.7 | MPL-2.0 |
 
 The lockfile records declared licenses for transitive packages. Keep their copyright and license files when redistributing installed dependencies; this table is not a replacement for those files. Development-only Python requirements are listed separately in scripts/cases/requirements.txt.
 

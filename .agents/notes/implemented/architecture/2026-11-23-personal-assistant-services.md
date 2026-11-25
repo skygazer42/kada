@@ -50,6 +50,8 @@ macOS 任务卡通过本机任务视图展示脱敏参数，决定提交原动�
 
 纯事件规则只在接受事件或手动运行时创建 Pi 执行任务。公开 GitHub Issue 同步由本机 CLI 发起。每个规则和仓库有独立游标，收到本机 API 的持久受理回执后推进。新事件受理前核对规则修订，原事件重投可取回已有回执。这样可以让系统计划任务负责重复调用，并复用 Pi 的去重和运行历史。 [DuskBot 游标实现](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451)
 
+手机 Web Push 以 Pi 的原会话事件为来源，每个配对保存订阅和已受理的事件位置。锁屏内容只显示通用提醒，通知点击经配对与会话归属检查后打开原会话。浏览器推送中继仅接受已知 HTTPS 服务，服务端密钥留在本机数据目录。 [Codync 通知处理](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179)
+
 预算到限时直接停止监督的规则更简单，但会遗漏 Pi 已经结清、只等本地验收的候选。再发一次模型请求也可以让模型重提候选，但会消耗额度，且已有的持久提交足以做本地验收。
 
 使用常见任务队列和独立数据库能提供通用的定时管理，但会增加第二套任务与恢复状态。当前 Pi 1.4.0 已提供持久等待和 ownership，直接使用这些公开能力。

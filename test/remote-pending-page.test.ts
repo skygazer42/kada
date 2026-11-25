@@ -61,8 +61,17 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     expireAuthorization: () => { authorizationExpired = true; },
     failList: () => { listUnavailable = true; },
     failDraftWrite: () => { failComposerWrite = true; },
-    async open() {
+    async open(hash = "", push?: {
+      serviceWorker: object;
+      permission: () => Promise<string>;
+      request: (init: RequestInit) => Response;
+    }) {
+      const location = Object.assign(new URL("http://localhost/remote" + hash), {
+        reload() { reloaded = true; },
+      });
+      let reloaded = false;
       const nodes = new Map<string, Element>();
+      const windowHandlers = new Map<string, () => void>();
       let poll: () => Promise<void>;
       const field = (id: string) => {
         if (!nodes.has(id)) nodes.set(id, new Element());
@@ -70,13 +79,18 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
       };
       runInNewContext(remoteScript, {
         document: { getElementById: field, createElement: () => new Element(), addEventListener() {} },
-        window: { addEventListener() {} },
+        window: { addEventListener(type: string, handler: () => void) { windowHandlers.set(type, handler); } },
+        ...(push ? { PushManager: {}, Notification: { requestPermission: push.permission } } : {}),
+        location, history: { replaceState(_state: unknown, _title: string, path: string) {
+          location.href = new URL(path, location).href;
+        } }, URLSearchParams,
+        AbortSignal,
         localStorage: storage(local, (key) => {
           if (!failComposerWrite || !key.startsWith("kada:composer:")) return;
           failComposerWrite = false;
           throw new DOMException("Storage quota reached", "QuotaExceededError");
         }), sessionStorage: storage(session), crypto: webcrypto,
-        navigator: { locks: { request(name: string, fn: () => unknown) {
+        navigator: { serviceWorker: push?.serviceWorker, locks: { request(name: string, fn: () => unknown) {
           const result = (locks.get(name) ?? Promise.resolve()).then(fn);
           locks.set(name, result.catch(() => {}));
           return result;
@@ -85,6 +99,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
         setInterval(callback: () => Promise<void>) { poll = callback; },
         async fetch(url: string, init: RequestInit) {
           requests.push(url);
+          if (url === "/remote/api/push" && push) return push.request(init);
           if (url === "/remote/api/session") {
             const deviceToken = (init.headers as Record<string, string>).Authorization.slice("Bearer ".length);
             await sessionWait?.(deviceToken);
@@ -119,6 +134,13 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
       await new Promise<void>((resolve) => setImmediate(resolve));
       return {
         field,
+        location,
+        reloaded: () => reloaded,
+        async navigate(hash: string) {
+          location.hash = hash;
+          windowHandlers.get("hashchange")?.();
+          await new Promise<void>(resolve => setImmediate(resolve));
+        },
         poll: () => poll(),
         receiptText: () => field("uncertain").children.map((child) => child.textContent),
         action: (label: string) => field("uncertain").children.find((child) => child.textContent === label),
@@ -135,6 +157,93 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     },
   };
 }
+
+test("a task link waits for pairing and only selects a conversation listed for that device", async () => {
+  const linked = "shared-report";
+  const device = harness((url) => Response.json({
+    cursor: 1, messages: [{ role: "user", sequence: 1, text: url.pathname.endsWith("/" + linked) ? "Linked report" : "First chat" }],
+    progressEvents: [], task: null,
+  }), undefined, () => Response.json([
+    { conversationId, title: "First chat" },
+    { conversationId: linked, title: "Report" },
+  ]));
+  device.session.clear();
+  const page = await device.open("#conversation=" + linked);
+  assert.deepEqual(device.requests, []);
+  page.field("token").value = "phone";
+  await page.field("pair-form").trigger("submit");
+  assert.equal(page.field("conversation").value, linked);
+  assert.equal(page.field("messages").children[0]!.children[1]!.textContent, "Linked report");
+  assert.equal(page.location.hash, "");
+
+  const blocked = await device.open("#conversation=other-device-task");
+  assert.equal(blocked.field("conversation").value, linked);
+  assert.match(blocked.field("status").textContent, /unavailable on this device/i);
+  assert.equal(device.requests.some(path => path.includes("other-device-task")), false);
+  await blocked.navigate("#conversation=" + conversationId + "&pairing=" + "b".repeat(64));
+  assert.equal(blocked.field("conversation").value, linked);
+  await blocked.navigate("#conversation=" + conversationId + "&pairing=" + createHash("sha256").update("fixture:phone").digest("hex"));
+  assert.equal(blocked.field("conversation").value, conversationId);
+});
+
+test("a paired browser registers its push worker only after opt-in and can disable delivery", async () => {
+  let subscribed = false;
+  const calls: string[] = [];
+  const subscription = { endpoint: "https://fcm.googleapis.com/fcm/send/test", keys: { p256dh: "client-key", auth: "client-auth" } };
+  const page = await harness().open("", {
+    permission: async () => { calls.push("permission"); return "granted"; },
+    serviceWorker: { async register(path: string, options: { scope: string }) {
+      assert.equal(path, "/remote/sw.js");
+      assert.equal(options.scope, "/remote/");
+      calls.push("register");
+      return { active: true, pushManager: {
+        getSubscription: async () => null,
+        async subscribe(input: { userVisibleOnly: boolean; applicationServerKey: string }) {
+          assert.equal(input.applicationServerKey, "server-key");
+          assert.equal(input.userVisibleOnly, true);
+          return subscription;
+        },
+      } };
+    } },
+    request(init) {
+      if (init.method === "PUT") {
+        calls.push("put");
+        assert.deepEqual(JSON.parse(String(init.body)), subscription);
+        subscribed = true;
+      } else if (init.method === "DELETE") {
+        calls.push("delete");
+        subscribed = false;
+      }
+      return Response.json({ publicKey: "server-key", subscribed });
+    },
+  });
+  const control = page.field("task-notifications");
+  assert.equal(control.hidden, false);
+  assert.deepEqual(calls, []);
+  await control.trigger("click");
+  assert.equal(control.textContent, "Disable task notifications");
+  await control.trigger("click");
+  assert.equal(control.textContent, "Enable task notifications");
+  assert.deepEqual(calls, ["permission", "register", "put", "delete"]);
+});
+
+test("sign-out clears the local pairing even when disabling notifications is unreachable", async () => {
+  const device = harness();
+  const page = await device.open("", {
+    permission: async () => "granted",
+    serviceWorker: {},
+    request(init) {
+      if (init.method === "DELETE") {
+        assert.equal(device.session.has("kada-device-token"), false);
+        throw new TypeError("offline");
+      }
+      return Response.json({ publicKey: "server-key", subscribed: true });
+    },
+  });
+  await page.field("signout").trigger("click");
+  assert.equal(device.session.has("kada-device-token"), false);
+  assert.equal(page.reloaded(), true);
+});
 
 test("the pending list opens the original conversation and drops tasks that are no longer pending", async () => {
   let waiting = true;

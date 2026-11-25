@@ -4,6 +4,7 @@ export const remotePage = String.raw`<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kada</title>
+  <link rel="manifest" href="/remote/manifest.webmanifest">
   <style>
     :root { color-scheme: light; font-family: Inter, system-ui, sans-serif; color: #221c30; background: #f8f6fc; --line: #ded8e9; --muted: #65596f; --accent: #593ba3; }
     * { box-sizing: border-box; }
@@ -85,6 +86,7 @@ export const remotePage = String.raw`<!doctype html>
         <button type="button" id="refresh-conversations" aria-label="Refresh conversations">Refresh</button>
         <button type="button" id="new">New chat</button>
       </div>
+      <button type="button" id="task-notifications" hidden>Enable task notifications</button>
       <section id="pending-work" class="panel" hidden aria-labelledby="pending-heading">
         <h2 id="pending-heading">Pending work</h2>
         <ul id="pending-tasks"></ul>
@@ -117,6 +119,7 @@ const field = (id) => document.getElementById(id);
 const pair = field("pair");
 const assistant = field("assistant");
 const signout = field("signout");
+const notifications = field("task-notifications");
 const status = field("status");
 const conversations = field("conversation");
 const pendingWork = field("pending-work");
@@ -143,6 +146,7 @@ let listVersion = 0;
 let historyCursor = null;
 let shownTask = "";
 let disconnected = false;
+let pushSettings;
 
 function bookKey() { return "kada:composer:" + identity.pairingId; }
 function selectionKey() { return "kada:conversation:" + identity.pairingId; }
@@ -222,6 +226,19 @@ async function post(path, value) {
 function report(error) {
   disconnected = !(error instanceof RequestError);
   status.textContent = error instanceof RequestError ? error.message : "The connection dropped. Reconnect to check your conversation.";
+}
+
+async function refreshPushSettings(device) {
+  if (!navigator.serviceWorker || typeof PushManager === "undefined" || typeof Notification === "undefined") return;
+  try {
+    const settings = await get("/push");
+    if (identity !== device) return;
+    pushSettings = settings;
+    notifications.hidden = !settings.publicKey;
+    notifications.textContent = settings.subscribed ? "Disable task notifications" : "Enable task notifications";
+  } catch {
+    if (identity === device) notifications.hidden = true;
+  }
 }
 
 function element(tag, text, container) {
@@ -310,7 +327,14 @@ async function refreshList() {
     if (rows.some((row) => row.conversationId === id)) continue;
     addLocalConversation(id, record);
   }
-  const selected = conversationId || rows[0]?.conversationId;
+  const hash = location.hash;
+  const link = /^#conversation=([A-Za-z0-9][A-Za-z0-9_-]{0,79})(?:&pairing=([a-f0-9]{64}))?$/.exec(hash);
+  const linked = link && (!link[2] || link[2] === identity.pairingId) && rows.find(row => row.conversationId === link[1]);
+  if (hash.startsWith("#conversation=")) {
+    history.replaceState(history.state, "", location.pathname + location.search);
+    if (!linked) status.textContent = "This conversation is unavailable on this device.";
+  }
+  const selected = linked?.conversationId || conversationId || rows[0]?.conversationId;
   if (!selected) return choose("");
   if (selected !== conversationId) return choose(selected);
   conversations.value = selected;
@@ -649,6 +673,8 @@ async function connect(value) {
   const sameSession = sessionStorage.getItem("kada-device-token") === value;
   token = value;
   identity = candidate;
+  pushSettings = undefined;
+  notifications.hidden = true;
   sessionStorage.setItem("kada-device-token", token);
   sessionStorage.setItem("kada-composer-pairing", identity.pairingId);
   const oldSelection = sameSession && localStorage.getItem(["kada", "conversation", identity.accountId, identity.deviceId].join(":"));
@@ -670,6 +696,7 @@ async function connect(value) {
   updateComposer();
   await refreshList();
   await refresh();
+  await refreshPushSettings(candidate);
 }
 
 function selectFiles() {
@@ -707,9 +734,60 @@ field("pair-form").addEventListener("submit", async (event) => {
   catch (error) { report(error); entered.focus(); }
 });
 
-signout.addEventListener("click", () => {
+notifications.addEventListener("click", async () => {
+  const device = identity;
+  const bearer = token;
+  const settings = pushSettings;
+  if (!device || !settings?.publicKey || notifications.disabled || signout.disabled) return;
+  notifications.disabled = true;
+  signout.disabled = true;
+  try {
+    if (settings.subscribed) {
+      await request("/push", { method: "DELETE" }, bearer);
+    } else {
+      if (await Notification.requestPermission() !== "granted") {
+        throw new RequestError(409, "Allow notifications in your browser to enable task updates.");
+      }
+      const registration = await navigator.serviceWorker.register("/remote/sw.js", { scope: "/remote/" });
+      const worker = registration.installing ?? registration.waiting;
+      if (!registration.active && worker) await new Promise((resolve, reject) => {
+        const changed = () => {
+          if (worker.state !== "activated" && worker.state !== "redundant") return;
+          worker.removeEventListener("statechange", changed);
+          if (worker.state === "activated") resolve();
+          else reject(new RequestError(409, "The notification worker could not start."));
+        };
+        worker.addEventListener("statechange", changed);
+        changed();
+      });
+      if (identity !== device) return;
+      const subscription = await registration.pushManager.getSubscription() ??
+        await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: settings.publicKey });
+      if (identity !== device) return;
+      await request("/push", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(subscription),
+      }, bearer);
+    }
+    await refreshPushSettings(device);
+  } catch (error) {
+    if (identity === device) report(error);
+  } finally { notifications.disabled = false; signout.disabled = false; }
+});
+
+signout.addEventListener("click", async () => {
+  if (signout.disabled) return;
+  const bearer = token;
+  signout.disabled = true;
   sessionStorage.removeItem("kada-device-token");
-  location.reload();
+  identity = null;
+  try {
+    if (pushSettings?.publicKey) {
+      await request("/push", { method: "DELETE", signal: AbortSignal.timeout(3_000) }, bearer);
+    }
+  } catch {
+    // Keep sign-out local even when the daemon cannot receive the unsubscribe.
+  } finally { location.reload(); }
 });
 
 conversations.addEventListener("change", () => choose(conversations.value));
@@ -725,6 +803,9 @@ async function refreshOnReturn() {
 }
 document.addEventListener("visibilitychange", refreshOnReturn);
 window.addEventListener("focus", refreshOnReturn);
+window.addEventListener("hashchange", () => {
+  if (identity && location.hash.startsWith("#conversation=")) refreshList().catch(report);
+});
 fileInput.addEventListener("change", selectFiles);
 
 prompt.addEventListener("input", () => {

@@ -31,6 +31,7 @@ export interface Config {
   computer?: ComputerConfig;
   /** Canonical origin of an already configured HTTPS reverse proxy. */
   remoteOrigin?: string;
+  remotePush?: boolean;
 }
 
 export function positiveInt(value: unknown, name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -99,6 +100,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     web: optionalBoolean(raw.web, "web", true),
     learning: optionalBoolean(raw.learning, "learning", false),
     discovery: optionalBoolean(raw.discovery, "discovery", true),
+    ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),
     maxReworks: raw.maxReworks === 0 ? 0 : positiveInt(raw.maxReworks, "maxReworks", 3, 20),
     maxStalls: positiveInt(raw.maxStalls, "maxStalls", 2, 20),
     computer,

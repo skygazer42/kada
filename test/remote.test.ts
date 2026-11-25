@@ -5,6 +5,8 @@ import { createServer, request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { Script } from "node:vm";
+import webpush from "web-push";
+import type { PushSender } from "../src/remote-push.js";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, UserEntry } from "@earendil-works/pi-durable";
@@ -27,7 +29,7 @@ const taskControl = (action: string, version: string) => ({
   body: JSON.stringify({ action, version }),
 });
 
-async function portal(t: TestContext, runtime: LocalRuntime, directory: string, devices: readonly RemoteDevice[]) {
+async function portal(t: TestContext, runtime: LocalRuntime, directory: string, devices: readonly RemoteDevice[], pushSender?: PushSender) {
   let handle: ReturnType<typeof createRemoteHandler>;
   const server = createServer((request, response) => {
     void handle(request, response).then((handled) => {
@@ -41,11 +43,11 @@ async function portal(t: TestContext, runtime: LocalRuntime, directory: string, 
   const address = server.address();
   assert(address && typeof address !== "string");
   const origin = `http://127.0.0.1:${address.port}`;
-  handle = createRemoteHandler(runtime, { directory, origin, devices });
+  handle = createRemoteHandler(runtime, { directory, origin, devices, push: Boolean(pushSender), pushSender });
   const call = (token: string, path: string, init?: RequestInit) => fetch(origin + "/remote/api" + path, {
     ...init, headers: { Authorization: `Bearer ${token}`, ...init?.headers },
   });
-  return { origin, close, call };
+  return { origin, close, call, pollPush: handle.pollPush };
 }
 
 function pairing(accountId = "owner", deviceId = "phone") {
@@ -435,13 +437,35 @@ test("D04 reconnect replays a resolved wait once across Pi pages and daemon reop
   const other = pairing("owner", "other-phone");
   const devices = [owner.device, other.device];
   const directory = join(fixture.directory, "remote");
-  const before = await portal(t, fixture.runtime, directory, devices);
+  const pushes: unknown[] = [];
+  const sender: PushSender = async (_subscription, body) => { pushes.push(JSON.parse(body)); };
+  const before = await portal(t, fixture.runtime, directory, devices, sender);
   const path = "/conversations/progress-replay";
   const receipt = await (await before.call(owner.token, path + "/messages", turn("hello", "Hello."))).json();
   await until(() => fixture.runtime.status(receipt.taskId), (state) => state.status === "answered");
   phase = "prepare";
   await before.call(owner.token, path + "/messages", turn("report", "Create report.txt."));
   const saved = await until(async () => (await before.call(owner.token, path)).json(), (state) => state.task?.status === "awaiting_confirmation");
+  assert.equal((await before.call("invalid", "/push")).status, 401);
+  const { pairingId } = await (await before.call(owner.token, "/session")).json();
+  const { publicKey } = await (await before.call(owner.token, "/push")).json();
+  assert.match(publicKey, /^[A-Za-z0-9_-]{87}$/);
+  const subscription = {
+    endpoint: "https://fcm.googleapis.com/fcm/send/synthetic",
+    keys: { p256dh: webpush.generateVAPIDKeys().publicKey, auth: Buffer.alloc(16, 7).toString("base64url") },
+  };
+  const subscribe = { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(subscription) };
+  assert.equal((await before.call(owner.token, "/push", subscribe)).status, 200);
+  assert.equal((await before.call(other.token, "/push", subscribe)).status, 409);
+  const manifest = await fetch(before.origin + "/remote/manifest.webmanifest");
+  assert.equal((await manifest.json()).scope, "/remote/");
+  const worker = await fetch(before.origin + "/remote/sw.js");
+  assert.match(worker.headers.get("Content-Type") ?? "", /^text\/javascript/);
+  const workerSource = await worker.text();
+  assert.doesNotThrow(() => new Script(workerSource));
+  assert.match(workerSource, /notificationclick/);
+  await before.pollPush();
+  assert.deepEqual(pushes, []);
   await before.close();
   await fixture.runtime.close();
 
@@ -468,7 +492,10 @@ test("D04 reconnect replays a resolved wait once across Pi pages and daemon reop
   await runtime.close();
   reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
 
-  const after = await portal(t, reopened, directory, devices);
+  const after = await portal(t, reopened, directory, devices, sender);
+  await after.pollPush();
+  await after.pollPush();
+  assert.deepEqual(pushes, [{ conversationId: "progress-replay", pairingId }]);
   const view = await (await after.call(owner.token, path)).json();
   assert.equal(view.taskId, receipt.taskId);
   assert.equal(view.task.status, "completed");

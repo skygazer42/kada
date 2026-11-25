@@ -6,6 +6,8 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { TaskConflictError, type LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
+import { remoteManifest, remoteWorker } from "./remote-worker.js";
+import { RemotePush, RemotePushError, type PushEvent, type PushScope, type PushSender } from "./remote-push.js";
 import { taskGroup, taskView } from "./task-view.js";
 import { readJson, SerialQueue } from "./util.js";
 import { Workspace } from "./workspace.js";
@@ -21,6 +23,8 @@ export interface RemoteOptions {
   workspace?: string;
   origin: string;
   devices: readonly RemoteDevice[] | (() => readonly RemoteDevice[] | Promise<readonly RemoteDevice[]>);
+  push?: boolean;
+  pushSender?: PushSender;
 }
 
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -292,6 +296,12 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
   const accountPath = (scope: Scope) => join(options.directory, "conversations", digest(scope.accountId));
   const recordPath = (scope: Scope, id: string) => join(accountPath(scope), digest(id) + ".json");
   const uploadPath = (id: string) => join(options.directory, "uploads", id);
+  const pairedDevices = async () => typeof options.devices === "function" ? options.devices() : options.devices;
+  const pairingIdFor = (device: RemoteDevice) => digest("kada:browser-pairing:" + device.tokenHash);
+  const push = options.push ? new RemotePush(options.directory, origin.origin, async () =>
+    (await pairedDevices()).map(device => ({
+      pairingId: pairingIdFor(device), accountId: device.accountId, deviceId: device.deviceId,
+    })), pushEvents, options.pushSender) : undefined;
 
   async function exclusive<T>(path: string, action: () => Promise<T>) {
     const entry = queues.get(path) ?? { queue: new SerialQueue(), references: 0 };
@@ -305,14 +315,14 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     const token = request.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
     if (!token || !tokenPattern.test(token)) throw new HttpError(401, "Enter this device’s pairing token.");
     const supplied = Buffer.from(digest(token), "hex");
-    const devices = typeof options.devices === "function" ? await options.devices() : options.devices;
+    const devices = await pairedDevices();
     const device = devices.find((item) => shaPattern.test(item.tokenHash) &&
       timingSafeEqual(supplied, Buffer.from(item.tokenHash, "hex")));
     if (!device || !idPattern.test(device.accountId) || !idPattern.test(device.deviceId)) {
       throw new HttpError(401, "Enter this device’s pairing token.");
     }
     return { channel: "web", accountId: device.accountId, deviceId: device.deviceId,
-      pairingId: digest("kada:browser-pairing:" + device.tokenHash) };
+      pairingId: pairingIdFor(device) };
   }
 
   function freshConversation(scope: Scope, conversationId: string): Conversation {
@@ -382,15 +392,32 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     };
   }
 
-  async function list(scope: Scope) {
+  async function ownedConversations(scope: Scope) {
     let names: string[];
     try { names = await readdir(accountPath(scope)); }
     catch (error) { if (isMissing(error)) return []; throw error; }
     const rows = await Promise.all(names.filter((name) => shaPattern.test(name.slice(0, -5)) && name.endsWith(".json"))
       .map((name) => readConversation(join(accountPath(scope), name))));
+    return rows.filter((row): row is Conversation => Boolean(row?.receipts.length && belongs(row, scope)));
+  }
+
+  async function pushEvents(scope: PushScope, since: number, cursors: Record<string, number>) {
+    const events: PushEvent[] = [];
+    for (const row of await ownedConversations({ channel: "web", ...scope })) {
+      try {
+        await conversationTask(row);
+        const sequence = await runtime.remoteAlertSequence(row.taskId, since, cursors[row.taskId] ?? 0);
+        if (sequence !== undefined) events.push({ taskId: row.taskId, conversationId: row.conversationId, sequence });
+      } catch (error) {
+        if (!isMissing(error) && !(error instanceof HttpError && error.status === 409)) throw error;
+      }
+    }
+    return events;
+  }
+
+  async function list(scope: Scope) {
     const conversations = [];
-    for (const row of rows) {
-      if (!row?.receipts.length || !belongs(row, scope)) continue;
+    for (const row of await ownedConversations(scope)) {
       const { conversationId, taskId, title, updatedAt } = row;
       conversations.push({ conversationId, taskId, title, updatedAt, task: await overview(row) });
     }
@@ -632,7 +659,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     sendFile(response, { ...file, name: basename(file.path) }, bytes);
   }
 
-  return async function handleRemote(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+  async function handleRemote(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = URL.parse(request.url ?? "/", origin);
     if (!url) return false;
     const route = url.pathname;
@@ -641,7 +668,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Content-Security-Policy",
-      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+      "default-src 'none'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
     try {
       if (url.origin !== origin.origin || request.headers.host?.toLowerCase() !== origin.host ||
         request.headers["sec-fetch-site"] === "cross-site" ||
@@ -649,6 +676,16 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         throw new HttpError(403, "This portal must be accessed from its configured origin.");
       }
       const method = request.method;
+      if (method === "GET" && route === "/remote/sw.js") {
+        response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+        response.end(remoteWorker);
+        return true;
+      }
+      if (method === "GET" && route === "/remote/manifest.webmanifest") {
+        response.writeHead(200, { "Content-Type": "application/manifest+json; charset=utf-8" });
+        response.end(JSON.stringify(remoteManifest));
+        return true;
+      }
       if (method === "GET" && (route === "/remote" || route === "/remote/" || route === "/remote/app.js")) {
         const script = route.endsWith(".js");
         response.writeHead(200, { "Content-Type": script ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
@@ -657,6 +694,13 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       const { pairingId, ...scope } = await authenticate(request);
       if (method === "GET" && route === "/remote/api/session") send(response, 200, { ...scope, pairingId });
+      else if (route === "/remote/api/push") {
+        const pairing = { ...scope, pairingId };
+        if (method === "GET") send(response, 200, push ? await push.status(pairing) : { publicKey: null, subscribed: false });
+        else if (push && method === "PUT") send(response, 200, await push.subscribe(pairing, await json(request)));
+        else if (push && method === "DELETE") send(response, 200, await push.unsubscribe(pairing));
+        else throw new HttpError(push ? 405 : 404, "Push notifications are unavailable.");
+      }
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
         const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
@@ -719,9 +763,10 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;
-  };
+  }
+  return Object.assign(handleRemote, { pollPush: () => push?.poll() });
 }

@@ -956,6 +956,26 @@ export class LocalRuntime {
       };
     });
   }
+  async remoteAlertSequence(id: string, since: number, after: number) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy !== "workspace") return;
+      const { root } = await this.open(meta, false);
+      let cursor: Cursor | undefined;
+      do {
+        const page = await root.entries({ order: "descending", minEntryId: after ? after as EntryId : undefined }, 200, cursor, ctx);
+        for (const entry of page.items) {
+          if (Number(entry.id) <= after) return;
+          if (entry.kind !== remoteProgressKind || !entry.data || typeof entry.data !== "object" || Array.isArray(entry.data)) continue;
+          const { event, timestamp } = entry.data;
+          if (typeof timestamp !== "number") continue;
+          if (timestamp <= since) return;
+          if (event === "completed" || event === "waiting_user" || event === "awaiting_confirmation" || event === "clarifying") return Number(entry.id);
+        }
+        cursor = page.next;
+      } while (cursor);
+    });
+  }
   async status(id: string) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);

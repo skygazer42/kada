@@ -38,6 +38,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   let runtime: LocalRuntime | undefined;
   const devices = new RemoteDevices(config.dataDir);
   let remote: ReturnType<typeof createRemoteHandler>;
+  let pushRun: Promise<void> | undefined;
+  let pushTimer: NodeJS.Timeout | undefined;
   let token: string;
   const tokenFile = join(config.dataDir, "token");
   try { token = (await readFile(tokenFile, "utf8")).trim(); }
@@ -286,12 +288,20 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
     runtime = new LocalRuntime(config, { ...options, models: options?.models ?? cloudModels(), extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
-    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials()});
+    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
     await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));
     await runtime.recover();
     await runtime.localSetup();
     ready = true;
+    if (config.remotePush && config.remoteOrigin) {
+      pushTimer = setInterval(() => {
+        if (pushRun) return;
+        pushRun = remote.pollPush()?.catch(() => console.error("Could not check remote push updates."))
+          .finally(() => { pushRun = undefined; });
+      }, 5000);
+      pushTimer.unref();
+    }
   } catch (error) {
     server.close();
     await runtime?.close();
@@ -306,9 +316,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (closing) return;
       closing = true;
       ready = false;
+      clearInterval(pushTimer);
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      try { await runtime!.close(); await computer.close(); } finally { await release(); }
+      try { await pushRun; await runtime!.close(); await computer.close(); } finally { await release(); }
     },
   };
 }
