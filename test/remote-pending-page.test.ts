@@ -451,6 +451,51 @@ test("a phone stop targets the selected child and keeps its sibling and draft vi
   assert.equal(page.field("prompt").value, "Keep my separate message.");
 });
 
+test("a pending child tool interruption stays bound to the displayed call as polling reveals its replacement", async () => {
+  const first = { childId: 7, childName: "Research", toolTaskId: 19, toolName: "read" };
+  const replacement = { ...first, toolTaskId: 20 };
+  const posted = Promise.withResolvers<void>();
+  const interrupted = Promise.withResolvers<Response>();
+  const requests: unknown[] = [];
+  let call = first;
+  const device = harness((url, init) => {
+    if (url.pathname.endsWith("/child-interrupt")) {
+      assert.equal(url.pathname, "/remote/api/conversations/" + conversationId + "/child-interrupt");
+      assert.equal(init.method, "POST");
+      requests.push(JSON.parse(init.body as string));
+      if (requests.length === 2) return Response.json({ childId: 7, interrupted: 0, pending: 1 });
+      posted.resolve();
+      return interrupted.promise;
+    }
+    return Response.json({ cursor: 1, messages: [], task: {
+      status: "running", interruptibleChildTools: [call], stoppableChildren: [{ childId: 7, name: "Research" }],
+    } });
+  });
+  const page = await device.open();
+  const button = (label: string) => page.field("task").children.flatMap(row => row.children)
+    .find(child => child.textContent === label);
+  const firstButton = button("Interrupt read in Research");
+  assert.ok(firstButton);
+  const click = firstButton.trigger("click");
+  await posted.promise;
+  assert.equal(firstButton.disabled, true);
+  call = replacement;
+  await page.poll();
+  const replacementButton = button("Interrupt read in Research");
+  assert.ok(replacementButton && replacementButton !== firstButton);
+  assert.equal(replacementButton.disabled, false);
+  interrupted.resolve(Response.json({ error: "This tool call is no longer running." }, { status: 409 }));
+  await click;
+  await firstButton.trigger("click");
+  assert.deepEqual(requests, [{ childId: 7, toolTaskId: 19 }]);
+  assert.equal(button("Interrupt read in Research"), replacementButton);
+  assert.ok(button("Stop Research"));
+  assert.match(page.field("status").textContent, /no longer running/);
+  await replacementButton.trigger("click");
+  assert.deepEqual(requests, [{ childId: 7, toolTaskId: 19 }, { childId: 7, toolTaskId: 20 }]);
+  assert.match(page.field("status").textContent, /still stopping/);
+});
+
 test("child answers preserve typed text during polling and reuse their request after a dropped response", async () => {
   const replies: { childId: number; questionId: string; requestId: string; answer: string }[] = [];
   const question = { childId: 7, questionId: "19", name: "Research", text: "Which month should I use?" };

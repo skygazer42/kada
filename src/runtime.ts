@@ -997,23 +997,33 @@ export class LocalRuntime {
       const workerIds = new Set(conversations.filter(c => c.owner).map(c => c.id));
       const delegations = (await listDelegations(active.harness,meta.workspace,conversations)).map(child => ({...child,parentTaskId:meta.id}));
       const interaction = meta.entrypoint === "chat" && !goal ? "chat" as const : "goal" as const;
-      const activeTools = ["running", "verifying"].includes(status) ? await active.harness.commit(async tx => {
+      const { activeTools, interruptibleChildTools } = ["running", "verifying"].includes(status) ? await active.harness.commit(async tx => {
         const tools: { id: string; name: string; worker: boolean }[] = [];
+        const interruptible: { childId: number; childName: string; toolTaskId: number; toolName: string }[] = [];
+        const background = new Map(status === "running" && meta.remotePolicy === "workspace" ? delegations
+          .filter(child => child.mode === "background" && child.status === "running")
+          .map(child => [child.conversationId, child.name]) : []);
         for (const conversation of conversations) {
           const live = await tx.doc(LiveDoc, conversation.id);
+          const childName = background.get(conversation.id);
+          if (childName !== undefined) for (const tool of live.tools ?? []) {
+            if (tool.status === "running" && tool.taskId !== undefined) {
+              interruptible.push({ childId: conversation.id, childName, toolTaskId: tool.taskId, toolName: tool.name });
+            }
+          }
           for (const tool of [...(live.tools ?? []), ...(live.nestedTools ?? [])]) {
             if (tool.status === "running") tools.push({
               id: `${conversation.id}:${tool.callId}`, name: tool.name, worker: workerIds.has(conversation.id),
             });
           }
         }
-        return tools;
-      }, ctx) : [];
+        return { activeTools: tools, interruptibleChildTools: interruptible };
+      }, ctx) : { activeTools: [], interruptibleChildTools: [] };
       const remoteControls = meta.remotePolicy === "workspace" ? await this.remoteTaskControls(active, meta, status, goal) : [];
       const approvals = meta.remotePolicy ? [] : await approvalViews(active.harness);
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
         remoteControls, remoteControlVersion: meta.remotePolicy === "workspace" ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
-        activeTools, delegations, approvals,
+        activeTools, interruptibleChildTools, delegations, approvals,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
         compactions: compactions.total, rootCompactions: compactions.root,
@@ -1025,14 +1035,16 @@ export class LocalRuntime {
         conversations, tasks: inspection.tasks, usage };
     });
   }
-  async interruptChild(id: string, childId: number) {
+  async interruptChild(id: string, childId: number, remote?: { workspace: string; toolTaskId: number }) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
-      if (meta.remotePolicy) throw new DelegationInputError(404, "Background child not found.");
+      if (remote ? meta.remotePolicy !== "workspace" || meta.workspace !== remote.workspace : meta.remotePolicy) {
+        throw new DelegationInputError(404, "Background child not found.");
+      }
       const active = await this.open(meta, false);
       const goal = await this.goalState(active);
       const working = meta.control === "active" && goal?.phase === "working" ? goal : undefined;
-      return interruptChildTools(active.harness, childId, working, ctx);
+      return interruptChildTools(active.harness, childId, working, ctx, remote?.toolTaskId);
     });
   }
   async stopChild(id: string, childId: number, remoteWorkspace?: string) {

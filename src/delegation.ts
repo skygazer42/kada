@@ -79,8 +79,11 @@ export async function markChildStopped(harness: Harness, childId: number, goal: 
   }, context);
 }
 
-export async function interruptChildTools(harness: Harness, childId: number, goal: GoalRevision | undefined, context: Context) {
+export async function interruptChildTools(harness: Harness, childId: number, goal: GoalRevision | undefined, context: Context, toolTaskId?: number) {
   if (!Number.isSafeInteger(childId) || childId < 1) throw new DelegationInputError(400, "Provide a valid child ID.");
+  if (toolTaskId !== undefined && (!Number.isSafeInteger(toolTaskId) || toolTaskId < 1)) {
+    throw new DelegationInputError(400, "Provide a valid tool task ID.");
+  }
   const child = childId as ConversationId;
   const tools = await harness.commit(async tx => {
     const batch = await ownedBackgroundBatch(tx, child);
@@ -92,7 +95,8 @@ export async function interruptChildTools(harness: Harness, childId: number, goa
     }
     const live = await tx.doc(LiveDoc, child);
     // Aborting an outer tool also aborts the nested calls it owns.
-    return (live.tools ?? []).flatMap(tool => tool.status === "running" && tool.taskId !== undefined ? [tool.taskId] : []);
+    return (live.tools ?? []).flatMap(tool => tool.status === "running" && tool.taskId !== undefined &&
+      (toolTaskId === undefined || tool.taskId === toolTaskId) ? [tool.taskId] : []);
   }, context);
   const signal = AbortSignal.timeout(15_000);
   const wait = withAbortSignal(signal, context);
@@ -106,6 +110,9 @@ export async function interruptChildTools(harness: Harness, childId: number, goa
       throw error;
     }
   }));
+  if (toolTaskId !== undefined && (outcomes.length === 0 || outcomes[0] === "finished")) {
+    throw new DelegationInputError(409, "This tool call is no longer running.");
+  }
   return { childId, interrupted: outcomes.filter(value => value === "interrupted").length,
     pending: outcomes.filter(value => value === "pending").length };
 }

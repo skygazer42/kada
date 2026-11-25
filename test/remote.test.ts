@@ -7,10 +7,11 @@ import { test, type TestContext } from "node:test";
 import { Script } from "node:vm";
 import webpush from "web-push";
 import type { PushSender } from "../src/remote-push.js";
-import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
+import { awaitWithContext, BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, UserEntry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { memoryProject } from "../src/memory-sources.js";
 import { createRemoteCredential, createRemoteHandler, quarantineLegacyRemoteTasks, type RemoteDevice } from "../src/remote.js";
 import { LocalRuntime } from "../src/runtime.js";
@@ -1019,6 +1020,69 @@ test("a paired phone can stop one background child and recover the sibling's res
     [rate.childId, "cancelled", undefined], [currency.childId, "completed", "Currency checked."],
   ]);
   assert.equal((await after.call(owner.token, path + "/child-stop", post({ childId: currency.childId }))).status, 409);
+});
+
+test("a paired phone interrupts the displayed child tool without interrupting its replacement", async t => {
+  const releaseReplacement = Promise.withResolvers<void>();
+  const openReader = NodeExecutionEnv.prototype.openBinaryReader;
+  t.mock.method(NodeExecutionEnv.prototype, "openBinaryReader", async function (
+    this: NodeExecutionEnv, ...args: Parameters<typeof openReader>
+  ) {
+    if (args[0].endsWith("first.txt")) await awaitWithContext(new Promise<void>(() => {}), args[2]);
+    if (args[0].endsWith("second.txt")) await awaitWithContext(releaseReplacement.promise, args[2]);
+    return openReader.apply(this, args);
+  });
+  const fixture = await scriptedFixture(context => {
+    const users = context.messages.filter(message => message.role === "user");
+    const results = context.messages.filter(message => message.role === "toolResult");
+    if (hasTool(context, "delegation_ask")) {
+      if (!results.length) return tool("read", { path: "../../first.txt" });
+      assert.match(JSON.stringify(results[0]), /aborted/i);
+      if (results.length === 1) return tool("read", { path: "../../second.txt" });
+      assert.equal(results[1]?.isError, false);
+      return fauxAssistantMessage("Used the second file.");
+    }
+    if (hasTool(context, "task_prepare")) return tool("task_prepare", {
+      outcome: "Check a file.", deliverables: ["Check"], inputs: [], scope: ["This conversation"],
+      assumptions: [], questions: [], criteria: [{ text: "Inspect the file.", method: "inspect" }],
+    });
+    if (users.some(message => String(message.content).startsWith("Background delegation finished."))) {
+      return tool("task_submit", { summary: "File checked.", artifacts: [],
+        criteria: [{ id: 1, status: "passed", evidence: "The worker inspected the second file." }] });
+    }
+    if (results.some(result => result.toolName === "delegate_background")) return fauxAssistantMessage("Waiting for the worker.");
+    return tool("delegate_background", { tasks: [{ name: "File worker", instructions: "Check a file." }] });
+  });
+  t.after(async () => { releaseReplacement.resolve(); await fixture.close(); });
+  const owner = pairing(), tablet = pairing("owner", "tablet");
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [owner.device, tablet.device]);
+  const path = "/conversations/interrupt-child";
+  const post = (value: object) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
+  const view = async () => (await call(owner.token, path)).json();
+  const receipt = await (await call(owner.token, path + "/messages", turn("one", "Check a file."))).json();
+  const brief = await until(view, response => response.task?.status === "awaiting_confirmation");
+  const meta = await fixture.runtime.metadata(receipt.taskId);
+  await writeFile(join(meta.workspace, "second.txt"), "The result.");
+  assert.equal((await call(owner.token, path + "/confirm",
+    post({ revision: brief.task.brief.revision, digest: brief.task.briefDigest }))).status, 200);
+  const first = (await until(view, response => response.task?.interruptibleChildTools?.length === 1)).task.interruptibleChildTools[0];
+  assert.equal(first.toolName, "read");
+  assert.equal(first.childName, "File worker");
+  const endpoint = path + "/child-interrupt";
+  const request = post({ childId: first.childId, toolTaskId: first.toolTaskId });
+  assert.equal((await call(tablet.token, endpoint, request)).status, 404);
+  assert.equal((await call(owner.token, endpoint, post({ childId: first.childId, toolTaskId: -1 }))).status, 400);
+  const interrupted = await call(owner.token, endpoint, request);
+  assert.equal(interrupted.status, 200);
+  assert.deepEqual(await interrupted.json(), { childId: first.childId, interrupted: 1, pending: 0 });
+  const replacement = (await until(view, response =>
+    response.task?.interruptibleChildTools?.some(call => call.toolTaskId !== first.toolTaskId))).task.interruptibleChildTools[0];
+  assert.equal(replacement.childId, first.childId);
+  assert.equal((await call(owner.token, endpoint, request)).status, 409);
+  assert.equal((await view()).task.interruptibleChildTools[0].toolTaskId, replacement.toolTaskId);
+  releaseReplacement.resolve();
+  const done = await until(() => fixture.runtime.status(receipt.taskId), status => status.status === "completed");
+  assert.deepEqual(done.delegations.map(child => [child.conversationId, child.answer]), [[first.childId, "Used the second file."]]);
 });
 
 test("F13 historical conversations without a saved workspace policy cannot reopen or confirm", async (t) => {

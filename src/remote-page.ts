@@ -25,7 +25,7 @@ export const remotePage = String.raw`<!doctype html>
     section, article { margin-bottom: .75rem; }
     .panel { border: 1px solid var(--line); padding: 1rem; background: #fff; border-radius: 14px; }
     .controls { display: flex; align-items: end; gap: .5rem; margin-bottom: .75rem; }
-    .child-stops { flex-wrap: wrap; }
+    .child-actions { flex-wrap: wrap; }
     #conversation-field { flex: 1; min-width: 0; }
     label { display: block; font-size: .92rem; font-weight: 650; }
     select, input:not([type=file]), textarea { display: block; margin-top: .3rem; width: 100%; min-height: 44px; padding: .66rem .75rem; background: #fff; color: inherit; }
@@ -151,7 +151,7 @@ let listVersion = 0;
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
-const pendingChildStops = new Map();
+const pendingChildActions = new Map();
 let disconnected = false;
 let pushSettings;
 
@@ -605,6 +605,55 @@ function presentChildQuestions(questions, id) {
   childQuestions.hidden = !forms.size;
 }
 
+function presentChildActions(view, id) {
+  const stops = view.stoppableChildren ?? [];
+  const tools = view.interruptibleChildTools ?? [];
+  if (!stops.length && !tools.length) return;
+  const device = identity;
+  const controls = element("div", "", task);
+  controls.className = "controls child-actions";
+  const current = () => device === identity && id === conversationId;
+  function add(label, route, payload, confirmation) {
+    const key = device.pairingId + ":" + id + ":" + route + ":" + payload.childId + ":" + (payload.toolTaskId ?? "");
+    const button = action(label, controls, async () => {
+      if (!current() || controls.parentNode !== task || pendingChildActions.has(key)) return;
+      if (confirmation && !confirm(confirmation)) return;
+      const pending = { button };
+      pendingChildActions.set(key, pending);
+      try {
+        const receipt = await post(conversationPath(id) + route, payload);
+        if (current()) await refresh();
+        if (device === identity) await refreshList();
+        if (current() && route === "/child-interrupt") {
+          status.textContent = receipt.pending ? "The tool is still stopping. Check its status shortly." : "Tool interrupted.";
+        }
+      } catch (error) {
+        if (!current()) return;
+        if (route === "/child-interrupt" && error instanceof RequestError && error.status === 409) {
+          try { await refresh(); }
+          catch (refreshError) {
+            if (current()) report(refreshError);
+            return;
+          }
+        }
+        if (current()) report(error);
+      } finally {
+        pendingChildActions.delete(key);
+        pending.button.disabled = false;
+      }
+    });
+    const pending = pendingChildActions.get(key);
+    if (pending) {
+      pending.button = button;
+      button.disabled = true;
+    }
+  }
+  for (const { childId, name } of stops) add("Stop " + name, "/child-stop", { childId }, "Stop " + name + "?");
+  for (const { childId, childName, toolTaskId, toolName } of tools) {
+    add("Interrupt " + toolName + " in " + childName, "/child-interrupt", { childId, toolTaskId });
+  }
+}
+
 function presentTask(view, id) {
   canSend = view?.status !== "paused" && view?.status !== "cancelled";
   updateComposer();
@@ -673,35 +722,7 @@ function presentTask(view, id) {
       });
     }
   }
-  if (view.stoppableChildren?.length) {
-    const device = identity;
-    const controls = element("div", "", task);
-    controls.className = "controls child-stops";
-    const current = () => device === identity && id === conversationId;
-    for (const { childId, name } of view.stoppableChildren) {
-      const key = device.pairingId + ":" + id + ":" + childId;
-      const button = action("Stop " + name, controls, async () => {
-        if (!current() || controls.parentNode !== task || pendingChildStops.has(key) || !confirm("Stop " + name + "?")) return;
-        const pending = { button };
-        pendingChildStops.set(key, pending);
-        try {
-          await post(conversationPath(id) + "/child-stop", { childId });
-          if (current()) await refresh();
-          if (device === identity) await refreshList();
-        } catch (error) {
-          if (current()) report(error);
-        } finally {
-          pendingChildStops.delete(key);
-          pending.button.disabled = false;
-        }
-      });
-      const pending = pendingChildStops.get(key);
-      if (pending) {
-        pending.button = button;
-        button.disabled = true;
-      }
-    }
-  }
+  presentChildActions(view, id);
   if (view.delivery) {
     if (view.delivery.summary) element("p", view.delivery.summary, task);
     if (view.delivery.verification) element("p", view.delivery.verification, task);
