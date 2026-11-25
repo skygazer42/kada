@@ -35,6 +35,7 @@
 | 本地事件触发 | 规则选择来源、类型和标量字段匹配条件，本地鉴权入口保存事件身份和内容摘要。匹配后复用 Pi 的立即执行流程。已接受和已过滤事件跨重启、规则编辑去重，事件内容只用于匹配。 | [DuskBot 过滤与去重](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [事件回归](../../test/routine-event.test.ts) |
 | 纯事件规则与 GitHub Issue 同步 | 纯事件规则可手动运行、暂停和恢复。对公开仓库的新 Issue 支持单次同步和按规则启用后台轮询。两种入口共用游标，受理后推进。集成回归覆盖响应丢失、daemon 重启、任务去重和分页限流。 | [DuskBot 游标处理](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451) · [DuskBot 轮询](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L557) · [同步回归](../../test/github-routine-events.test.ts) · [本机 API 集成](../../test/assistant-entry.test.ts) |
 | GitHub Issue Webhook | 按规则显式开启签名入口，对原始字节验证 HMAC-SHA256，严格限制大小及 JSON。只接收新 Issue，并从原 Pi 事件流程受理。正文哈希作为事件身份，改换 delivery header、丢失响应或 daemon 重启不会重复启动同一投递。原任务保存已校验的仓库和编号供助手使用；标题、正文和外部 URL 不进入指令。 | [Rakazo 原始字节验签](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [正文去重](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L232) · [Suparagent ingress](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/ingress.py) · [HTTP 集成回归](../../test/github-webhook.test.ts) |
+| GitHub PR Webhook | 同一签名入口支持 PR 打开、重开、更新、关闭及转为可评审。规则选择一种事件及固定仓库，可匹配 draft/merged。原发生项和任务保留已校验的仓库、编号、headSha/baseSha 及状态；更新提交有独立发生项，相同正文重投仍指向原任务。标题、正文、分支名及 URL 不进入指令。 | [Rakazo PR 动作](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L25) · [PR 机器字段投影](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L93) · [数据提示边界](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/messaging/inbound-delivery.prompt.ts#L43) · [HTTP 回归](../../test/github-webhook.test.ts) |
 | 手机 Web 后台通知 | 已配置 HTTPS 的 daemon 可启用 Web Push。每个配对单独订阅，基于 Pi 持久事件发送通用待答、子任务待答或完成提醒。通知链接经配对和会话归属校验后打开原会话。本地回归覆盖订阅、重复轮询、回执重试与设备撤销。 | [Suparagent 子任务待答通知](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L483) · [Codync 通知跳转](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) · [子任务回归](../../test/remote.test.ts) · [通知点击](../../test/remote-worker.test.ts) |
 | 记忆候选审阅 | 项目可选择审阅模型写入的候选。候选保留来源和任务身份，接受时核对来源与旧记忆版本，拒绝后同一工具重放保留原决定。 | [Suparagent 候选处理](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/memory_proposals.py#L116) · [候选回归](../../test/memory-review.test.ts) |
 | 手机图片模型输入 | Pi 的图片处理器按固定模型能力处理原件，首条消息和目标任务待发消息保存原件引用供重启恢复。请求钩子限制跨轮图片总数，原消息仍保留完整图片。纯文本模型和无法解码的图片给出说明及文件路径。 | [Errand 图片提交](https://github.com/runta-dev/errand/blob/a20b925b740b/src/clients/http/RuntaCloudAgentsClient.ts#L332) · [Pi 图片处理](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/src/images/node.ts) · [图片恢复回归](../../test/input-images.test.ts) |
@@ -129,12 +130,32 @@ GitHub Webhook 默认关闭。先创建 `event: { source: "github", type: "issue
 
 活动来源使用已有任务元数据及 Pi 用户提交/目标状态。目标状态保存最新用户受理时间，避免内部进度超过日志保留上限后忘记用户活动；历史任务可从原确认及仍保留的用户事件读取。普通聊天仍从 Pi 的用户提交读取。回归覆盖不活跃时零预检、间隔、手动行为、项目隔离、日志滚动、查询时暂停和并发手动受理、daemon 重启及实际 SIGKILL。该策略的真实任务质量和净成本收益尚未作对照验证。
 
+GitHub PR 规则沿用 `githubWebhooks` 和 `/hooks/github/{routineId}`，例如：
+
+```json
+{
+  "id": "pr-review",
+  "action": "task",
+  "objective": "按已批准的项目评审清单检查该次 PR 提交并保存本地报告",
+  "workspace": "E:/project",
+  "schedule": { "kind": "event" },
+  "event": {
+    "source": "github",
+    "type": "pull_request.opened",
+    "equals": { "repository": "owner/repo", "draft": false }
+  }
+}
+```
+
+支持 `pull_request.opened`、`pull_request.reopened`、`pull_request.synchronize`、`pull_request.closed` 和 `pull_request.ready_for_review`。签名正文中的编号须为正整数；同时提供顶层编号时须一致。head/base SHA 为 40 或 64 位十六进制，draft/merged 为布尔值。原任务的 `routinePullRequest` 保留规范化机器字段及该次 SHA，追加消息和重启不替换为后续提交。实际读取 PR 内容仍需已有工具与权限；接收事件不隐含评论或修改仓库的授权。公开 feed 轮询保持只处理新 Issue，外部 GitHub 投递与 HTTPS 代理仍待实测。
+
 ## 已定位的能力差距
 
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |
 | --- | --- | --- | --- |
+| 例行任务的持续账户拒绝处理 | Pi 已负责单次模型调用的重试和失败状态；Kada 目前只对预算停止结算规则，尚未在失效密钥、无模型权限或余额耗尽后降低后续自动发生频率。需先核对 Pi 的公开失败分类，避免靠任意错误文本猜测并重复其重试。 | 持续账户拒绝后不在每个时间点重复请求；普通限流和临时网络错误仍由 Pi 处理；修复账户后手动运行可恢复原计划，重启保留状态。 | [Rakazo 账户拒绝分类](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L37) · [规则降频与原计划](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L82) · [账户错误与临时失败回归](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.test.ts#L56) |
 | macOS 子任务控制实机验收 | macOS 任务卡已接入定向答复、单独停止和指定调用的中断。Windows 已验证本地 API 和 Swift 语法，原生交互待运行。 | 在运行和待答时打开任务卡，停止一个子任务，或中断指定调用并观察原子会话继续。 | [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823) · [本地 API 回归](../../test/delegation.test.ts) · [任务卡解码回归](../../desktop/PetCoreTests.swift) |
-| 应用连接器与主动检查 | GitHub Issue 已支持轮询及签名 Webhook；MCP 可做变更预检及 OAuth 登录；循环项目任务可按近期活动和运行间隔跳过。具体第三方账户、外部投递实测与其他应用事件接入仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo GitHub Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
+| 应用连接器与主动检查 | GitHub Issue 已支持轮询及签名 Webhook，PR 已支持签名事件及提交身份投影；MCP 可做变更预检及 OAuth 登录；循环项目任务可按近期活动和运行间隔跳过。具体第三方账户、外部投递实测与其他应用事件接入仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo GitHub Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
 | 手机后台通知实机验收 | Web Push 与会话跳转已有本地回归。仍需通过真实推送服务，在实体 iOS 与 Android 设备验收。 | 订阅的手机在页面关闭时收到提醒，打开后进入具备访问权限的原会话。 | [Codync Android 通知](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |
 
 应用原生入口、渠道和更广义的桌面操作继续按项目源码核对。AppuBot 的公开仓库提供产品说明与发布资料，无法用它验证 Telegram 实现。 [AppuBot 公开资料](https://github.com/sarthakguptadev/appubot/blob/e0a25494a7c0/README.md)

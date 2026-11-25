@@ -7,6 +7,15 @@ import type { LocalRoutines, Routine } from "./routines.js";
 import { atomicJson, errorText, readJson } from "./util.js";
 
 export type GithubIssue = { repository: string; number: number };
+export type GithubPullRequest = GithubIssue & { headSha: string; baseSha: string; draft: boolean; merged: boolean };
+export const githubPullRequestEvents = new Set(['opened', 'reopened', 'synchronize', 'closed', 'ready_for_review'].map(action => 'pull_request.' + action));
+
+export function githubPullRequestTarget(data: Record<string, unknown>): GithubPullRequest | undefined {
+  const issue = githubIssueTarget(data.repository, data.number);
+  const sha = (value: unknown): value is string => typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value);
+  if (!issue || !sha(data.headSha) || !sha(data.baseSha) || typeof data.draft !== 'boolean' || typeof data.merged !== 'boolean') return;
+  return { ...issue, headSha: data.headSha.toLowerCase(), baseSha: data.baseSha.toLowerCase(), draft: data.draft, merged: data.merged };
+}
 
 export function githubIssueTarget(repository: unknown, number: unknown): GithubIssue | undefined {
   if (typeof repository !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/.test(repository) ||

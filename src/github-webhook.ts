@@ -3,7 +3,7 @@ import type { IncomingMessage } from 'node:http';
 import type { GithubWebhookConfig } from './config.js';
 import type { LocalRoutines } from './routines.js';
 import { RoutineError } from './routines.js';
-import { githubIssueTarget } from './github-routine-events.js';
+import { githubIssueTarget, githubPullRequestEvents, githubPullRequestTarget } from './github-routine-events.js';
 
 const maxBody = 1_048_576;
 class WebhookError extends Error {
@@ -48,19 +48,23 @@ export async function githubWebhook(request: IncomingMessage, path: string, gran
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
       payload = value as Record<string, unknown>;
     } catch { throw new WebhookError(400, 'Invalid webhook JSON.'); }
-    if (request.headers['x-github-event'] !== 'issues' || payload.action !== 'opened') return { status: 200, data: { accepted: false } };
+    const issueEvent = request.headers['x-github-event'] === 'issues' && payload.action === 'opened';
+    const eventType = request.headers['x-github-event'] === 'pull_request' && typeof payload.action === 'string' ? 'pull_request.' + payload.action : undefined;
+    if (!issueEvent && (!eventType || !githubPullRequestEvents.has(eventType))) return { status: 200, data: { accepted: false } };
     const repository = (payload.repository as { full_name?: unknown } | undefined)?.full_name;
-    const number = (payload.issue as { number?: unknown } | undefined)?.number;
-    const issue = githubIssueTarget(repository, number);
-    if (!issue) {
-      throw new WebhookError(400, 'Provide a valid GitHub repository and issue number.');
+    const pr = payload.pull_request as { number?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown }; draft?: unknown; merged?: unknown } | undefined;
+    const data = issueEvent ? githubIssueTarget(repository, (payload.issue as { number?: unknown } | undefined)?.number) :
+      githubPullRequestTarget({ repository, number: pr?.number, headSha: pr?.head?.sha, baseSha: pr?.base?.sha, draft: pr?.draft, merged: pr?.merged });
+    if (!data || !issueEvent && payload.number !== undefined && payload.number !== pr?.number) {
+      throw new WebhookError(400, 'Provide valid GitHub event identifiers and state.');
     }
     const rule = (await routines.list()).find(rule => rule.id === grant.routineId);
-    if (rule?.event?.source !== 'github' || rule.event.type !== 'issues.opened' || typeof rule.event.equals.repository !== 'string' ||
+    if (rule?.event?.source !== 'github' || typeof rule.event.equals.repository !== 'string' ||
       rule.event.equals.repository !== rule.event.equals.repository.toLowerCase()) throw new WebhookError(409, 'The webhook rule is unavailable.');
+    const type = issueEvent ? 'issues.opened' : eventType!;
+    if (rule.event.type !== type) return { status: 200, data: { accepted: false } };
     const result = await routines.receiveEvent(grant.routineId, {
-      source: 'github', type: 'issues.opened', eventId: 'hook-' + createHash('sha256').update(raw).digest('hex'),
-      data: issue,
+      source: 'github', type, eventId: 'hook-' + createHash('sha256').update(raw).digest('hex'), data,
     }, rule.revision);
     return { status: result.outcome === 'accepted' ? 202 : 200, data: { accepted: result.outcome === 'accepted' } };
   } catch (error) {

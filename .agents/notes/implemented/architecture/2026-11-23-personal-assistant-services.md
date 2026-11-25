@@ -56,7 +56,11 @@ HTTP MCP 的账户登录采用 SDK `OAuthClientProvider` 薄适配。OAuth 定�
 
 项目活动来自本机任务元数据与 Pi 用户提交，沿用记忆项目根，不新增操作系统活动采集。GoalDoc 在用户答复及确认事件中保存 `lastUserAt`，内部进度日志滚动不能抹去它；带 user 请求 ID 的原 Pi 提交在聊天转为 Goal 后仍参与活动投影，不能因已有 GoalDoc 而丢失转换前的最近答复。自动发生项、监督和子任务回传不能伪装成用户活动。 [Amuse 近期活动门槛](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L97) · [Rakazo 先检查后唤醒](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/strategic-initiative.ts#L175)
 
+PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、reopened、synchronize、closed 和 ready_for_review，机器投影固定仓库、编号、head/base SHA、draft/merged。原发生项和 task metadata 的 routinePullRequest 保留该次提交，创建摘要包含投影，不能让原任务在恢复时换绑新提交。正文哈希继续去重；标题、正文、URL 和分支名不作为指令或本机路径。顶层与 PR 编号冲突或状态/SHA 无效时明确拒绝。 [Rakazo PR 字段投影](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L93) · [机器字段提示](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/messaging/inbound-delivery.prompt.ts#L43)
+
 ## Alternatives considered
+
+通用透传全部 GitHub 事件更快扩大事件数量，但会把用户编写的文本和不明确的字段契约交给原任务。PR 延续现有 Issue 的小型投影，明确保存完成该任务所需的提交身份。复用 Issue 元数据字段会更短，却无法区分 PR 的 head/base SHA；增加一个可选字段保留旧 Issue 和历史任务行为。外部内容仍由现有工具按已保存目标获取。
 
 每次检查都启动模型可以更灵活地判断是否需要跟进，但近期用户活动和固定运行间隔可以从原持久记录判断。另存一套活动数据库更便于聚合，却增加恢复与身份同步；这里复用 Pi 目标状态、提交和已有本机元数据。当前活动只代表 Kada 使用记录，不推断用户在场或授权新的工作。
 
@@ -117,6 +121,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+PR 的本地签名 HTTP 与原 Pi 任务回归覆盖提交更新、合并过滤、响应丢失、重启、追加消息、暂停、规则修订竞态及不可信字段排除。入口继续默认关闭，需用户选择仓库和配置现有 HTTPS 代理后才能验收外部投递；没有真实 GitHub 端到端效果或成本结论。该功能不会发出评论或修改仓库。
 
 活动门槛的本地 API、Pi 事务与实际 SIGKILL 回归覆盖无活动零预检/模型请求、手动旁路、并发受理、暂停编辑、原创建时间及聊天转 Goal 后的活动保留。活动投影需要读取同项目的已有本机记录，未进行大规模历史压力测试；真实任务质量和净成本收益仍需与原生 Pi 对照，不由零请求的合成场景推断。
 
