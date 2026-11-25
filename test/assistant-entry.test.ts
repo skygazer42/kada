@@ -248,3 +248,65 @@ test('the owner can read and change the project memory capture setting across da
     assert.deepEqual(await client.request(path, 'PUT', { workspace: f.workspace, enabled: true }), initial);
   } finally { await server.close(); await f.close(); }
 });
+
+test('the authenticated event endpoint only runs the saved rule for a matching event', async () => {
+  const f = await scriptedFixture(() => fauxAssistantMessage('No model needed'));
+  const settings = { ...f.settings, port: await portNumber() };
+  const server = await serve(settings, { models: f.models });
+  const client = createClient(settings);
+  const id = 'inventory-watch';
+  const at = new Date(Date.now() + 3_600_000).toISOString();
+  const path = `/v1/routines/${id}/events`;
+  const event = { source: 'inventory', type: 'item.changed', eventId: 'warehouse-1', data: { warehouse: 'east' } };
+  try {
+    await client.request('/v1/routines', 'POST', {
+      id, action: 'notify', objective: 'Check the inventory report', schedule: { kind: 'once', at },
+      event: { source: event.source, type: event.type, equals: { warehouse: 'east' } },
+    });
+    const response = await fetch(`http://127.0.0.1:${settings.port}${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(event),
+    });
+    assert.equal(response.status, 401);
+    const filtered = await client.request<{ outcome: string }>(path, 'POST', {
+      ...event, eventId: 'ignored', data: { warehouse: 'west' },
+    });
+    assert.equal(filtered.outcome, 'filtered');
+    assert.equal((await server.runtime.notifications()).length, 0);
+    const accepted = await client.request<{ outcome: string }>(path, 'POST', event);
+    assert.equal(accepted.outcome, 'accepted');
+    assert.deepEqual(await client.request(path, 'POST', event), accepted);
+    const events = await until(() => server.runtime.notifications(), rows => rows.some(row => row.routineId === id));
+    assert.deepEqual(events.filter(row => row.routineId === id).map(row => row.detail), ['Check the inventory report']);
+    assert.equal((await server.runtime.routines.list()).find(rule => rule.id === id)?.nextRunAt, at);
+  } finally { await server.close(); await f.close(); }
+});
+
+test('memory candidate decisions are scoped owner actions and become searchable only after acceptance', async () => {
+  const quote = 'Always show the checked sources.';
+  const f = await scriptedFixture(context => {
+    if (!context.messages.some(message => message.role === 'toolResult' && message.toolName === 'user_remember')) {
+      return fauxAssistantMessage(fauxToolCall('user_remember', { facts: [{ text: quote, category: 'preferences',
+        scope: 'project', certainty: 'stated', evidence: [{ sourceId: 'user', quote }] }] }), { stopReason: 'toolUse' });
+    }
+    return fauxAssistantMessage('Candidate ready for review.');
+  });
+  const home = join(f.directory, 'review-home');
+  await mkdir(home);
+  const settings = { ...f.settings, discovery: true, port: await portNumber() };
+  const server = await serve(settings, { models: f.models, discovery: { home } });
+  const client = createClient(settings);
+  const query = '?workspace=' + encodeURIComponent(f.workspace);
+  const candidates = '/v1/environment/memory/candidates';
+  try {
+    await client.request('/v1/settings/memory/review', 'PUT', { workspace: f.workspace, enabled: true });
+    const task = await client.request<{ id: string }>('/v1/tasks', 'POST', { objective: quote, mode: 'chat', workspace: f.workspace });
+    await until(() => server.runtime.status(task.id), status => status.status === 'answered');
+    const [candidate] = await client.request<{ id: string; status: string }[]>(candidates + query);
+    assert.equal(candidate.status, 'pending');
+    assert.equal((await server.runtime.localMemory(f.workspace)).facts.some(fact => fact.text === quote), false);
+    assert.equal((await fetch(`http://127.0.0.1:${settings.port}${candidates}/${candidate.id}/accept${query}`, { method: 'POST' })).status, 401);
+    const accepted = await client.request(candidates + '/' + candidate.id + '/accept' + query, 'POST', {});
+    assert.deepEqual(await client.request(candidates + '/' + candidate.id + '/accept' + query, 'POST', {}), accepted);
+    assert.equal((await server.runtime.localMemory(f.workspace)).facts.filter(fact => fact.text === quote).length, 1);
+  } finally { await server.close(); await f.close(); }
+});

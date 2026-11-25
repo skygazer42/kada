@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { crc32, deflateSync } from "node:zlib";
 import { demoModels } from "../src/models.js";
 import { LocalRuntime, type RuntimeOptions } from "../src/runtime.js";
 import { prepareDemo } from "../src/demo.js";
@@ -14,6 +15,20 @@ import { createModels, fauxProvider, getCurrentTools, type AssistantMessage, typ
 import type { Extension } from "@earendil-works/pi-durable";
 
 export function hasTool(context: TranscriptContext, name: string): boolean { return getCurrentTools(context.messages).some(t => t.name === name); }
+
+export function pngFixture(width = 1, height = 1): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 6;
+  const chunk = (name: string, bytes: Buffer) => {
+    const result = Buffer.alloc(bytes.length + 12);
+    result.writeUInt32BE(bytes.length, 0); result.write(name, 4); bytes.copy(result, 8);
+    result.writeUInt32BE(crc32(result.subarray(4, -4)), result.length - 4);
+    return result;
+  };
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+    chunk('IDAT', deflateSync(Buffer.alloc((width * 4 + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
+}
 
 export function fakeRoutineClock(start: number) {
   let now = start;

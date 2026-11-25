@@ -9,6 +9,7 @@ import type { CheckReceipt, CriterionResult } from "./verification.js";
 import type { LearningState } from "./learning.js";
 import type { SkillState } from "./skills.js";
 import { outstandingDelegation, savedDelegation } from "./delegation.js";
+import type { InputImage } from "./input-images.js";
 
 export type GoalPhase = "working" | "clarifying" | "awaiting_confirmation" | "submitted" | "verifying" | "completed" | "waiting_user" | "blocked" | "needs_attention" | "failed";
 export type ReviewVerdict = { verdict: "pass" | "rework" | "blocked"; reason: string; evidence: string[] };
@@ -35,7 +36,7 @@ export type GoalState = {
   stalls: number;
   lastFingerprint: string | null;
   lastEvaluated: string | null;
-  outbox: { requestId: string; content: string } | null;
+  outbox: { requestId: string; content: string; images?: InputImage[] } | null;
   tokenLimit: number | null;
   costLimit?: number;
   reason: string | null;

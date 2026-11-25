@@ -17,6 +17,9 @@ export type RoutineBudget = {
   maxDurationMs: number;
   maxTotalTokens?: number;
 };
+type EventIdentity = { source: string; type: string; eventId: string };
+type EventData = Record<string, string | number | boolean | null>;
+type RoutineEvent = { source: string; type: string; equals: EventData };
 
 export type RoutineInput = {
   id?: string;
@@ -31,6 +34,7 @@ export type RoutineInput = {
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
   precheck?: { command: string[] };
+  event?: RoutineEvent;
 };
 
 type RoutineDefinition = Omit<RoutineInput, "id" | "acceptance" | "missedPolicy" | "budgetPolicy" | "notifyOnChange"> & {
@@ -40,13 +44,14 @@ type RoutineDefinition = Omit<RoutineInput, "id" | "acceptance" | "missedPolicy"
   notifyOnChange: boolean;
 };
 
-export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPolicy" | "overlapPolicy"> & {
+export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPolicy" | "overlapPolicy" | "event"> & {
   id: string;
   routineId: string;
   revision: number;
   scheduledAt: string;
   taskId: string;
-  trigger?: "manual";
+  trigger?: "manual" | "event";
+  event?: EventIdentity;
   timing?: RoutineTiming;
 };
 
@@ -62,13 +67,14 @@ type TaskOverview = Awaited<ReturnType<LocalRuntime["taskOverview"]>>;
 type TaskState = TaskOverview["status"];
 type StartedOccurrence = { occurrenceId: string; taskId: string };
 
-type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt" | "trigger"> & {
+type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt" | "trigger" | "event"> & {
   status: "claimed" | "notified" | "started" | "budget_exhausted" | "skipped" | "failed" | "interrupted";
   taskId?: string;
   detail?: string;
   timing?: RoutineTiming;
   precheck?: PrecheckResult;
   blockedBy?: StartedOccurrence & { status: TaskState };
+  eventFingerprint?: string;
 };
 
 export type RoutineOccurrenceRecord = Receipt & {
@@ -104,7 +110,8 @@ async function interruptManual(tx: Tx, conversationId: ConversationId, rule: Sto
   const precheck = claim?.precheckResult;
   const admissionPossible = claim && (!claim.precheck || precheck?.status === "changed");
   await recordOccurrence(tx, conversationId, rule, {
-    id: manual.accepted.id, scheduledAt: manual.accepted.scheduledAt, trigger: "manual", status: "interrupted",
+    id: manual.accepted.id, scheduledAt: manual.accepted.scheduledAt, trigger: manual.accepted.trigger, status: "interrupted",
+    ...(manual.accepted.event ? { event: manual.accepted.event } : {}),
     ...(admissionPossible && manual.accepted.taskId ? { taskId: manual.accepted.taskId } : {}),
     ...(precheck ? { precheck } : {}),
     detail: !claim ? "The rule changed before this run could begin."
@@ -120,7 +127,8 @@ async function manualReceipt(tx: Tx, conversationId: ConversationId, routineId: 
     for (const entry of page.items) {
       if (entry.kind !== occurrenceEntryKind) continue;
       const data = entry.data as RoutineOccurrenceRecord;
-      if (data.trigger === "manual" && data.status === "claimed" && data.routineId === routineId && data.id.endsWith("/" + requestKey)) return data;
+      if ((data.trigger === "manual" && data.status === "claimed" || data.trigger === "event" && data.eventFingerprint) &&
+        data.routineId === routineId && data.id.endsWith("/" + requestKey)) return data;
     }
     cursor = page.next;
   } while (cursor);
@@ -206,6 +214,29 @@ function inputId(value: string | undefined): string {
   return value;
 }
 
+function eventData(value: unknown, nonempty = false): EventData {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RoutineError(400, "Event fields must be a scalar object.");
+  const entries = Object.entries(value);
+  if (entries.length > 32 || (nonempty && !entries.length) || entries.some(([key, item]) =>
+    !/^[A-Za-z0-9_-]{1,80}$/.test(key) || !(item === null || typeof item === "boolean" ||
+      typeof item === "number" && Number.isFinite(item) || typeof item === "string" && item.length <= 1024))) {
+    throw new RoutineError(400, "An event supports up to 32 scalar fields and 1024 characters per value.");
+  }
+  return Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b)));
+}
+
+function eventName(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(value)) {
+    throw new RoutineError(400, "An event source or type must be a name of at most 120 characters.");
+  }
+  return value;
+}
+
+function eventRule(value: RoutineEvent): RoutineEvent {
+  if (!value || Object.keys(value).some(key => !["source", "type", "equals"].includes(key))) throw new RoutineError(400, "Invalid event filter.");
+  return { source: eventName(value.source), type: eventName(value.type), equals: eventData(value.equals, true) };
+}
+
 function definition(input: RoutineInput): RoutineDefinition {
   if (!input || (input.action !== "task" && input.action !== "notify")) {
     throw new RoutineError(400, "A routine action must be task or notify.");
@@ -267,6 +298,7 @@ function definition(input: RoutineInput): RoutineDefinition {
     budgetPolicy,
     ...(overlapPolicy ? { overlapPolicy } : {}),
     notifyOnChange: input.notifyOnChange ?? false,
+    ...(input.event === undefined ? {} : { event: eventRule(input.event) }),
     ...(precheck ? { precheck: { command: [...precheck.command] } } : {}),
     ...(budget ? {
       budget: {
@@ -418,7 +450,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
               if (checked.failed) {
                 const failure: Receipt = {
                   id: due.id, scheduledAt: due.scheduledAt, status: "failed", detail: "Could not read the prior task status.",
-                  ...(due.trigger ? { trigger: due.trigger } : {}), ...(due.timing ? { timing: due.timing } : {}),
+                  ...(due.trigger ? { trigger: due.trigger } : {}), ...(due.event ? { event: due.event } : {}), ...(due.timing ? { timing: due.timing } : {}),
                 };
                 await recordOccurrence(tx, runtime.conversationId, rule, failure, now);
                 return finish(rules, rule, failure, now);
@@ -432,7 +464,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           if (skipMissed || blockedBy) {
             const skipped: Receipt = {
               id: due.id, scheduledAt: due.scheduledAt, status: "skipped",
-              ...(manual ? { trigger: "manual" } : {}),
+              ...(due.trigger ? { trigger: due.trigger } : {}), ...(due.event ? { event: due.event } : {}),
               ...(due.timing ? { timing: due.timing } : {}), ...(blockedBy ? { blockedBy } : {}),
             };
             await recordOccurrence(tx, runtime.conversationId, rule, skipped, now);
@@ -486,7 +518,8 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           precheck = { status: "interrupted", detail: "The prior check may have run. Inspect actual state before retrying." };
         }
         const timing=occurrence.timing ? {timing:occurrence.timing} : {};
-        const evidence = { id, scheduledAt, ...timing, ...(manual ? { trigger: "manual" as const } : {}), ...(precheck ? { precheck } : {}) };
+        const evidence = { id, scheduledAt, ...timing, ...(due.trigger ? { trigger: due.trigger } : {}),
+          ...(due.event ? { event: due.event } : {}), ...(precheck ? { precheck } : {}) };
         let receipt: Receipt;
         try {
           if (precheck && precheck.status !== "changed") {
@@ -633,6 +666,48 @@ export class LocalRoutines {
     return accepted;
   }
 
+  async receiveEvent(id: string, input: unknown): Promise<{ outcome: "filtered" | "accepted"; receipt?: RoutineOccurrenceRecord }> {
+    const key = keyFor(inputId(id));
+    if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(field =>
+      !["source", "type", "eventId", "data"].includes(field))) throw new RoutineError(400, "Invalid event delivery.");
+    const value = input as Record<string, unknown>;
+    const event = { source: eventName(value.source), type: eventName(value.type), eventId: inputId(value.eventId as string) };
+    const data = eventData(value.data);
+    const fingerprint = createHash("sha256").update(JSON.stringify({ ...event, data })).digest("hex");
+    const requestKey = "event-" + createHash("sha256").update(JSON.stringify([event.source, event.eventId])).digest("hex");
+    const { harness, conversationId, timer } = await this.open();
+    const result = await harness.commit(async tx => {
+      const { rules } = await tx.doc(routinesDoc);
+      const rule = snapshot(rules[key]);
+      if (!rule) throw new RoutineError(404, "Routine not found.");
+      const previous = await manualReceipt(tx, conversationId, id, requestKey);
+      if (previous) {
+        if (previous.eventFingerprint !== fingerprint) throw new RoutineError(409, "This event ID already has different content.");
+        return { outcome: previous.status === "claimed" ? "accepted" as const : "filtered" as const, receipt: previous };
+      }
+      if (!rule.event) throw new RoutineError(409, "This routine has no event filter.");
+      if (rule.event.source !== event.source || rule.event.type !== event.type) return { outcome: "filtered" as const };
+      if (rule.status !== "scheduled") throw new RoutineError(409, "Only a scheduled rule can receive a new event.");
+      const matches = Object.entries(rule.event.equals).every(([field, expected]) => Object.hasOwn(data, field) && data[field] === expected);
+      if (matches && rule.manual) throw new RoutineError(409, "An immediate run for this rule is still being admitted.");
+      const now = this.now();
+      const occurrence = { ...occurrenceFor(rule, now, requestKey), trigger: "event" as const, event };
+      const receipt: Receipt = { id: occurrence.id, scheduledAt: occurrence.scheduledAt, trigger: "event", event,
+        eventFingerprint: fingerprint, status: matches ? "claimed" : "skipped",
+        ...(matches && occurrence.action === "task" ? { taskId: occurrence.taskId } : {}) };
+      if (matches) {
+        const timerId = await tx.createTask(timer, { routineId: id, revision: rule.revision, firstAt: now, manual: occurrence }, {
+          ownership: { kind: "conversation" }, conversationId,
+        });
+        rules[key] = { ...rule, manual: { timerId, accepted: receipt } };
+      }
+      return { outcome: matches ? "accepted" as const : "filtered" as const,
+        receipt: await recordOccurrence(tx, conversationId, rule, receipt, now) };
+    }, context);
+    harness.resume();
+    return result;
+  }
+
   async history(id: string, includeTaskStatus = false): Promise<RoutineHistoryRecord[]> {
     const key=keyFor(inputId(id));
     const {harness,conversationId}=await this.open();
@@ -765,7 +840,7 @@ export class LocalRoutines {
   async settleBudget(occurrenceId: string): Promise<void> {
     const [id, revision, keyPart, extra] = occurrenceId.split("/");
     if (!id || !revision || !keyPart || extra !== undefined) return;
-    const manual = /^manual-[a-f0-9]{64}$/.test(keyPart);
+    const manual = /^(?:manual|event)-[a-f0-9]{64}$/.test(keyPart);
     if (!manual && !Number.isFinite(Date.parse(keyPart))) return;
     const key = keyFor(id);
     const { harness,conversationId } = await this.open();

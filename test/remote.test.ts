@@ -6,13 +6,13 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { Script } from "node:vm";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { fauxAssistantMessage, fauxToolCall, getCurrentTools, Type } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, UserEntry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { memoryProject } from "../src/memory-sources.js";
 import { createRemoteCredential, createRemoteHandler, quarantineLegacyRemoteTasks, type RemoteDevice } from "../src/remote.js";
 import { LocalRuntime } from "../src/runtime.js";
-import { hasTool, scriptedFixture, until } from "./helpers.js";
+import { hasTool, pngFixture, scriptedFixture, until } from "./helpers.js";
 
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const turn = (messageId: string, text: string, attachmentIds: string[] = []) => ({
@@ -52,6 +52,46 @@ function pairing(accountId = "owner", deviceId = "phone") {
   const { token, tokenHash } = createRemoteCredential();
   return { token, device: { accountId, deviceId, tokenHash } };
 }
+
+test("a vision model receives uploaded images on the original and follow-up Pi submissions", async t => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage("placeholder"));
+  t.after(() => fixture.close());
+  const image = pngFixture();
+  const observed: number[] = [];
+  const inputs: string[] = [];
+  const vision = fauxProvider({ provider: "local-test", models: [{ id: "scripted", input: ["text", "image"], inputLimits: { images: { maxPerRequest: 1 } } }] });
+  vision.setResponses(Array.from({ length: 8 }, () => context => {
+    const user = context.messages.findLast(message => message.role === "user")!;
+    assert(context.messages.reduce((count, message) => count + (typeof message.content === 'string' ? 0 : message.content.filter(block => block.type === 'image').length), 0) <= 1);
+    const images = typeof user.content === "string" ? [] : user.content.filter(block => block.type === "image");
+    observed.push(images.length);
+    inputs.push(JSON.stringify(user.content));
+    if (images.length) assert.equal(images[0].data, image.toString("base64"));
+    return fauxAssistantMessage("Observed image " + observed.length);
+  }));
+  fixture.models.setProvider(vision.provider);
+  const owner = pairing();
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [owner.device]);
+  const path = "/conversations/vision";
+  const upload = async () => {
+    const response = await call(owner.token, path + "/uploads", {
+      method: "POST", headers: { "Content-Type": "image/png", "X-Kada-Filename": "pixel.png", "X-Kada-Sha256": sha(image) }, body: image,
+    });
+    assert.equal(response.status, 201);
+    return (await response.json()).id as string;
+  };
+  const firstImage = await upload();
+  assert.equal((await call(owner.token, path + "/messages", turn("one", "Describe the first image", [firstImage]))).status, 202);
+  await until(async () => (await call(owner.token, path)).json(), view => view.messages.some(message => message.text === "Observed image 1"));
+  const nextImage = await upload();
+  assert.equal((await call(owner.token, path + "/messages", turn("two", "Describe the second image", [nextImage]))).status, 202);
+  await until(async () => (await call(owner.token, path)).json(), view => view.messages.some(message => message.text === "Observed image 2"));
+  assert.deepEqual(observed, [1, 1], inputs.join('\n'));
+  const view = await (await call(owner.token, path)).json();
+  const status = await fixture.runtime.status(view.taskId);
+  assert.equal(status.messages.filter(message => message.role === 'user').flatMap(message =>
+    typeof message.content === 'string' ? [] : message.content.filter(block => block.type === 'image')).length, 2);
+});
 
 test("D01 concurrent duplicates and a lost HTTP response keep the original task and request", async (t) => {
   const fixture = await scriptedFixture(() => fauxAssistantMessage("Received."));

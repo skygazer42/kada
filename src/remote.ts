@@ -557,6 +557,9 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       if (task && task.workspace !== workspace.root) throw new HttpError(409, "The original workspace is unavailable.");
       const files = await stageAttachments(workspace, attachments);
       const prompt = files.length ? text + "\n\nAttached files in this workspace:\n" + files.map((file) => "- " + file).join("\n") : text;
+      const images = attachments.filter(attachment => attachment.type.startsWith("image/")).map(attachment => ({
+        path: uploadPath(attachment.id), mimeType: attachment.type, bytes: attachment.bytes, sha256: attachment.sha256,
+      }));
       const receipt: Receipt = { messageId, requestId: randomUUID(), fingerprint, state: "accepted" };
       if (attachments.length) receipt.original = { text, expiresAt: Date.now() + uploadLifetime,
         attachments: attachments.map(({ id, name, type, bytes, sha256 }) => ({ id, name, type, bytes, sha256 })) };
@@ -568,8 +571,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       try {
         await saveConversation(path, conversation);
         try {
-          if (first) await runtime.create(prompt, workspace.root, undefined, { chat: true, prepare: false, remote: true, id: conversation.taskId });
-          else await runtime.followUp(conversation.taskId, prompt, receipt.requestId);
+          if (first) await runtime.create(prompt, workspace.root, undefined, { chat: true, prepare: false, remote: true, id: conversation.taskId, images });
+          else await runtime.followUp(conversation.taskId, prompt, receipt.requestId, images);
           receipt.state = "submitted";
         } catch {
           receipt.state = "interrupted";

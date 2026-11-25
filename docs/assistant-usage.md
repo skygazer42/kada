@@ -32,6 +32,16 @@ npm run harness -- memory capture off --workspace E:/project
 npm run harness -- memory capture on --workspace E:/project
 ```
 
+项目可开启模型写入记忆的候选审阅。开启后，`user_remember` 提交的候选需要由用户接受才会进入召回。接受时会重新核对来源版本和原记忆版本。
+
+```powershell
+npm run harness -- memory review on --workspace E:/project
+npm run harness -- memory candidates --workspace E:/project
+npm run harness -- memory accept 候选ID --workspace E:/project
+npm run harness -- memory reject 候选ID --workspace E:/project
+npm run harness -- memory review off --workspace E:/project
+```
+
 ## 模型与方法
 
 密钥通过供应商环境变量或 Pi 已有认证设置。硅基流动使用 `SILICONFLOW_API_KEY`，凭据不写入任务配置。
@@ -128,6 +138,12 @@ Cron 规则使用五字段和显式 IANA 时区。下面的示例在每个工作
 
 手动运行沿用规则的预检和预算，发生项在历史中标为 `manual`，原定时点继续生效。若命令断线，使用相同的请求 ID 可查询原受理回执；省略 ID 会为本次命令生成新的 ID。
 
+现有本地连接器可向 `POST /v1/routines/:id/events` 投递事件，使用 daemon 管理令牌鉴权。规则中的 `event` 设置来源、类型和字段匹配条件，例如 `{"source":"inventory","type":"item.changed","equals":{"warehouse":"east"}}`。投递数据为 `{"source":"inventory","type":"item.changed","eventId":"delivery-1","data":{"warehouse":"east"}}`。事件只触发规则保存的工作，不修改目标或预算。重投同一事件 ID 返回原回执，改动内容会报告冲突。
+
+```powershell
+npm run harness -- routines event 规则ID event.json
+```
+
 有明确 `workspace` 的任务规则可添加 `"precheck": {"command":["node","checks/project-fingerprint.mjs"]}`。脚本在该目录中以本地用户权限运行，使用参数数组直接启动，时限为 30 秒。使用只读脚本，并向标准输出写出稳定的 UTF-8 检查结果。首次成功或输出的 SHA-256 变化会创建任务，输出相同的发生项记为 `skipped`。更新规则版本会重新建立基线。预检失败或中断会记录原因，当前发生项到此结束。`routines history` 可查看预检状态和成功样本的哈希。
 
 周期任务可设置 `"overlapPolicy": "skip"`。如果同一规则版本的上一次任务仍在运行或等待处理，本次直接跳过。回执的 `blockedBy` 保存上一次发生项、任务 ID 和当时的状态。`--task-status` 按原任务 ID 查询当前状态，并在有值时显示待答问题、原因或交付摘要。若回执有关联 ID 但任务尚未建立，当前状态显示 `missing`。
@@ -153,6 +169,8 @@ npm run harness -- remote revoke owner phone
 支持 Web Locks 的浏览器会按配对和会话保存草稿。关闭页面后，用原配对令牌连接可恢复原文。待发记录保存原消息 ID 和已上传的附件引用，刷新后先查原回执。查不到回执时，可点击 **Retry send** 用原 ID 重发。未上传的本地文件需重新选择。附件过期时，原正文会回到输入框。
 
 已发送的附件随原消息显示。支持的图片和文本可预览，原始文件可下载。预览和下载会校验原始文件的 SHA-256。每个会话最多保存 50 MiB 的附件原件。达到上限后可在新会话继续发送附件。
+
+支持视觉输入的模型会收到附件中的图片。Pi 按模型的尺寸、Base64 字节数和张数限制处理图片，原件独立保留。模型不支持视觉或图片无法解码时，会在输入中说明，并提供已有的工作区文件路径。
 
 手机首版提供工作区内的读取、写入、编辑、二进制复制和受相同限制的子会话。确认前只有只读工具。Shell、命令核验、现有 MCP、电脑工具、宿主 Skills 和本机全局记忆不会自动交给远程设备。这是工具权限边界；要开放完整宿主执行能力，需要另行选择现成隔离执行环境。未保存该权限策略的历史实验会话会被拒绝，需新建会话。
 

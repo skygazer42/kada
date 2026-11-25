@@ -33,6 +33,7 @@ import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
 import { taskHandoff } from "./task-view.js";
 import { claudeProject } from './memory-sources.js';
+import { imageInput, inputImageExtension, type InputImage } from './input-images.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -75,6 +76,7 @@ export interface TaskMeta {
   skillPolicy?:'catalogue';
   initializationError?:string;
   remotePolicy?:'workspace';
+  initialImages?: InputImage[];
   mcpPins?: McpPin[];
   routineOccurrenceId?: string;
   routineNotifyOnChange?: true;
@@ -175,6 +177,25 @@ export class LocalRuntime {
       ? this.discovery.memory.captureSettings(workspace)
       : this.discovery.memory.setCapture(workspace, enabled);
   }
+  async memoryReview(workspace: string, enabled?: boolean) {
+    if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
+    return enabled === undefined ? this.discovery.memory.reviewSettings(workspace) : this.discovery.memory.setReview(workspace, enabled);
+  }
+  async memoryCandidates(workspace: string, id?: string, decision?: "accept" | "reject") {
+    if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
+    return this.changes.run(async () => {
+      const inventory = await this.discovery.load();
+      if (!id || !decision) return this.discovery.memory.listCandidates(inventory.home, workspace);
+      await this.discovery.memory.refresh(inventory, workspace);
+      const result = await this.discovery.memory.decideCandidate(inventory.home, workspace, id, decision);
+      for (const active of this.active.values()) if (active.meta.memoryTracking) {
+        active.localContext = await this.discovery.context(true, active.meta.workspace, active.meta.objective);
+        await this.recordMemory(active, true);
+        await this.configureStage(active);
+      }
+      return result;
+    });
+  }
   async changeMemory(id: string, input: MemoryChange, workspace?: string) {
     return this.changes.run(async () => {
       if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
@@ -254,10 +275,11 @@ export class LocalRuntime {
     }
     await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; routineOccurrenceId?:string; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; routineOccurrenceId?:string; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[] } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
+      if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
       if (typeof objective !== "string" || !objective.trim() || objective.length > 32000) throw new Error("Provide an objective between 1 and 32000 characters");
       const checks = acceptanceChecks(acceptance);
       if (options.chat && checks.length) throw new Error("Acceptance checks belong to an explicit task, not an ordinary conversation");
@@ -266,7 +288,8 @@ export class LocalRuntime {
       const id = options.id ?? randomUUID();
       if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error("Provide a valid task UUID.");
       const requestedWorkspace = resolve(workspace ?? join(this.directory(id), "workspace"));
-      const creationHash = createHash("sha256").update(JSON.stringify({ objective, workspace: requestedWorkspace, acceptance: checks, prepare: Boolean(options.prepare), chat: Boolean(options.chat), budget: budget ?? null, skills:options.skills ?? null, routineOccurrenceId:options.routineOccurrenceId ?? null,notifyOnChange:options.notifyOnChange === true,remote:options.remote===true })).digest("hex");
+      const creationHash = createHash("sha256").update(JSON.stringify({ objective, workspace: requestedWorkspace, acceptance: checks, prepare: Boolean(options.prepare), chat: Boolean(options.chat), budget: budget ?? null, skills:options.skills ?? null, routineOccurrenceId:options.routineOccurrenceId ?? null,notifyOnChange:options.notifyOnChange === true,remote:options.remote===true,
+        ...(options.images?.length ? { images: options.images } : {}) })).digest("hex");
       if (options.id) try {
         const saved = await this.metadata(id);
         if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
@@ -283,6 +306,7 @@ export class LocalRuntime {
         mcpPins: options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root),
         ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
         ...(options.remote ? {remotePolicy:'workspace' as const} : {}),
+        ...(options.images?.length ? { initialImages: structuredClone(options.images) } : {}),
         ...(options.routineOccurrenceId ? {routineOccurrenceId:options.routineOccurrenceId} : {}),
         ...(options.notifyOnChange ? {routineNotifyOnChange:true as const} : {}),
         ...(this.config.subagentModel ? { subagentModel: this.config.subagentModel } : {}),
@@ -314,6 +338,7 @@ export class LocalRuntime {
       if (required === "placed") return submission?.entry !== undefined;
       if (submission) return required === "admitted" || submission.entry !== undefined ||
         (submission.status === "queued" && meta.control !== "cancelled");
+      if (required === "recoverable" && requestId === "initial" && meta.initialImages?.length && meta.control !== "cancelled") return true;
       const outbox = (await this.goalState(active))?.outbox?.requestId;
       return (required === "admitted" || meta.control !== "cancelled") &&
         (outbox === requestId || outbox === "user:" + requestId);
@@ -366,6 +391,7 @@ export class LocalRuntime {
       const registry = createRegistry();
       const remote=meta.remotePolicy==='workspace';
       const policy=remote ? remoteFilePolicy(workspace) : undefined;
+      const imagePolicy = remote ? inputImageExtension(meta.model) : undefined;
       const nativeSkills = meta.resourcePolicy === "pi-skills";
       const localContext = !remote && meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective).catch(() => undefined) : undefined;
       const statements = () => this.userStatements(this.active.get(meta.id)!);
@@ -398,7 +424,7 @@ export class LocalRuntime {
       } satisfies Partial<GenerationHooks>}]}) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const preparation = preparationExtension(workspace, this.defaultBudget(meta), { remote });
-      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : [])];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { remote, startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -407,6 +433,7 @@ export class LocalRuntime {
       } });
       const chatExtensions = [conversation, ...(memory ? [memory] : []),
         ...(memoryUse ? [memoryUse] : []),
+        ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
       const verification = verificationExtension(workspace, nativeSkills);
       const methods = meta.learning && !nativeSkills ? await (this.methodStore ??= MethodStore.open(this.config.dataDir)) : undefined;
@@ -428,6 +455,7 @@ export class LocalRuntime {
           if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
         } : undefined),
         ...(policy ? [policy] : []),
+        ...(imagePolicy ? [imagePolicy] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
         ...(memory ? [memory] : []),
@@ -490,7 +518,9 @@ export class LocalRuntime {
       active.enabled = true;
       if (goal) await this.dispatchOutbox(active);
       const initial = await active.harness.commit(tx => tx.submissionByRequest(active!.root.id, "initial"), ctx);
-      if (!initial && Date.now() < this.deadline(active, goal)) await active.root.submit({ type: "input", content: meta.objective + (active.methods && goal?.confirmation ? learningReminder : ""), requestId: "initial" }, ctx);
+      if (!initial && Date.now() < this.deadline(active, goal)) await active.root.submit({ type: "input",
+        content: await imageInput(meta.objective + (active.methods && goal?.confirmation ? learningReminder : ""), meta.initialImages,
+          this.options.models.getModel(meta.model.provider, meta.model.modelId)!), requestId: "initial" }, ctx);
       active.harness.resume();
     }
     return active;
@@ -632,7 +662,9 @@ export class LocalRuntime {
   private async dispatchOutbox(active: Active): Promise<void> {
     const outbox = (await readGoal(active.harness)).outbox;
     if (!outbox) return;
-    await active.root.submit({ type: "input", content: outbox.content, requestId: outbox.requestId, whenBusy: "steer" }, ctx);
+    const admitted = await active.harness.commit(tx => tx.submissionByRequest(active.root.id, outbox.requestId), ctx);
+    if (!admitted) await active.root.submit({ type: "input", content: await imageInput(outbox.content, outbox.images,
+      this.options.models.getModel(active.meta.model.provider, active.meta.model.modelId)!), requestId: outbox.requestId, whenBusy: "steer" }, ctx);
     await this.updateGoal(active, goal => { if (goal.outbox?.requestId === outbox.requestId) goal.outbox = null; });
   }
   private async supervise(active: Active): Promise<void> {
@@ -967,11 +999,12 @@ export class LocalRuntime {
       active.harness.resume();
     });
   }
-  async followUp(id: string, message: string, requestId: string = randomUUID()): Promise<void> {
+  async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[]): Promise<void> {
     await this.changes.run(async () => {
       if (!message.trim() || message.length > 32000) throw new Error("Provide a message between 1 and 32000 characters");
       if (!requestId.trim() || requestId.length > 200) throw new Error("requestId must contain 1 to 200 characters");
       const meta = await this.metadata(id);
+      if (images?.length && meta.remotePolicy !== "workspace") throw new Error("Image references require a scoped remote submission.");
       if (meta.control !== "active") throw new Error(`Task is ${meta.control}; resume it first`);
       const active = await this.open(meta, false);
       const key = `user:${requestId}`;
@@ -986,7 +1019,8 @@ export class LocalRuntime {
           active.meta = meta;
           await atomicJson(this.metaFile(id), meta);
         } else if (Date.now() >= meta.deadlineAt) throw new Error("Task time budget has expired; resume with a fresh budget first");
-        await active.root.submit({ type: "input", content: message, requestId: meta.entrypoint === "chat" ? key : requestId,
+        await active.root.submit({ type: "input", content: await imageInput(message, images,
+          this.options.models.getModel(meta.model.provider, meta.model.modelId)!), requestId: meta.entrypoint === "chat" ? key : requestId,
           ...(meta.entrypoint === "chat" ? { whenBusy: "steer" as const } : {}) }, ctx);
         active.enabled = true; return;
       }
@@ -1006,7 +1040,7 @@ export class LocalRuntime {
         goal.reworks = 0; goal.stalls = 0; goal.lastFingerprint = null; goal.lastEvaluated = null; goal.reason = null; goal.question = null;
         goal.userMessages.push(message);
         record("user_input", message);
-        goal.outbox = { requestId: key, content: message };
+        goal.outbox = { requestId: key, content: message, ...(images?.length ? { images: structuredClone(images) } : {}) };
       });
       await stopObsoleteDelegations(active.harness, updated, ctx);
       await this.configureStage(active);

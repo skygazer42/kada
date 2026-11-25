@@ -78,6 +78,21 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           return send(200, await runtime.memoryCapture(workspace, enabled));
         }
       }
+      if (url.pathname === "/v1/settings/memory/review") {
+        if (req.method === "GET") return send(200, await runtime.memoryReview(url.searchParams.get("workspace") ?? ""));
+        if (req.method === "PUT") {
+          const { workspace, enabled } = await body(req);
+          if (typeof workspace !== "string" || typeof enabled !== "boolean") throw new MemoryMutationError(400, "Provide a workspace path and a boolean enabled setting.");
+          return send(200, await runtime.memoryReview(workspace, enabled));
+        }
+      }
+      if (url.pathname === "/v1/environment/memory/candidates" && req.method === "GET") {
+        return send(200, await runtime.memoryCandidates(url.searchParams.get("workspace") ?? ""));
+      }
+      const candidate = /^\/v1\/environment\/memory\/candidates\/([a-f0-9]{24})\/(accept|reject)$/.exec(url.pathname);
+      if (candidate && req.method === "POST") {
+        return send(200, await runtime.memoryCandidates(url.searchParams.get("workspace") ?? "", candidate[1]!, candidate[2] as "accept" | "reject"));
+      }
       const memory = /^\/v1\/environment\/memory\/([^/]+)(?:\/(forget))?$/.exec(url.pathname);
       if (memory && ((!memory[2] && req.method === "PATCH") || (memory[2] === "forget" && req.method === "POST"))) {
         const input = await body(req);
@@ -160,6 +175,11 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         const { requestId } = await body(req);
         if (typeof requestId !== 'string') throw new Error('Provide a routine request ID.');
         return send(202, await runtime.routines.runNow(decodeURIComponent(manualRoutine[1]!), requestId));
+      }
+      const routineEvent = /^\/v1\/routines\/([^/]+)\/events$/.exec(url.pathname);
+      if (routineEvent && req.method === 'POST') {
+        const result = await runtime.routines.receiveEvent(decodeURIComponent(routineEvent[1]!), await body(req));
+        return send(result.outcome === 'accepted' ? 202 : 200, result);
       }
       const routine = /^\/v1\/routines\/([^/]+)$/.exec(url.pathname);
       if (routine) {

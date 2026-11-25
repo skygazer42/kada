@@ -14,13 +14,28 @@ type Category = "preferences" | "work" | "projects" | "environment" | "life" | "
 type Source = { id: string; path: string; kind: "guidance" | "memory" | "environment" | "user"; scope: "global" | "project"; sha256: string; text: string; observedAt: number; provider?: MemoryProvider; domain?: MemoryDomain; project?: string; snapshot?: string; original?: string };
 type Citation = { sourceId: string; path: string; sha256: string; quote: string; observedAt: number; snapshot?: string };
 export type UserFact = { id: string; text: string; category: Category; scope: "global" | "project"; domain?: MemoryDomain; project?: string; certainty: "stated" | "inferred"; origin: "imported" | "organized"; state: "active" | "stale" | "superseded" | "forgotten"; evidence: Citation[]; supersedes?: string[]; updatedAt: number };
-export type UserMemory = { schema: 1; home: string; updatedAt: number; sources: Source[]; facts: UserFact[]; notices: string[]; operations?: Record<string, MemoryReceipt> };
+type MemoryCandidate = { id: string; project: string; taskId: string; fact: UserFact; sources: Source[];
+  replaces: Record<string, string>; createdAt: number; status: "pending" | "accepted" | "rejected" };
+export type UserMemory = { schema: 1; home: string; updatedAt: number; sources: Source[]; facts: UserFact[]; notices: string[];
+  operations?: Record<string, MemoryReceipt>; candidates?: MemoryCandidate[] };
 export type MemoryContext = { home: string; profile: string; evidence: string; summary: string; facts: number; sources: number; project?: string; captureEnabled?: boolean; references?: MemoryReference[];selectionId?:string };
 export type MemoryFactView = UserFact & { revision: string };
 export type MemoryReference = { factId: string; revision: string; scope: "global" | "project"; project?: string; sourceHash: string; text: string; evidence: Citation[] };
 export type MemoryChange = { action: "correct" | "forget"; text?: string; expectedRevision: string; requestId: string };
 export type MemoryChangeResult = { id: string; revision: string; state: UserFact["state"]; scope: UserFact["scope"]; project?: string; affectedIds: string[] };
 type MemoryReceipt = { inputHash: string; result: MemoryChangeResult };
+function validSource(source: Source): boolean {
+  return !!source && (source.id === "environment" || /^[a-f0-9]{16}$/.test(source.id)) && typeof source.path === "string" &&
+    typeof source.text === "string" && source.text.length <= 1048576 && /^[a-f0-9]{64}$/.test(source.sha256) &&
+    ["guidance", "memory", "environment", "user"].includes(source.kind) && ["global", "project"].includes(source.scope) && Number.isFinite(source.observedAt);
+}
+function validFact(fact: UserFact): boolean {
+  return !!fact && typeof fact.id === "string" && typeof fact.text === "string" && fact.text.length <= 640 && categories.includes(fact.category) &&
+    ["global", "project"].includes(fact.scope) && ["stated", "inferred"].includes(fact.certainty) && ["imported", "organized"].includes(fact.origin) &&
+    ["active", "stale", "superseded", "forgotten"].includes(fact.state) && Number.isFinite(fact.updatedAt) &&
+    Array.isArray(fact.evidence) && fact.evidence.length > 0 && fact.evidence.every(evidence => evidence && typeof evidence.sourceId === "string" &&
+      typeof evidence.path === "string" && typeof evidence.quote === "string" && /^[a-f0-9]{64}$/.test(evidence.sha256) && Number.isFinite(evidence.observedAt));
+}
 export type MemoryUseState = { initialized: boolean; current: string[]; references: MemoryReference[]; summary: string; updatedAt: number; prepared?:Record<string,{summary:string;references:MemoryReference[]}> };
 export const MemoryUseDoc = defineDoc<MemoryUseState>({
   scope: "conversation", kind: "local.memory_use", version: 1, history: "latest", fork: "current",
@@ -186,6 +201,75 @@ export class UserMemoryStore {
       return { project, enabled };
     });
   }
+  private async reviewedProjects(): Promise<string[]> {
+    const projects = await readJson<unknown>(join(this.directory, "memory-review.json")).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    if (!Array.isArray(projects) || projects.some(project => typeof project !== "string" || !isAbsolute(project))) {
+      throw new Error("Invalid project memory review settings.");
+    }
+    return projects;
+  }
+  async reviewSettings(workspace: string) {
+    const project = await memoryProject(workspace);
+    if (!project) throw new MemoryMutationError(400, "The memory workspace must be an existing directory.");
+    return { project, enabled: (await this.reviewedProjects()).includes(project) };
+  }
+  async setReview(workspace: string, enabled: boolean) {
+    if (typeof enabled !== "boolean") throw new MemoryMutationError(400, "Provide a boolean memory review setting.");
+    const { project } = await this.reviewSettings(workspace);
+    return this.exclusive(async () => {
+      const projects = new Set(await this.reviewedProjects());
+      const changed = enabled ? !projects.has(project) : projects.delete(project);
+      if (enabled) projects.add(project);
+      if (changed) await atomicJson(join(this.directory, "memory-review.json"), [...projects].sort());
+      return { project, enabled };
+    });
+  }
+  private candidateView(candidate: MemoryCandidate) {
+    return { id: candidate.id, project: candidate.project, taskId: candidate.taskId, status: candidate.status,
+      text: candidate.fact.text, scope: candidate.fact.scope, certainty: candidate.fact.certainty,
+      evidence: candidate.fact.evidence.map(({ sourceId, path, sha256, quote, observedAt }) => ({ sourceId, path, sha256, quote, observedAt })),
+      createdAt: candidate.createdAt };
+  }
+  async listCandidates(home: string, workspace: string) {
+    const { project } = await this.reviewSettings(workspace);
+    return (await this.read(home)).candidates?.filter(candidate => candidate.project === project).map(candidate => this.candidateView(candidate)) ?? [];
+  }
+  async decideCandidate(home: string, workspace: string, id: string, decision: "accept" | "reject") {
+    if (!/^[a-f0-9]{24}$/.test(id) || !["accept", "reject"].includes(decision)) throw new MemoryMutationError(400, "Invalid memory candidate decision.");
+    const { project } = await this.reviewSettings(workspace);
+    return this.exclusive(async () => {
+      const value = await this.read(home);
+      const candidate = value.candidates?.find(item => item.id === id && item.project === project);
+      if (!candidate) throw new MemoryMutationError(404, "Memory candidate not found in this workspace.");
+      const status = decision === "accept" ? "accepted" as const : "rejected" as const;
+      if (candidate.status !== "pending" && candidate.status !== status) throw new MemoryMutationError(409, "This candidate already has a different decision.");
+      if (candidate.status === "pending") {
+        if (decision === "accept") {
+          if ((await this.disabledProjects()).includes(project)) throw new MemoryMutationError(409, "Memory capture is disabled for this project.");
+          for (const evidence of candidate.fact.evidence) {
+            const source = value.sources.find(item => item.id === evidence.sourceId) ?? candidate.sources.find(item => item.id === evidence.sourceId);
+            if (!source || source.sha256 !== evidence.sha256 || !source.text.includes(evidence.quote)) throw new MemoryMutationError(409, "The candidate's source changed. Request a new candidate.");
+          }
+          for (const [oldId, revision] of Object.entries(candidate.replaces)) {
+            const old = value.facts.find(fact => fact.id === oldId);
+            if (!old || memoryRevision(old) !== revision) throw new MemoryMutationError(409, "Memory changed after this candidate was proposed.");
+          }
+          const sources = candidate.sources.filter(source => !value.sources.some(item => item.id === source.id));
+          if (value.sources.length + sources.length > MAX_SOURCES || value.facts.length >= MAX_FACTS) throw new MemoryMutationError(409, "User memory capacity reached.");
+          for (const source of sources) { await this.snapshot(source); value.sources.push(source); }
+          for (const fact of value.facts) if (Object.hasOwn(candidate.replaces, fact.id)) fact.state = "superseded";
+          value.facts.push({ ...candidate.fact, updatedAt: Date.now() });
+        }
+        candidate.status = status;
+        value.updatedAt = Date.now();
+        await this.save(value);
+      }
+      return { id: candidate.id, status, ...(status === "accepted" ? { factId: candidate.fact.id } : {}) };
+    });
+  }
   private async read(home: string): Promise<UserMemory> {
     const file = join(this.directory, "user-memory.json");
     try {
@@ -196,12 +280,15 @@ export class UserMemoryStore {
           typeof receipt.result.id === "string" && /^[a-f0-9]{64}$/.test(receipt.result.revision) &&
           ["active", "stale", "superseded", "forgotten"].includes(receipt.result.state) &&
           ["global", "project"].includes(receipt.result.scope) && Array.isArray(receipt.result.affectedIds) && receipt.result.affectedIds.every(id => typeof id === "string")));
-      if (value.schema === 1 && value.home === home && Array.isArray(value.sources) && value.sources.length <= MAX_SOURCES && Array.isArray(value.facts) && value.facts.length <= MAX_FACTS &&
-        validOperations && Array.isArray(value.notices) && value.sources.every(s => s && (s.id === "environment" || /^[a-f0-9]{16}$/.test(s.id)) && typeof s.path === "string" && typeof s.text === "string" && s.text.length <= 1048576 && /^[a-f0-9]{64}$/.test(s.sha256) &&
-          ["guidance", "memory", "environment", "user"].includes(s.kind) && ["global", "project"].includes(s.scope) && Number.isFinite(s.observedAt)) &&
-        value.facts.every(f => f && typeof f.id === "string" && typeof f.text === "string" && f.text.length <= 640 && categories.includes(f.category) && ["global", "project"].includes(f.scope) &&
-          ["stated", "inferred"].includes(f.certainty) && ["imported", "organized"].includes(f.origin) && ["active", "stale", "superseded", "forgotten"].includes(f.state) && Number.isFinite(f.updatedAt) &&
-          Array.isArray(f.evidence) && f.evidence.length > 0 && f.evidence.every(e => e && typeof e.sourceId === "string" && typeof e.path === "string" && typeof e.quote === "string" && /^[a-f0-9]{64}$/.test(e.sha256) && Number.isFinite(e.observedAt)))) {
+      const validCandidates = value.candidates === undefined || Array.isArray(value.candidates) && value.candidates.length <= MAX_FACTS && value.candidates.every(candidate =>
+        candidate && /^[a-f0-9]{24}$/.test(candidate.id) && typeof candidate.project === "string" && isAbsolute(candidate.project) &&
+        ["pending", "accepted", "rejected"].includes(candidate.status) && typeof candidate.taskId === "string" && Number.isFinite(candidate.createdAt) &&
+        validFact(candidate.fact) && candidate.fact.id === candidate.id && candidate.fact.origin === "organized" && candidate.fact.state === "active" &&
+        Array.isArray(candidate.sources) && candidate.sources.length <= 4 && candidate.sources.every(source => validSource(source) && source.kind === "user" &&
+          source.snapshot === join(this.directory, "memory-snapshots", source.id, source.sha256 + ".md")) &&
+        candidate.replaces && typeof candidate.replaces === "object" && Object.keys(candidate.replaces).length <= 8 && Object.values(candidate.replaces).every(revision => /^[a-f0-9]{64}$/.test(revision)));
+      if (value.schema === 1 && value.home === home && validCandidates && Array.isArray(value.sources) && value.sources.length <= MAX_SOURCES && Array.isArray(value.facts) && value.facts.length <= MAX_FACTS &&
+        validOperations && Array.isArray(value.notices) && value.sources.every(validSource) && value.facts.every(validFact)) {
         for (const fact of value.facts) { const source = value.sources.find(s => s.id === fact.evidence[0]?.sourceId); fact.domain ??= factDomain(fact.category, fact.text, source); fact.project ??= source?.project; }
         return value;
       }
@@ -435,8 +522,14 @@ export class UserMemoryStore {
           if (project && (await this.disabledProjects()).includes(project)) {
             throw new Error("Memory capture is disabled for this project.");
           }
-          const value = await this.read(home), ids: string[] = [];
+          const persisted = await this.read(home), ids: string[] = [];
+          const review = project !== undefined && (await this.reviewedProjects()).includes(project);
+          const value = review ? structuredClone(persisted) : persisted;
           for (const [index, input] of args.facts.entries()) {
+            const originalId = hash(JSON.stringify([api.taskId, index, input.text, input.scope, project ?? "", input.evidence])).slice(0, 24);
+            const candidateId = hash(JSON.stringify(["memory-candidate", taskId, originalId])).slice(0, 24);
+            if (persisted.candidates?.some(candidate => candidate.id === candidateId)) { ids.push(candidateId); continue; }
+            const id = review ? candidateId : originalId;
             if (redact(input.text) !== input.text) throw new Error("Do not put credentials in user memory");
             if (input.scope === "project" && !project) throw new Error("Project memory requires the current task workspace");
             const evidence: Citation[] = [];
@@ -449,7 +542,8 @@ export class UserMemoryStore {
                 source = value.sources.find(s => s.id === id);
                 if (!source) {
                   const sha256 = hash(message); source = { id, path: `pi-task:${taskId}`, kind: "user", scope: input.scope, ...(input.scope === "project" ? { project } : {}), sha256, text: e.quote, observedAt: Date.now(), snapshot: join(this.directory, "memory-snapshots", id, `${sha256}.md`) };
-                  await this.snapshot(source); value.sources.push(source);
+                  if (!review) await this.snapshot(source);
+                  value.sources.push(source);
                 }
               }
               if (!source || !source.text.includes(e.quote) || e.quote.includes("[凭据内容已省略]")) throw new Error("Memory requires an exact quote from a current source snapshot");
@@ -465,13 +559,30 @@ export class UserMemoryStore {
               if (!evidence.some(e => value.sources.find(s => s.id === e.sourceId)?.kind === "user") && old.state !== "stale" && !old.evidence.every(e => evidence.some(n => n.sourceId === e.sourceId))) throw new Error("Cross-source disagreements must retain both observations unless the user corrects them");
               old.state = "superseded";
             }
-            const id = hash(JSON.stringify([api.taskId, index, input.text, input.scope, project ?? "", input.evidence])).slice(0, 24), source = value.sources.find(s => s.id === evidence[0]?.sourceId);
+            const source = value.sources.find(s => s.id === evidence[0]?.sourceId);
             const fact: UserFact = { id, text: input.text, category: input.category, domain: input.domain ?? factDomain(input.category, input.text, source), scope: input.scope, ...(input.scope === "project" ? { project } : {}), certainty: input.certainty, origin: "organized", state: "active", evidence, updatedAt: Date.now() };
             const previous = value.facts.findIndex(f => f.id === id);
             if (previous >= 0) value.facts[previous] = fact; else value.facts.push(fact); ids.push(id);
+            if (review) {
+              persisted.candidates ??= [];
+              if (!persisted.candidates.some(candidate => candidate.id === id)) {
+                persisted.candidates.push({ id, project: project!, taskId, fact,
+                  sources: value.sources.filter(source => evidence.some(e => e.sourceId === source.id) && !persisted.sources.some(item => item.id === source.id)),
+                  replaces: Object.fromEntries((input.supersedes ?? []).map(oldId => [oldId, memoryRevision(persisted.facts.find(old => old.id === oldId)!)])),
+                  createdAt: Date.now(), status: "pending" });
+              }
+            }
           }
           if (value.sources.length > MAX_SOURCES || value.facts.length > MAX_FACTS) throw new Error("User memory is full; existing memory was retained");
+          if (review) {
+            if ((persisted.candidates?.length ?? 0) > MAX_FACTS) throw new Error("Memory candidate capacity reached.");
+            await this.save(persisted);
+            return { ids, candidates: persisted.candidates?.filter(candidate => ids.includes(candidate.id)).map(candidate => ({ id: candidate.id, status: candidate.status })),
+              message: "Check the saved candidate decisions before using this memory." };
+          }
           value.updatedAt = Date.now(); await this.save(value);
+          const candidates = value.candidates?.filter(candidate => ids.includes(candidate.id)).map(candidate => ({ id: candidate.id, status: candidate.status }));
+          if (candidates?.length) return { ids, candidates, message: "Existing candidate decisions were retained." };
           return { ids, profile: this.profile, message: "Saved source-bound user context; it does not change authorization or prove inferred facts." };
         });
         return { output: [{ type: "text", text: JSON.stringify(result) }] };
