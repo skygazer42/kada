@@ -950,6 +950,77 @@ test("a paired phone answers an owned background child once across restart", asy
   assert.deepEqual(delivered.progressEvents.filter(event => event.event === "child_waiting_input"), childEvents);
 });
 
+test("a paired phone can stop one background child and recover the sibling's result", async t => {
+  const fixture = await scriptedFixture(context => {
+    const users = context.messages.filter(message => message.role === "user");
+    if (users.some(message => message.content === "Open a separate chat.")) return fauxAssistantMessage("Separate chat opened.");
+    if (hasTool(context, "delegation_ask")) {
+      if (users.some(message => message.content === "Use USD.")) return fauxAssistantMessage("Currency checked.");
+      const currency = users.some(message => message.content === "Check currency.");
+      return tool("delegation_ask", { question: currency ? "Which currency?" : "Which exchange rate?" });
+    }
+    if (hasTool(context, "task_prepare")) return tool("task_prepare", {
+      outcome: "Check the currency.", deliverables: ["Currency"], inputs: [], scope: ["This conversation"],
+      assumptions: [], questions: [], criteria: [{ text: "Inspect the currency finding.", method: "inspect" }],
+    });
+    if (users.some(message => String(message.content).startsWith("Background delegation finished."))) {
+      return tool("task_submit", { summary: "Currency checked.", artifacts: [],
+        criteria: [{ id: 1, status: "passed", evidence: "The remaining worker confirmed the currency." }] });
+    }
+    if (context.messages.some(message => message.role === "toolResult" && message.toolName === "delegate_background")) {
+      return fauxAssistantMessage("Waiting for the workers.");
+    }
+    return tool("delegate_background", { tasks: [
+      { name: "Rate worker", instructions: "Check the rate." },
+      { name: "Currency worker", instructions: "Check currency." },
+    ] });
+  });
+  let restarted: LocalRuntime | undefined;
+  t.after(async () => { await restarted?.close(); await fixture.close(); });
+  const owner = pairing(), tablet = pairing("owner", "tablet");
+  const directory = join(fixture.directory, "remote");
+  const devices = [owner.device, tablet.device];
+  const before = await portal(t, fixture.runtime, directory, devices);
+  const path = "/conversations/stop-child";
+  const post = (value: object) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
+  const view = async () => (await before.call(owner.token, path)).json();
+  const receipt = await (await before.call(owner.token, path + "/messages", turn("one", "Check currency and rate."))).json();
+  const brief = await until(view, response => response.task?.status === "awaiting_confirmation");
+  assert.equal((await before.call(owner.token, path + "/confirm",
+    post({ revision: brief.task.brief.revision, digest: brief.task.briefDigest }))).status, 200);
+  const waiting = await until(view, response => response.task?.childQuestions?.length === 2);
+  const [rate, currency] = waiting.task.childQuestions;
+  assert.deepEqual(waiting.task.stoppableChildren, [
+    { childId: rate.childId, name: "Rate worker" }, { childId: currency.childId, name: "Currency worker" },
+  ]);
+  const stop = post({ childId: rate.childId });
+  assert.equal((await before.call(tablet.token, path + "/child-stop", stop)).status, 404);
+  const otherPath = "/conversations/separate-chat";
+  assert.equal((await before.call(owner.token, otherPath + "/messages", turn("other", "Open a separate chat."))).status, 202);
+  assert.equal((await before.call(owner.token, otherPath + "/child-stop", stop)).status, 404);
+  assert.equal((await before.call(owner.token, path + "/child-stop", post({ childId: -1 }))).status, 400);
+  const accepted = await before.call(owner.token, path + "/child-stop", stop);
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(await accepted.json(), { childId: rate.childId, stopped: true });
+  assert.deepEqual((await view()).task.childQuestions, [currency]);
+  await before.close();
+  await fixture.runtime.close();
+
+  restarted = new LocalRuntime(fixture.settings, { models: fixture.models });
+  await restarted.recover();
+  const after = await portal(t, restarted, directory, devices);
+  const retry = await after.call(owner.token, path + "/child-stop", stop);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(await retry.json(), { childId: rate.childId, stopped: true });
+  assert.equal((await after.call(owner.token, path + "/child-answers",
+    post({ childId: currency.childId, questionId: currency.questionId, requestId: "currency-answer", answer: "Use USD." }))).status, 200);
+  const finished = await until(() => restarted!.status(receipt.taskId), status => status.status === "completed");
+  assert.deepEqual(finished.delegations.map(child => [child.conversationId, child.status, child.answer]), [
+    [rate.childId, "cancelled", undefined], [currency.childId, "completed", "Currency checked."],
+  ]);
+  assert.equal((await after.call(owner.token, path + "/child-stop", post({ childId: currency.childId }))).status, 409);
+});
+
 test("F13 historical conversations without a saved workspace policy cannot reopen or confirm", async (t) => {
   const fixture = await scriptedFixture(() => fauxAssistantMessage("Saved reply."));
   let restarted: LocalRuntime | undefined;

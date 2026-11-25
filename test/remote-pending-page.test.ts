@@ -411,6 +411,46 @@ test("a task control conflict stays with its conversation when the selected chat
   assert.equal(page.field("task").hidden, true);
 });
 
+test("a phone stop targets the selected child and keeps its sibling and draft visible", async () => {
+  const research = { childId: 7, name: "Research" };
+  const review = { childId: 8, name: "Review" };
+  const requests: unknown[] = [];
+  const posted = Promise.withResolvers<void>();
+  const stop = Promise.withResolvers<Response>();
+  let tick = 0;
+  let stopped = false;
+  const device = harness((url, init) => {
+    if (url.pathname.endsWith("/child-stop")) {
+      assert.equal(url.pathname, "/remote/api/conversations/" + conversationId + "/child-stop");
+      assert.equal(init.method, "POST");
+      requests.push(JSON.parse(init.body as string));
+      posted.resolve();
+      return stop.promise;
+    }
+    return Response.json({ cursor: 1, messages: [], task: {
+      status: "running", progress: { steps: [{ title: "Step " + ++tick, status: "running" }] },
+      stoppableChildren: stopped ? [review] : [research, review],
+    } });
+  });
+  const page = await device.open();
+  const button = (name: string) => page.field("task").children.flatMap(row => row.children)
+    .find(child => child.textContent === "Stop " + name);
+  assert.ok(button(research.name));
+  page.field("prompt").value = "Keep my separate message.";
+  const click = button(research.name)!.trigger("click");
+  await posted.promise;
+  await page.poll();
+  assert.equal(button(research.name)?.disabled, true);
+  assert.equal(button(review.name)?.disabled, false);
+  stopped = true;
+  stop.resolve(Response.json({ result: "stopped" }));
+  await click;
+  assert.deepEqual(requests, [{ childId: 7 }]);
+  assert.equal(button(research.name), undefined);
+  assert.ok(button(review.name));
+  assert.equal(page.field("prompt").value, "Keep my separate message.");
+});
+
 test("child answers preserve typed text during polling and reuse their request after a dropped response", async () => {
   const replies: { childId: number; questionId: string; requestId: string; answer: string }[] = [];
   const question = { childId: 7, questionId: "19", name: "Research", text: "Which month should I use?" };

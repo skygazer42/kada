@@ -518,7 +518,7 @@ export class LocalRuntime {
     }
     if (run && meta.control === "active") {
       const goal = await this.goalState(active);
-      if (goal && meta.schemaVersion === 3 && !meta.remotePolicy) await restoreChildStops(active.harness, ctx);
+      if (goal && meta.schemaVersion === 3) await restoreChildStops(active.harness, ctx);
       const latest = goal ? undefined : await this.latest(active);
       if (goal && ["clarifying", "awaiting_confirmation"].includes(goal.phase)) {
         // Finish an admitted read-only proposal tool after a crash, without starting execution.
@@ -1035,10 +1035,13 @@ export class LocalRuntime {
       return interruptChildTools(active.harness, childId, working, ctx);
     });
   }
-  async stopChild(id: string, childId: number) {
+  async stopChild(id: string, childId: number, remoteWorkspace?: string) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
-      if (meta.remotePolicy) throw new DelegationInputError(404, "Background child not found.");
+      if (meta.remotePolicy !== (remoteWorkspace === undefined ? undefined : "workspace") ||
+          (remoteWorkspace !== undefined && meta.workspace !== remoteWorkspace)) {
+        throw new DelegationInputError(404, "Background child not found.");
+      }
       const active = await this.open(meta, false);
       const goal = await this.goalState(active);
       const working = meta.control === "active" && goal?.phase === "working" ? goal : undefined;

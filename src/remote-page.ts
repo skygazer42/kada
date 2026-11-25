@@ -25,6 +25,7 @@ export const remotePage = String.raw`<!doctype html>
     section, article { margin-bottom: .75rem; }
     .panel { border: 1px solid var(--line); padding: 1rem; background: #fff; border-radius: 14px; }
     .controls { display: flex; align-items: end; gap: .5rem; margin-bottom: .75rem; }
+    .child-stops { flex-wrap: wrap; }
     #conversation-field { flex: 1; min-width: 0; }
     label { display: block; font-size: .92rem; font-weight: 650; }
     select, input:not([type=file]), textarea { display: block; margin-top: .3rem; width: 100%; min-height: 44px; padding: .66rem .75rem; background: #fff; color: inherit; }
@@ -150,6 +151,7 @@ let listVersion = 0;
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
+const pendingChildStops = new Map();
 let disconnected = false;
 let pushSettings;
 
@@ -669,6 +671,35 @@ function presentTask(view, id) {
           if (device === identity && id === conversationId) report(error);
         } finally { updating = false; }
       });
+    }
+  }
+  if (view.stoppableChildren?.length) {
+    const device = identity;
+    const controls = element("div", "", task);
+    controls.className = "controls child-stops";
+    const current = () => device === identity && id === conversationId;
+    for (const { childId, name } of view.stoppableChildren) {
+      const key = device.pairingId + ":" + id + ":" + childId;
+      const button = action("Stop " + name, controls, async () => {
+        if (!current() || controls.parentNode !== task || pendingChildStops.has(key) || !confirm("Stop " + name + "?")) return;
+        const pending = { button };
+        pendingChildStops.set(key, pending);
+        try {
+          await post(conversationPath(id) + "/child-stop", { childId });
+          if (current()) await refresh();
+          if (device === identity) await refreshList();
+        } catch (error) {
+          if (current()) report(error);
+        } finally {
+          pendingChildStops.delete(key);
+          pending.button.disabled = false;
+        }
+      });
+      const pending = pendingChildStops.get(key);
+      if (pending) {
+        pending.button = button;
+        button.disabled = true;
+      }
     }
   }
   if (view.delivery) {

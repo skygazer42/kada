@@ -56,6 +56,8 @@ macOS 任务卡从原任务视图读取子任务问题，每张卡以父任务�
 
 单个子任务的停止标记也保存在原 Pi 子会话文档。首次提交和写入停止标记在同一任务内串行，队列在等待执行结果前释放。恢复时先撤回已停止子会话的排队输入，并标记其在途任务，再启用 Pi 调度。 [Pots 停止与恢复](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L884)
 
+手机停止单个子任务时，入口核对设备归属和原会话工作区，再由 Pi 校验父任务修订和后台批次。重试沿用原子会话的停止标记。 [Suparagent 单任务停止](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L279)
+
 中断工具时从 Pi 的实时文档取得目标子会话的在途工具 ID，并中止这些 Pi 任务。原生成任务读取工具中止回执后可以继续执行。等待确认有时限，超过时限的调用显示为待确认。 [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823)
 
 纯事件规则只在接受事件或手动运行时创建 Pi 执行任务。公开 GitHub Issue 同步由本机 CLI 发起。每个规则和仓库有独立游标，收到本机 API 的持久受理回执后推进。新事件受理前核对规则修订，原事件重投可取回已有回执。这样可以让系统计划任务负责重复调用，并复用 Pi 的去重和运行历史。 [DuskBot 游标实现](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451)
