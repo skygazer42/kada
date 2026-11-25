@@ -850,6 +850,85 @@ test("F13 confirmed remote tasks and Pi children retain file isolation without o
   assert.equal(status.delegations.length, 1);
 });
 
+test("a paired phone answers an owned background child once across restart", async t => {
+  let answers = 0;
+  let reports = 0;
+  let foreignFile = "";
+  const fixture = await scriptedFixture(context => {
+    const results = context.messages.filter(message => message.role === "toolResult");
+    const users = context.messages.filter(message => message.role === "user");
+    if (hasTool(context, "delegation_ask")) {
+      for (const name of ["bash", "delegate", "delegate_send", "task_submit", "user_memory_search"]) assert(!hasTool(context, name));
+      if (users.some(message => message.content === "Use USD.")) {
+        answers++;
+        return fauxAssistantMessage("The currency is USD.");
+      }
+      if (!results.some(result => result.toolName === "read")) return tool("read", { path: foreignFile });
+      assert.equal(results.find(result => result.toolName === "read")?.isError, true);
+      return tool("delegation_ask", { question: "Which currency?" });
+    }
+    if (hasTool(context, "task_prepare")) {
+      assert(!hasTool(context, "delegate_background"));
+      return tool("task_prepare", { outcome: "Check the currency.", deliverables: ["Currency"], inputs: [],
+        scope: ["This conversation"], assumptions: [], questions: [],
+        criteria: [{ text: "Inspect the currency finding.", method: "inspect" }] });
+    }
+    if (users.some(message => String(message.content).startsWith("Background delegation finished."))) {
+      reports++;
+      return tool("task_submit", { summary: "Currency checked.", artifacts: [],
+        criteria: [{ id: 1, status: "passed", evidence: "The worker confirmed USD." }] });
+    }
+    if (results.some(result => result.toolName === "delegate_background")) return fauxAssistantMessage("Waiting for the worker.");
+    assert(hasTool(context, "delegate_background"));
+    return tool("delegate_background", { tasks: [{ name: "Currency worker", instructions: "Check the currency." }] });
+  });
+  let restarted: LocalRuntime | undefined;
+  t.after(async () => { await restarted?.close(); await fixture.close(); });
+  foreignFile = join(fixture.directory, "private.txt");
+  await writeFile(foreignFile, "Outside the phone workspace.");
+  const owner = pairing();
+  const tablet = pairing("owner", "tablet");
+  const directory = join(fixture.directory, "remote");
+  const devices = [owner.device, tablet.device];
+  const before = await portal(t, fixture.runtime, directory, devices);
+  const path = "/conversations/currency";
+  const read = async () => (await before.call(owner.token, path)).json();
+  const receipt = await (await before.call(owner.token, path + "/messages", turn("one", "Check the currency."))).json();
+  const brief = await until(read, view => view.task?.status === "awaiting_confirmation");
+  const post = (value: object) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
+  assert.equal((await before.call(owner.token, path + "/confirm",
+    post({ revision: brief.task.brief.revision, digest: brief.task.briefDigest }))).status, 200);
+  const waiting = await until(read, view => view.task?.childQuestions?.length === 1);
+  const { childId, questionId, name, text } = waiting.task.childQuestions[0];
+  assert.equal(name, "Currency worker");
+  assert.equal(text, "Which currency?");
+  const index = await (await before.call(owner.token, "/conversations")).json();
+  assert.equal(index.find(row => row.conversationId === "currency").task.group, "pending");
+  const endpoint = path + "/child-answers";
+  const reply = { childId, questionId, requestId: "phone-answer-1", answer: "Use USD." };
+  assert.equal((await before.call(tablet.token, endpoint, post(reply))).status, 404);
+  assert.equal((await before.call(owner.token, endpoint, post({ ...reply, questionId: "999999" }))).status, 404);
+  clearInterval(fixture.runtime["timer"]);
+  const accepted = await before.call(owner.token, endpoint, post(reply));
+  assert.equal(accepted.status, 200);
+  const acceptedBody = await accepted.json();
+  assert.equal(answers, 0);
+  await before.close();
+  await fixture.runtime.close();
+  restarted = new LocalRuntime(fixture.settings, { models: fixture.models });
+  await restarted.recover();
+  const after = await portal(t, restarted, directory, devices);
+  const retry = await after.call(owner.token, endpoint, post(reply));
+  assert.equal(retry.status, 200);
+  assert.deepEqual(await retry.json(), acceptedBody);
+  assert.equal((await after.call(owner.token, endpoint, post({ ...reply, answer: "Use EUR." }))).status, 409);
+  const finalStatus = await until(() => restarted!.status(receipt.taskId), status => status.status === "completed");
+  assert.deepEqual(finalStatus.delegations.map(child => [child.conversationId, child.answer]), [[childId, "The currency is USD."]]);
+  assert.equal(answers, 1);
+  assert.equal(reports, 1);
+  assert.deepEqual((await (await after.call(owner.token, path)).json()).task.childQuestions, []);
+});
+
 test("F13 historical conversations without a saved workspace policy cannot reopen or confirm", async (t) => {
   const fixture = await scriptedFixture(() => fauxAssistantMessage("Saved reply."));
   let restarted: LocalRuntime | undefined;

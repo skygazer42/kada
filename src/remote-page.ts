@@ -49,6 +49,8 @@ export const remotePage = String.raw`<!doctype html>
     .task ol, .task ul { margin: .3rem 0 0; padding-left: 1.4rem; }
     .task li { margin-top: .3rem; }
     .task li button { text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+    #child-questions form + form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+    #child-questions label { margin-top: .55rem; }
     #pending-tasks { display: grid; gap: .4rem; list-style: none; margin: 0; padding: 0; }
     #pending-tasks button { width: 100%; text-align: left; overflow-wrap: anywhere; }
     .receipt { margin-top: .5rem; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem; }
@@ -92,6 +94,7 @@ export const remotePage = String.raw`<!doctype html>
         <ul id="pending-tasks"></ul>
       </section>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
+      <section id="child-questions" class="panel task" hidden aria-label="Child task questions"></section>
       <details id="task-history" class="panel task" hidden>
         <summary>Task history</summary>
         <ol id="task-events"></ol>
@@ -125,6 +128,7 @@ const conversations = field("conversation");
 const pendingWork = field("pending-work");
 const pendingTasks = field("pending-tasks");
 const task = field("task");
+const childQuestions = field("child-questions");
 const taskHistory = field("task-history");
 const taskEvents = field("task-events");
 const messages = field("messages");
@@ -145,6 +149,7 @@ let refreshVersion = 0;
 let listVersion = 0;
 let historyCursor = null;
 let shownTask = "";
+const childAnswerForms = new Map();
 let disconnected = false;
 let pushSettings;
 
@@ -300,6 +305,8 @@ function resetConversationView() {
   taskHistory.open = false;
   task.replaceChildren();
   task.hidden = true;
+  childQuestions.replaceChildren();
+  childQuestions.hidden = true;
   uncertain.hidden = true;
   uncertain.replaceChildren();
 }
@@ -518,6 +525,84 @@ function taskStatusLabel(status) {
   return labels[status] || String(status || "Task").replace(/_/g, " ");
 }
 
+function childAnswerForm(id, question) {
+  const device = identity;
+  const { childId, questionId, name, text } = question;
+  const form = document.createElement("form");
+  element("h3", name, form);
+  const questionText = element("p", text, form);
+  questionText.id = "child-question-" + childId + "-" + questionId;
+  const label = element("label", "Answer", form);
+  const input = element("textarea", "", form);
+  input.id = questionText.id + "-answer";
+  input.maxLength = 4000;
+  input.required = true;
+  input.setAttribute("aria-describedby", questionText.id);
+  label.htmlFor = input.id;
+  const submit = element("button", "Send answer", form);
+  submit.type = "submit";
+  const feedback = element("p", "", form);
+  feedback.setAttribute("role", "status");
+  let pending;
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (device !== identity || id !== conversationId || submit.disabled || form.parentNode !== childQuestions) return;
+    const answer = input.value.trim();
+    if (!answer) {
+      feedback.textContent = "Enter your answer.";
+      return;
+    }
+    pending ??= { childId, questionId, requestId: crypto.randomUUID(), answer };
+    submit.disabled = true;
+    input.readOnly = true;
+    feedback.textContent = "";
+    try { await post(conversationPath(id) + "/child-answers", pending); }
+    catch (error) {
+      if (device !== identity) return;
+      if (error instanceof RequestError && error.status < 500) {
+        feedback.textContent = error.message;
+        input.readOnly = false;
+        pending = undefined;
+        submit.textContent = "Send answer";
+      } else {
+        feedback.textContent = "Could not confirm delivery. Retry to check your answer.";
+        submit.textContent = "Retry answer";
+      }
+      submit.disabled = false;
+      return;
+    }
+    feedback.textContent = "Answer received.";
+    if (device !== identity || id !== conversationId) return;
+    try {
+      await refresh();
+      if (device === identity && id === conversationId) await refreshList();
+    } catch (error) {
+      if (device === identity && id === conversationId) report(error);
+    }
+  });
+  return form;
+}
+
+function presentChildQuestions(questions, id) {
+  const forms = childAnswerForms.get(id) ?? new Map();
+  const current = new Set(questions.map(({ childId, questionId }) => childId + ":" + questionId));
+  for (const [key, form] of forms) {
+    if (!current.has(key)) {
+      form.remove();
+      forms.delete(key);
+    }
+  }
+  for (const question of questions) {
+    const key = question.childId + ":" + question.questionId;
+    const form = forms.get(key) ?? childAnswerForm(id, question);
+    forms.set(key, form);
+    if (form.parentNode !== childQuestions) childQuestions.append(form);
+  }
+  if (forms.size) childAnswerForms.set(id, forms);
+  else childAnswerForms.delete(id);
+  childQuestions.hidden = !forms.size;
+}
+
 function presentTask(view, id) {
   canSend = view?.status !== "paused" && view?.status !== "cancelled";
   updateComposer();
@@ -652,6 +737,7 @@ async function refresh() {
   if (taskSnapshot !== shownTask) {
     shownTask = taskSnapshot;
     presentTask(view.task, id);
+    presentChildQuestions(view.task?.childQuestions ?? [], id);
   }
 }
 
@@ -673,6 +759,7 @@ async function connect(value) {
   const sameSession = sessionStorage.getItem("kada-device-token") === value;
   token = value;
   identity = candidate;
+  childAnswerForms.clear();
   pushSettings = undefined;
   notifications.hidden = true;
   sessionStorage.setItem("kada-device-token", token);
@@ -781,6 +868,7 @@ signout.addEventListener("click", async () => {
   signout.disabled = true;
   sessionStorage.removeItem("kada-device-token");
   identity = null;
+  childAnswerForms.clear();
   try {
     if (pushSettings?.publicKey) {
       await request("/push", { method: "DELETE", signal: AbortSignal.timeout(3_000) }, bearer);
@@ -930,6 +1018,7 @@ setInterval(async () => {
     if (device !== identity) return;
     if (error instanceof RequestError && error.status === 401) {
       identity = null;
+      childAnswerForms.clear();
       sessionStorage.removeItem("kada-device-token");
       assistant.hidden = true;
       pair.hidden = false;

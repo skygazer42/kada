@@ -11,6 +11,7 @@ import type { Workspace } from "./workspace.js";
 
 const allowedTools = new Set([
   "read", "write", "edit", "read_file", "write_file", "list_files", "copy_file", "delegate",
+  "delegate_background", "delegate_send", "delegation_ask",
   "task_prepare", "task_status", "task_plan", "task_checkpoint", "task_submit", "task_blocked", "review_result",
 ]);
 const nativePath = (path: string) => path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");

@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildInputs, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
+import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildInputs, firstChildQuestion, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -473,10 +473,10 @@ export class LocalRuntime {
       const coordinatorOnly = [goal, verification, ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
-        !remote && meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
+        meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
           const state = await tx.doc(GoalDoc);
           if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
-        } : undefined, childAdmission),
+        } : undefined, childAdmission, remote ? workspace : undefined),
         ...(policy ? [policy] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(approvals ? [approvals] : []),
@@ -745,7 +745,7 @@ export class LocalRuntime {
         return;
       }
     }
-    if (goal.phase === "working" && active.meta.schemaVersion === 3 && !active.meta.remotePolicy && active.meta.maxSubagents > 0) {
+    if (goal.phase === "working" && active.meta.schemaVersion === 3 && active.meta.maxSubagents > 0) {
       const batch = await pendingDelegation(active.harness, active.root.id, goal, ctx);
       if (batch) {
         if (tasks.some(({ record, state }) => state.kind === "blocked" &&
@@ -952,9 +952,12 @@ export class LocalRuntime {
   async taskOverview(id: string) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
-      const { status, goal } = await this.taskState(await this.open(meta, false), meta);
+      const active = await this.open(meta, false);
+      const { status, goal } = await this.taskState(active, meta);
+      const childQuestion = meta.remotePolicy && status === "running" && goal?.phase === "working"
+        ? await firstChildQuestion(active.harness, active.root.id, goal, ctx) : undefined;
       return {
-        status, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null,
+        status, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null, childQuestion,
         summary: status === "completed" ? goal?.candidate?.summary ?? null : null,
       };
     });
@@ -1044,10 +1047,12 @@ export class LocalRuntime {
       return { childId, stopped: true };
     });
   }
-  async answerChildQuestion(id: string, childId: number, questionId: string, requestId: string, answer: string) {
+  async answerChildQuestion(id: string, childId: number, questionId: string, requestId: string, answer: string, remoteWorkspace?: string) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
-      if (meta.remotePolicy) throw new DelegationInputError(404, "Background child not found.");
+      if (remoteWorkspace === undefined ? meta.remotePolicy : meta.remotePolicy !== "workspace" || meta.workspace !== remoteWorkspace) {
+        throw new DelegationInputError(404, "Background child not found.");
+      }
       const active = await this.open(meta, false);
       const goal = await this.goalState(active);
       const canContinue = meta.control === "active" && goal?.phase === "working" &&

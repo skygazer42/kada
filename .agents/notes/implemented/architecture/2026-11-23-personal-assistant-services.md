@@ -52,6 +52,8 @@ macOS 任务卡通过本机任务视图展示脱敏参数，决定提交原动�
 
 macOS 任务卡从原任务视图读取子任务问题，每张卡以父任务、子会话和问题的身份绑定输入。重试沿用该卡的请求 ID。普通任务草稿由原有输入框保管，子任务答复通过定向端点提交。
 
+手机 Web 沿用原会话的设备配对和工作区校验，答复再核对原子会话、批次修订和问题 ID。远程后台子会话沿用该工作区的文件工具和路径检查，问题和回执仍由 Pi 持久化。待处理列表只投影问题文字，详情页提供定向答复所需的身份。 [Suparagent 待处理问题](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L201)
+
 单个子任务的停止标记也保存在原 Pi 子会话文档。首次提交和写入停止标记在同一任务内串行，队列在等待执行结果前释放。恢复时先撤回已停止子会话的排队输入，并标记其在途任务，再启用 Pi 调度。 [Pots 停止与恢复](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L884)
 
 中断工具时从 Pi 的实时文档取得目标子会话的在途工具 ID，并中止这些 Pi 任务。原生成任务读取工具中止回执后可以继续执行。等待确认有时限，超过时限的调用显示为待确认。 [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823)

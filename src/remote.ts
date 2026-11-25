@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promi
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { EntryId } from "@earendil-works/pi-durable";
+import { DelegationInputError } from "./delegation.js";
 import { TaskConflictError, type LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
 import { remoteManifest, remoteWorker } from "./remote-worker.js";
@@ -365,9 +366,9 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
   async function overview(conversation: Conversation) {
     try {
       await conversationTask(conversation);
-      const { status, reason, question } = await runtime.taskOverview(conversation.taskId);
-      const group = taskGroup(status);
-      return { status, group, reason: group === "pending" ? reason : null, question: group === "pending" ? question : null };
+      const { status, reason, question, childQuestion } = await runtime.taskOverview(conversation.taskId);
+      const group = childQuestion ? "pending" : taskGroup(status);
+      return { status, group, reason: group === "pending" ? reason : null, question: group === "pending" ? question ?? childQuestion ?? null : null };
     } catch (error) {
       if (isMissing(error) || error instanceof HttpError && error.status === 409) return null;
       throw error;
@@ -459,6 +460,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         status: view.status, reason: view.reason, question: view.question, brief: view.brief,
         briefDigest: view.briefDigest, confirmed: view.confirmed, progress: view.progress, delivery, budget:view.budget,
         controls: status.remoteControls, controlVersion: status.remoteControlVersion,
+        childQuestions: status.status === "running" ? status.delegations.flatMap(child => child.question
+          ? [{ childId: child.conversationId, questionId: child.question.id, name: child.name, text: child.question.text }] : []) : [],
       } : null,
     };
   }
@@ -703,7 +706,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
-        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
+        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|child-answers|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
         const conversationId = match?.[1];
         if (!conversationId || !idPattern.test(conversationId)) throw new HttpError(404, "Remote endpoint not found.");
         const action = match?.[2];
@@ -748,6 +751,15 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
                 }
               });
               send(response, 200, { updated: true });
+            } else if (method === "POST" && action === "child-answers") {
+              const { childId, questionId, requestId, answer } = await json(request);
+              if (typeof childId !== "number" || typeof questionId !== "string" ||
+                  typeof requestId !== "string" || typeof answer !== "string") throw new HttpError(400, "Invalid child answer.");
+              const receipt = await exclusive(path, async () => {
+                const workspace = await privateWorkspace(row, false);
+                return runtime.answerChildQuestion(row.taskId, childId, questionId, requestId, answer, workspace.root);
+              });
+              send(response, 200, receipt);
             } else if (method === "POST" && action === "confirm") {
               const { revision, digest: briefDigest } = await json(request);
               if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1 ||
@@ -763,7 +775,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;

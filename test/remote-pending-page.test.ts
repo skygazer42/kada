@@ -7,6 +7,7 @@ import { remoteScript } from "../src/remote-page.js";
 type Handler = (event: { preventDefault(): void }) => Promise<void> | void;
 class Element {
   children: Element[] = [];
+  parentNode: Element | null = null;
   dataset: Record<string, string> = {};
   handlers = new Map<string, Handler>();
   classList = { add() {} };
@@ -15,17 +16,25 @@ class Element {
   files: File[] = [];
   hidden = true;
   disabled = false;
-  remove() {}
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+    this.parentNode = null;
+  }
   focus() {}
 
   addEventListener(type: string, handler: Handler) { this.handlers.set(type, handler); }
   setAttribute() {}
   querySelector() { return this.children.find((child) => child.dataset.emptyConversation); }
   append(child: Element) {
+    child.remove();
     this.children.push(child);
-    child.remove = () => { this.children = this.children.filter((item) => item !== child); };
+    child.parentNode = this;
   }
-  replaceChildren() { this.children = []; }
+  replaceChildren() {
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+  }
   async trigger(type: string) { await this.handlers.get(type)!({ preventDefault() {} }); }
 }
 
@@ -400,6 +409,78 @@ test("a task control conflict stays with its conversation when the selected chat
   await click;
   assert.equal(page.field("status").textContent, "");
   assert.equal(page.field("task").hidden, true);
+});
+
+test("child answers preserve typed text during polling and reuse their request after a dropped response", async () => {
+  const replies: { childId: number; questionId: string; requestId: string; answer: string }[] = [];
+  const question = { childId: 7, questionId: "19", name: "Research", text: "Which month should I use?" };
+  let tick = 0;
+  let resolved = false;
+  const device = harness((url, init) => {
+    if (url.pathname.endsWith("/child-answers")) {
+      assert.equal(url.pathname, "/remote/api/conversations/" + conversationId + "/child-answers");
+      replies.push(JSON.parse(init.body as string));
+      if (replies.length === 1) throw new TypeError("Response dropped");
+      resolved = true;
+      return Response.json(replies[0]);
+    }
+    return Response.json({ cursor: 1, messages: [], task: {
+      status: "running", progress: { steps: [{ title: "Step " + ++tick, status: "running" }] },
+      childQuestions: resolved ? [] : [question],
+    } });
+  });
+  const page = await device.open();
+  const questions = page.field("child-questions");
+  const form = questions.children[0]!;
+  assert.equal(form.children[0]!.textContent, question.name);
+  assert.equal(form.children[1]!.textContent, question.text);
+  const input = form.children[3]!;
+  input.value = "October.";
+  page.field("prompt").value = "Keep my separate message.";
+  await page.poll();
+  assert.equal(questions.children[0], form);
+  assert.equal(input.value, "October.");
+  await form.trigger("submit");
+  assert.equal(input.value, "October.");
+  assert.match(form.children[5]!.textContent, /retry/i);
+  await form.trigger("submit");
+  assert.deepEqual(replies, [
+    { childId: 7, questionId: "19", requestId: replies[0]!.requestId, answer: "October." },
+    replies[0],
+  ]);
+  assert.match(replies[0]!.requestId, /^[0-9a-f-]{36}$/);
+  assert.equal(questions.hidden, true);
+  assert.equal(page.field("prompt").value, "Keep my separate message.");
+});
+
+test("an in-flight child answer leaves the newly selected conversation alone", async () => {
+  const posted = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<Response>();
+  const view = { cursor: 1, messages: [], task: { status: "running", childQuestions: [
+    { childId: 7, questionId: "19", name: "Research", text: "Which month?" },
+  ] } };
+  const device = harness(url => {
+    if (url.pathname.endsWith("/child-answers")) {
+      posted.resolve();
+      return reply.promise;
+    }
+    if (url.pathname.endsWith("/other")) return Response.json({ ...view, task: null });
+    return Response.json(view);
+  });
+  const page = await device.open();
+  const questions = page.field("child-questions");
+  const form = questions.children[0]!;
+  form.children[3]!.value = "October.";
+  const submission = form.trigger("submit");
+  await posted.promise;
+  page.field("conversation").value = "other";
+  await page.field("conversation").trigger("change");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  reply.resolve(Response.json({ error: "The question is closed." }, { status: 409 }));
+  await submission;
+  assert.equal(questions.hidden, true);
+  assert.equal(questions.children.length, 0);
+  assert.equal(page.field("status").textContent, "");
 });
 
 test("reload restores the pending text and retries the original message only on demand", async () => {

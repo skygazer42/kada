@@ -6,6 +6,7 @@ import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defi
 import { taskUsage } from "./budget.js";
 import type { ModelRef } from "./config.js";
 import { mapConcurrent, SerialQueue } from "./util.js";
+import type { Workspace } from "./workspace.js";
 
 type OwnerTaskId = Parameters<Harness["abortTask"]>[0];
 type OwnedConversation = {
@@ -172,6 +173,16 @@ export async function pendingDelegation(harness: Harness, parent: ConversationId
   if (batches) return harness.commit(tx => outstandingDelegation(tx, parent, goal, batches), context);
 }
 
+export async function firstChildQuestion(harness: Harness, parent: ConversationId, goal: GoalRevision, context: Context) {
+  const batch = await pendingDelegation(harness, parent, goal, context);
+  if (!batch || batch.ready) return;
+  for (const child of batch.children) {
+    const state = await harness.snapshot(ChildQuestions, child, context);
+    const question = state?.current && state.questions[state.current];
+    if (!state?.stopped && question && !question.answer) return question.text;
+  }
+}
+
 /** Called from the host's serialized supervision loop, alongside revision and budget checks. */
 export async function dispatchChildInputs(harness: Harness, owner: OwnerTaskId, children: readonly ConversationId[], deadline: number, admission: SerialQueue, context: Context) {
   for (const child of children) {
@@ -227,7 +238,7 @@ export async function stopObsoleteDelegations(harness: Harness, goal: GoalRevisi
 
 const backgroundBatchName = "local.delegation.background";
 
-function backgroundBatchTask(admission: SerialQueue) {
+function backgroundBatchTask(admission: SerialQueue, scopedWorkspace?: Workspace) {
   return defineTask<{ key: string; workspace: string }, { phase: "run" }, null>({
     name: backgroundBatchName, version: 1, initial: () => ({ phase: "run" }),
     phases: {
@@ -235,7 +246,8 @@ function backgroundBatchTask(admission: SerialQueue) {
         const batch = (await runtime.snapshot(BackgroundDelegations, context))?.batches[task.input.key];
         if (!batch) throw new Error("Missing background delegation batch.");
         const initial = await Promise.all(batch.children.map(async child => {
-          await mkdir(join(task.input.workspace, "agents", String(child.id)), { recursive: true });
+          const directory = join(task.input.workspace, "agents", String(child.id));
+          await mkdir(scopedWorkspace ? await scopedWorkspace.path(directory) : directory, { recursive: true });
           const conversation = await runtime.conversation(child.id, context);
           if (!conversation) throw new Error("Missing child conversation " + child.id);
           const submission = await admission.run(async () => {
@@ -406,8 +418,8 @@ const Delegation = defineDoc<{ children: { id: ConversationId; name: string; ins
   scope: "task", kind: "local.delegation", version: 1, initial: () => ({ children: [] }), checkpointWhen: () => true,
 });
 
-export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue()): Extension {
-  const batchTask = backgroundBatchTask(admission);
+export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue(), scopedWorkspace?: Workspace): Extension {
+  const batchTask = backgroundBatchTask(admission, scopedWorkspace);
   const permittedExtensions = async (api: ToolExecutionApi, context: Context) =>
     (await api.agent(context)).extensions.filter(e => e.name !== "local_delegation" && !coordinatorOnly.some(c => c.name === e.name));
   const parameters = Type.Object({ tasks: Type.Array(Type.Object({ name: Type.String({ minLength: 1, maxLength: 80 }), instructions: Type.String({ minLength: 1, maxLength: 32000 }) }), { minItems: 1, maxItems: maxSubagents }) });
@@ -479,7 +491,7 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
       await api.details({ children: children.map(c => ({ id: c.id, name: c.name })) }, ctx);
       const results = await mapConcurrent(children, maxSubagents, async child => {
         const directory = join(workspace, "agents", String(child.id));
-        await mkdir(directory, { recursive: true });
+        await mkdir(scopedWorkspace ? await scopedWorkspace.path(directory) : directory, { recursive: true });
         const conversation = await api.conversation(child.id, ctx);
         if (!conversation) throw new Error(`Missing child conversation ${child.id}`);
         const submission = await conversation.submit({ type: "input", content: child.instructions, requestId: requestIdFor(api.taskId, child.id) }, ctx);
@@ -494,7 +506,9 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
     name: "delegate_background", description: "Start independent local work and receive a receipt immediately. Continue other work or end this turn without submitting. Kada will resume you when the batch finishes. Read the saved results with task_status before submitting.",
     parameters, replay: "safe", executionMode: "sequential", callers: ["model"],
     execute: async (args, api, context) => {
-      const selected = (await permittedExtensions(api, context)).filter(extension => extension.name === "coding-tools");
+      const selected = (await permittedExtensions(api, context)).filter(extension => scopedWorkspace
+        ? extension.name === "remote_workspace_files" || extension.name === "remote_workspace_policy"
+        : extension.name === "coding-tools");
       const receipt = await api.commit(async tx => {
         const { batches } = await tx.doc(BackgroundDelegations);
         const key = String(api.taskId);
