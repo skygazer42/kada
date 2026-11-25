@@ -59,10 +59,20 @@ import AppKit
             ["conversationId": 3, "name": "Review", "status": "running"]
         ]
         delegated["delegations"] = delegationRows
+        delegated["stoppableChildren"] = [
+            ["childId": 2, "name": "Research"],
+            ["childId": 3, "name": "Review"]
+        ]
+        delegated["interruptibleChildTools"] = [
+            ["childId": 3, "childName": "Review", "toolTaskId": 41, "toolName": "read"]
+        ]
         let childWaiting = try decode(delegated)
         try expect(childWaiting.mode == .childInput && childWaiting.childQuestions.count == 1, "only the waiting child needs a reply")
         let question = childWaiting.childQuestions.first
         try expect(question?.conversationId == 2 && question?.question.id == "19", "reply targets the original child and question")
+        try expect(childWaiting.stoppableChildren?.map(\.childId) == [2, 3], "stop actions preserve both background child IDs while one waits for input")
+        let activeTool = childWaiting.interruptibleChildTools?.first
+        try expect(activeTool?.childId == 3 && activeTool?.toolTaskId == 41 && activeTool?.toolName == "read", "interrupt targets the specific displayed tool call")
         try expect(childWaiting.attentionKey != ready.attentionKey, "child waiting opens the handoff")
         delegated["status"] = "paused"
         let pausedChild = try decode(delegated)

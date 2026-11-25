@@ -41,7 +41,7 @@ Chromium 双标签发送同一草稿时，拦掉首个回执后仍只有一次�
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |
 | --- | --- | --- | --- |
 | 统一任务与审批工作台 | 已有本地工作项、运行历史和终端审批。手机 Web 的待处理列表可打开设备自己的原会话，已通过 Chromium 手机视口验收。macOS 任务卡使用本机审批接口，原生验证待运行。跨设备的工作项浏览与授权审批入口仍待实现。 | 用户可浏览工作项、直接定位待处理运行，且只能处置当前账户和设备获准的审批。 | [Suparagent 待处理视图](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L133) · [手机页面回归](../../test/remote-pending-page.test.ts) |
-| macOS 子任务控制入口 | 本地终端与手机 Web 支持定向答复、工具中断和单独停止。macOS 任务卡已接入答复接口，工具中断和单独停止入口待接入，原生验收待运行。 | 答复和控制操作关联原子会话和当前批次，保留其他子任务的运行和结果。 | [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823) · [工具中止后继续回归](../../test/delegation.test.ts) · [Suparagent 继续原子任务](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L829) |
+| macOS 子任务控制实机验收 | macOS 任务卡已接入定向答复、单独停止和指定调用的中断。Windows 已验证本地 API 和 Swift 语法，原生交互待运行。 | 在运行和待答时打开任务卡，停止一个子任务，或中断指定调用并观察原子会话继续。 | [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823) · [本地 API 回归](../../test/delegation.test.ts) · [任务卡解码回归](../../desktop/PetCoreTests.swift) |
 | 应用连接器与主动检查 | 公开 GitHub Issue 采用单次命令轮询，可由系统计划任务启动。持续订阅、其他应用与按用户活动触发仍待实现。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
 | 手机后台通知实机验收 | Web Push 与会话跳转已有本地回归。仍需通过真实推送服务，在实体 iOS 与 Android 设备验收。 | 订阅的手机在页面关闭时收到提醒，打开后进入具备访问权限的原会话。 | [Codync Android 通知](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |
 

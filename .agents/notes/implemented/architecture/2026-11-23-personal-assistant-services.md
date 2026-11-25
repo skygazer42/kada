@@ -62,6 +62,8 @@ macOS 任务卡从原任务视图读取子任务问题，每张卡以父任务�
 
 手机端请求携带界面显示的 Pi 工具任务 ID。服务端在原设备会话内匹配该 ID 和子会话，调用已结束时返回冲突，页面刷新后再展示当前调用。
 
+桌面任务卡与手机共用可操作子任务和工具的投影。桌面请求通过本机管理 API 传递具体调用 ID，终端仍可按子会话中断它当前运行的工具。桌面中断的请求时限覆盖服务端等待退出的 15 秒。
+
 纯事件规则只在接受事件或手动运行时创建 Pi 执行任务。公开 GitHub Issue 同步由本机 CLI 发起。每个规则和仓库有独立游标，收到本机 API 的持久受理回执后推进。新事件受理前核对规则修订，原事件重投可取回已有回执。这样可以让系统计划任务负责重复调用，并复用 Pi 的去重和运行历史。 [DuskBot 游标实现](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451)
 
 手机 Web Push 以 Pi 的原会话事件为来源，每个配对保存订阅和已受理的事件位置。锁屏内容只显示通用提醒，通知点击经配对与会话归属检查后打开原会话。浏览器推送中继仅接受已知 HTTPS 服务，服务端密钥留在本机数据目录。 [Codync 通知处理](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179)

@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
     @Published var attachments: [URL] = []
     @Published var busy = false
     @Published var error: String?
+    @Published private(set) var childActionNotice: String?
     @Published var editing = false
     @Published var resumePrompt = false
     @Published var editCost = ""
@@ -81,7 +82,7 @@ import UniformTypeIdentifiers
         case .attention: height = 448
         case .cancelled: height = 280
         }
-        return height + (error == nil ? 0 : 64)
+        return height + (error == nil ? 0 : 64) + (childActionNotice == nil ? 0 : 30)
     }
     init(_ configuration: LaunchConfiguration, appearanceDirectory: URL) {
         api = PetAPI(configuration)
@@ -148,6 +149,7 @@ import UniformTypeIdentifiers
                 UserDefaults.standard.set(id, forKey: api.configuration.defaultsKey)
             }
             task = value
+            childActionNotice = nil
             restoringSelectedTask = false
             failures = 0
             lastAttention = value.attentionKey
@@ -165,6 +167,7 @@ import UniformTypeIdentifiers
         generation += 1; selectedID = nil; lastAttention = ""; restoringSelectedTask = false
         UserDefaults.standard.removeObject(forKey: api.configuration.defaultsKey)
         task = nil; draft = ""; attachments = []; editing = false; error = nil; resumePrompt = false
+        childActionNotice = nil
         showBubble?(true)
     }
     func submit() {
@@ -205,6 +208,31 @@ import UniformTypeIdentifiers
             struct Receipt: Decodable { let requestId: String }
             let path = "/v1/tasks/\(taskID)/delegations/\(input.conversationId)/questions/\(input.question.id)/answer"
             let _: Receipt = try await self.api.request(path, method: "POST", body: ["requestId": requestID.uuidString, "answer": answer])
+            await self.refresh()
+        }
+    }
+    func stopChild(_ child: PetStoppableChild, taskID: String) {
+        guard selectedID == taskID, let current = task, current.id == taskID,
+              current.stoppableChildren?.contains(child) == true else { return }
+        perform {
+            let _: PetChildStopReceipt = try await self.api.request(
+                "/v1/tasks/\(taskID)/delegations/\(child.childId)/stop", method: "POST", body: [:]
+            )
+            guard self.selectedID == taskID else { return }
+            self.childActionNotice = "已停止子任务。"
+            await self.refresh()
+        }
+    }
+    func interruptChildTool(_ tool: PetChildTool, taskID: String) {
+        guard selectedID == taskID, let current = task, current.id == taskID,
+              current.interruptibleChildTools?.contains(tool) == true else { return }
+        perform {
+            let receipt: PetChildToolReceipt = try await self.api.request(
+                "/v1/tasks/\(taskID)/delegations/\(tool.childId)/interrupt", method: "POST",
+                body: ["toolTaskId": tool.toolTaskId], timeout: 19
+            )
+            guard self.selectedID == taskID else { return }
+            self.childActionNotice = receipt.pending > 0 ? "已提交工具中断请求。" : "已中断工具调用。"
             await self.refresh()
         }
     }
@@ -271,14 +299,16 @@ import UniformTypeIdentifiers
     }
     private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !busy else { return }
-        busy = true; error = nil; generation += 1
+        busy = true; error = nil; childActionNotice = nil; generation += 1
+        let revision = generation
         Task {
             defer { busy = false }
             do { try await operation() }
             catch {
+                guard generation == revision else { return }
                 self.error = error.localizedDescription
                 await refresh()
-                showBubble?(true)
+                if generation == revision { showBubble?(true) }
             }
         }
     }

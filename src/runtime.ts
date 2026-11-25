@@ -1000,7 +1000,7 @@ export class LocalRuntime {
       const { activeTools, interruptibleChildTools } = ["running", "verifying"].includes(status) ? await active.harness.commit(async tx => {
         const tools: { id: string; name: string; worker: boolean }[] = [];
         const interruptible: { childId: number; childName: string; toolTaskId: number; toolName: string }[] = [];
-        const background = new Map(status === "running" && meta.remotePolicy === "workspace" ? delegations
+        const background = new Map(status === "running" ? delegations
           .filter(child => child.mode === "background" && child.status === "running")
           .map(child => [child.conversationId, child.name]) : []);
         for (const conversation of conversations) {
@@ -1035,16 +1035,17 @@ export class LocalRuntime {
         conversations, tasks: inspection.tasks, usage };
     });
   }
-  async interruptChild(id: string, childId: number, remote?: { workspace: string; toolTaskId: number }) {
+  async interruptChild(id: string, childId: number, options: { workspace?: string; toolTaskId?: number } = {}) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
-      if (remote ? meta.remotePolicy !== "workspace" || meta.workspace !== remote.workspace : meta.remotePolicy) {
+      if (options.workspace === undefined ? meta.remotePolicy :
+          meta.remotePolicy !== "workspace" || meta.workspace !== options.workspace || options.toolTaskId === undefined) {
         throw new DelegationInputError(404, "Background child not found.");
       }
       const active = await this.open(meta, false);
       const goal = await this.goalState(active);
       const working = meta.control === "active" && goal?.phase === "working" ? goal : undefined;
-      return interruptChildTools(active.harness, childId, working, ctx, remote?.toolTaskId);
+      return interruptChildTools(active.harness, childId, working, ctx, options.toolTaskId);
     });
   }
   async stopChild(id: string, childId: number, remoteWorkspace?: string) {

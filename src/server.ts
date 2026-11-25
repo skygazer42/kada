@@ -246,9 +246,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const childControl = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/(stop|interrupt)$/.exec(url.pathname);
       if (childControl && req.method === "POST") {
         const [, task, child, action] = childControl;
-        return send(200, await (action === "stop"
-          ? runtime.stopChild(task!, Number(child))
-          : runtime.interruptChild(task!, Number(child))));
+        if (action === "stop") return send(200, await runtime.stopChild(task!, Number(child)));
+        const { toolTaskId } = await body(req);
+        if (toolTaskId !== undefined && typeof toolTaskId !== "number") throw new Error("Provide a valid tool task ID.");
+        return send(200, await runtime.interruptChild(task!, Number(child), { toolTaskId }));
       }
       const childAnswer = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/questions\/(\d+)\/answer$/.exec(url.pathname);
       if (childAnswer && req.method === "POST") {

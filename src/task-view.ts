@@ -22,6 +22,9 @@ export function taskView(status: TaskStatus) {
     progress: { steps: goal?.plan ?? [], tools: status.activeTools },
     skills: skillRecords(status),
     delegations:status.delegations,
+    stoppableChildren: status.status === "running" ? status.delegations.flatMap(child => child.mode === "background" &&
+      ["queued", "running", "waiting_input"].includes(child.status) ? [{ childId: child.conversationId, name: child.name }] : []) : [],
+    interruptibleChildTools: status.interruptibleChildTools,
     approvals: status.approvals.map(({ arguments: args, ...approval }) => ({
       ...approval, argumentsPreview: JSON.stringify(args, null, 2),
     })),

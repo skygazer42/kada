@@ -15,6 +15,7 @@ import { LocalRuntime } from "../src/runtime.js";
 import { ChatSession } from "../src/chat.js";
 import { createClient } from "../src/client.js";
 import { serve } from "../src/server.js";
+import type { TaskView } from "../src/task-view.js";
 import { hasTool, scriptedFixture, until } from "./helpers.js";
 
 test("background delegation lets the parent work, waits for the report and resumes once after reopening", async () => {
@@ -257,16 +258,34 @@ test("interrupting a child's current tool lets the same Pi conversation finish",
     if (results.some(result => result.toolName === "delegate_background")) return fauxAssistantMessage("Waiting for the child.");
     return call("delegate_background", { tasks: [{ name: "worker", instructions: "Run the command." }] });
   });
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const settings = { ...fixture.settings, port };
+  const daemon = await serve(settings, { models: fixture.models });
+  const client = createClient(settings);
   try {
-    const task = await fixture.runtime.create("Run an interruptible child", fixture.workspace);
-    const working = await until(() => fixture.runtime.status(task.id), status =>
-      status.delegations.length === 1 && status.activeTools.some(tool => tool.worker && tool.name === "bash"));
+    const task = await daemon.runtime.create("Run an interruptible child", fixture.workspace);
+    const viewPath = "/v1/tasks/" + task.id + "/view";
+    const working = await until(() => client.request<TaskView>(viewPath), view =>
+      view.interruptibleChildTools.some(tool => tool.toolName === "bash"));
     const child = working.delegations[0]!;
+    const [tool] = working.interruptibleChildTools;
+    assert.deepEqual(working.stoppableChildren, [{ childId: child.conversationId, name: child.name }]);
+    assert.equal(tool?.childId, child.conversationId);
     const pid = await until(() => readFile(join(child.directory, "started.txt"), "utf8").then(Number, () => 0), value => value > 0);
-    const receipt = await fixture.runtime.interruptChild(task.id, child.conversationId);
+    const endpoint = "/v1/tasks/" + task.id + "/delegations/" + child.conversationId + "/interrupt";
+    assert.equal((await fetch("http://127.0.0.1:" + port + endpoint, { method: "POST" })).status, 401);
+    await assert.rejects(client.request(endpoint, "POST", { toolTaskId: "bad" }), /valid tool task ID/);
+    await assert.rejects(client.request(endpoint, "POST", { toolTaskId: Number.MAX_SAFE_INTEGER }), /no longer running/);
+    const receipt = await client.request<{ interrupted: number; pending: number }>(endpoint, "POST", { toolTaskId: tool!.toolTaskId });
     assert.equal(receipt.interrupted, 1);
     assert.equal(receipt.pending, 0);
-    const completed = await until(() => fixture.runtime.status(task.id), status => status.status === "completed");
+    const completed = await until(() => daemon.runtime.status(task.id), status => status.status === "completed");
+    const finished = await client.request<TaskView>(viewPath);
+    assert.deepEqual(finished.stoppableChildren, []);
+    assert.deepEqual(finished.interruptibleChildTools, []);
     assert.deepEqual(completed.delegations.map(item => [item.conversationId, item.status, item.answer]),
       [[child.conversationId, "completed", "Continued after the interrupted command."]]);
     await until(async () => {
@@ -274,7 +293,7 @@ test("interrupting a child's current tool lets the same Pi conversation finish",
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
     }, alive => !alive);
     await assert.rejects(readFile(join(child.directory, "ended.txt")), { code: "ENOENT" });
-  } finally { await fixture.close(); }
+  } finally { await daemon.close(); await fixture.close(); }
 });
 
 test("cancelling a goal stops a background child and keeps its receipt without waking the parent", async () => {

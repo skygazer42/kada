@@ -462,9 +462,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         controls: status.remoteControls, controlVersion: status.remoteControlVersion,
         childQuestions: status.status === "running" ? status.delegations.flatMap(child => child.question
           ? [{ childId: child.conversationId, questionId: child.question.id, name: child.name, text: child.question.text }] : []) : [],
-        stoppableChildren: status.status === "running" ? status.delegations.flatMap(child => child.mode === "background" &&
-          ["queued", "running", "waiting_input"].includes(child.status) ? [{ childId: child.conversationId, name: child.name }] : []) : [],
-        interruptibleChildTools: status.interruptibleChildTools,
+        stoppableChildren: view.stoppableChildren, interruptibleChildTools: view.interruptibleChildTools,
       } : null,
     };
   }

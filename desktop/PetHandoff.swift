@@ -53,6 +53,11 @@ struct PetBubble: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if let notice = model.childActionNotice, !model.showingMemory {
+                Text(notice).font(.system(size: 13)).foregroundColor(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22).padding(.bottom, 12)
+            }
             if let error = model.error, !model.showingMemory {
                 HStack(alignment: .top, spacing: 10) {
                     Text(error).fixedSize(horizontal: false, vertical: true)
@@ -272,7 +277,11 @@ struct PetBubble: View {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button("暂停任务") { model.control("pause") }.buttonStyle(.plain).disabled(model.busy)
+            HStack {
+                Button("暂停任务") { model.control("pause") }.buttonStyle(.plain).disabled(model.busy)
+                Spacer()
+                PetChildControls(model: model, task: task).id(task.id)
+            }
         }.padding([.horizontal, .bottom], 24).padding(.top, 10)
     }
     private var working: some View {
@@ -288,6 +297,9 @@ struct PetBubble: View {
             HStack {
                 Button("暂停") { model.control("pause") }.buttonStyle(.plain).foregroundColor(Palette.muted).disabled(model.busy)
                 Spacer()
+                if let task = model.task {
+                    PetChildControls(model: model, task: task).id(task.id)
+                }
                 Button("收起，等结果", action: close).buttonStyle(PetButton())
             }
         }.padding([.horizontal, .bottom], 24).padding(.top, 10)
@@ -532,6 +544,41 @@ struct PetBubble: View {
             }
         }
         return !providers.isEmpty
+    }
+}
+
+private struct PetChildControls: View {
+    @ObservedObject var model: PetModel
+    let task: PetTask
+    @State private var showingStop = false
+    @State private var pendingStop: PetStoppableChild?
+
+    var body: some View {
+        let children = task.stoppableChildren ?? []
+        let tools = task.interruptibleChildTools ?? []
+        if !children.isEmpty || !tools.isEmpty {
+            Menu("子任务操作") {
+                ForEach(tools, id: \.toolTaskId) { tool in
+                    Button("中断 \(tool.childName) 的 \(tool.toolName)（#\(tool.toolTaskId)）") {
+                        model.interruptChildTool(tool, taskID: task.id)
+                    }
+                }
+                ForEach(children, id: \.childId) { child in
+                    Button("停止 \(child.name)（#\(child.childId)）", role: .destructive) {
+                        pendingStop = child
+                        showingStop = true
+                    }
+                }
+            }
+            .fixedSize()
+            .disabled(model.busy)
+            .alert("停止子任务？", isPresented: $showingStop, presenting: pendingStop) { child in
+                Button("停止", role: .destructive) { model.stopChild(child, taskID: task.id) }
+                Button("取消", role: .cancel) {}
+            } message: { child in
+                Text("停止 \(child.name)（#\(child.childId)）。同批其他子任务会继续。")
+            }
+        }
     }
 }
 

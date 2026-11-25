@@ -119,6 +119,16 @@ struct PetChildInput: Equatable, Identifiable {
     let question: PetChildQuestion
     var id: String { "\(conversationId):\(question.id)" }
 }
+struct PetStoppableChild: Decodable, Equatable {
+    let childId: Int
+    let name: String
+}
+struct PetChildTool: Decodable, Equatable {
+    let childId: Int
+    let childName: String
+    let toolTaskId: Int
+    let toolName: String
+}
 struct PetTask: Decodable, Equatable {
     let id: String
     let objective: String
@@ -136,6 +146,8 @@ struct PetTask: Decodable, Equatable {
     var reply: PetReply?
     var approvals: [PetApproval]?
     var delegations: [PetDelegation]?
+    var stoppableChildren: [PetStoppableChild]?
+    var interruptibleChildTools: [PetChildTool]?
 
     var childQuestions: [PetChildInput] {
         guard status == "running" else { return [] }
@@ -223,6 +235,8 @@ struct PetTaskItem: Decodable {
 }
 struct PetCreated: Decodable { let id: String }
 struct PetOK: Decodable { let ok: Bool }
+struct PetChildStopReceipt: Decodable { let stopped: Bool }
+struct PetChildToolReceipt: Decodable { let interrupted: Int; let pending: Int }
 struct PetHealth: Decodable { let status: String; let version: String; var capabilities: [String]? }
 struct PetEnvironment: Decodable { let enabled: Bool; let agents: Int; let skills: Int; let plugins: Int; let overview: String?; let memory: String? }
 struct PetMemoryCitation: Decodable, Equatable {
@@ -300,7 +314,7 @@ final class PetAPI {
         options.urlCache = nil
         session = URLSession(configuration: options)
     }
-    func request<T: Decodable>(_ path: String, queryItems: [URLQueryItem] = [], method: String = "GET", body: [String: Any]? = nil) async throws -> T {
+    func request<T: Decodable>(_ path: String, queryItems: [URLQueryItem] = [], method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> T {
         guard (1...65535).contains(configuration.port), path.hasPrefix("/"), !path.contains(".."),
               var components = URLComponents(string: "http://127.0.0.1:\(configuration.port)\(path)") else { throw PetError.message("本地连接地址无效。") }
         if !queryItems.isEmpty {
@@ -309,7 +323,7 @@ final class PetAPI {
             components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         }
         guard let url = components.url else { throw PetError.message("本地连接地址无效。") }
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = method
         let token: String
         if let supplied = configuration.apiToken { token = supplied }
