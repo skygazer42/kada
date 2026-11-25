@@ -10,6 +10,7 @@ import type { LearningState } from "./learning.js";
 import type { SkillState } from "./skills.js";
 import { outstandingDelegation, savedDelegation } from "./delegation.js";
 import type { InputImage } from "./input-images.js";
+import { outstandingApproval } from "./approvals.js";
 
 export type GoalPhase = "working" | "clarifying" | "awaiting_confirmation" | "submitted" | "verifying" | "completed" | "waiting_user" | "blocked" | "needs_attention" | "failed";
 export type ReviewVerdict = { verdict: "pass" | "rework" | "blocked"; reason: string; evidence: string[] };
@@ -109,6 +110,7 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
       if (submitting && await outstandingDelegation(tx, api.conversationId, goal)) {
         throw new Error("Background delegation has not returned. End this turn when your independent work is done.");
       }
+      if (submitting && await outstandingApproval(tx, api.conversationId)) throw new Error('An action approval is still outstanding. Wait for its result before submitting.');
       await action(goal, record);
       goal.appliedTools[key] = true;
     }

@@ -22,9 +22,10 @@ export class ChatSession {
   private printed = new Set<string>();
   private activity = "";
   private shownBrief?: { revision: number; digest: string };
+  private shownApprovals = new Map<string, string>();
   constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
-  private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; }
+  private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); }
   async attach(id: string): Promise<void> {
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     this.select(id);
@@ -47,8 +48,36 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/reply-child") {
+        if (!this.taskId) throw new Error("先用 /attach 选择任务。");
+        const reply = /^(\d+)\s+(\d+)\s+([\s\S]+)$/.exec(argument ?? "");
+        if (!reply) throw new Error("用法：/reply-child 子会话ID 问题ID 答复");
+        const [, child, question, answer] = reply;
+        await this.client.request(`/v1/tasks/${this.taskId}/delegations/${child}/questions/${question}/answer`,
+          "POST", { requestId: "terminal-" + question, answer });
+        this.info("答复已接收，子任务会从原会话继续。");
+        await this.poll();
+        return true;
+      }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
+      if (['/approvals', '/allow', '/deny'].includes(command!)) {
+        if (!this.taskId) throw new Error('先用 /attach 选择任务。');
+        const path = `/v1/tasks/${this.taskId}/approvals`;
+        const approvals = await this.client.request<TaskStatus['approvals']>(path);
+        if (command === '/approvals') {
+          this.shownApprovals = new Map(approvals.map(item => [item.id, item.digest]));
+          this.info(approvals.length ? approvals.map(item => `${item.id} [${item.status}] ${item.connection}/${item.tool}\n参数 ${JSON.stringify(item.arguments)}\nSHA-256 ${item.digest}\n有效至 ${new Date(item.expiresAt).toISOString()}${item.result ? '\n结果 ' + item.result : ''}`).join('\n\n') : '当前任务没有待审批动作。');
+        } else {
+          const action = approvals.find(item => item.id === argument);
+          if (!action) throw new Error('从 /approvals 选择动作 ID。');
+          if (this.shownApprovals.get(action.id) !== action.digest) throw new Error('先用 /approvals 查看该动作的参数，再答复。');
+          await this.client.request(`${path}/${action.id}/${command === '/allow' ? 'allow' : 'deny'}`, 'POST', { digest: action.digest });
+          this.info(command === '/allow' ? '已允许该动作执行一次。' : '已拒绝该动作。');
+          await this.poll();
+        }
+        return true;
+      }
       if (command === "/run") {
         if (!argument) throw new Error("用法：/run 已明确授权的目标（沿用当前配置预算）");
         this.select(); await this.send(argument, true); return true;
@@ -203,6 +232,13 @@ export class ChatSession {
       }
     }
     const goal = status.goal;
+    if (status.status === "running") for (const child of status.delegations ?? []) {
+      if (child.status !== "waiting_input" || !child.question) continue;
+      const key = `child-question:${child.conversationId}:${child.question.id}`;
+      if (this.printed.has(key)) continue;
+      this.printed.add(key);
+      this.info(`子任务 ${child.name} 等待答复：${child.question.text}\n/reply-child ${child.conversationId} ${child.question.id} 答复`);
+    }
     if (["clarifying", "awaiting_confirmation"].includes(status.status) && goal?.brief) {
       const key = `brief:${goal.brief.revision}:${status.briefDigest}`;
       if (!this.printed.has(key)) {

@@ -33,6 +33,25 @@ import AppKit
         try expect(ready.mode == .confirm, "confirmation state")
         try expect(ready.confirmation?["revision"] as? Int == 2, "exact displayed revision")
         try expect(ready.confirmation?["digest"] as? String == String(repeating: "a", count: 64), "exact displayed digest")
+        var waiting = object
+        waiting["status"] = "waiting_user"
+        let actionDigest = String(repeating: "b", count: 64)
+        waiting["approvals"] = [[
+            "id": "7", "connection": "reports", "tool": "publish", "status": "pending",
+            "digest": actionDigest, "argumentsPreview": "{\"title\":\"Weekly report\"}"
+        ]]
+        let pendingAction = try decode(waiting)
+        let action = pendingAction.pendingApproval
+        try expect(action?.argumentsPreview.contains("Weekly report") == true, "preview shows the saved action")
+        try expect(action?.digest == actionDigest && action?.id == "7", "decision uses the displayed identity and digest")
+        waiting["status"] = "paused"
+        try expect(try decode(waiting).pendingApproval == nil, "paused task cannot show an actionable decision")
+        waiting["status"] = "waiting_user"
+        waiting["approvals"] = [[
+            "id": "7", "connection": "reports", "tool": "publish", "status": "expired",
+            "digest": actionDigest, "argumentsPreview": "{}"
+        ]]
+        try expect(try decode(waiting).pendingApproval?.status == "expired", "expired action remains available for rejection")
         object["status"] = "running"
         try expect(try decode(object).confirmation == nil, "ordinary execution cannot authorize")
         for state in ["blocked", "failed", "needs_attention", "answered"] {

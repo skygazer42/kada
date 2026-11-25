@@ -44,7 +44,7 @@ export async function ensureDaemon(config: Config, configFile?: string): Promise
   child.once("exit", () => { ended = true; });
   child.unref();
   await log.close();
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (failure) throw new Error(`无法启动后台服务：${failure}`);
     if (await client.healthy()) {

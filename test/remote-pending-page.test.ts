@@ -41,7 +41,7 @@ const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([])) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -93,7 +93,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
             return Response.json({ channel: "web", accountId, deviceId, pairingId });
           }
           if (url === "/remote/api/conversations") {
-            return listUnavailable ? Response.json({ error: "List unavailable." }, { status: 503 }) : Response.json([]);
+            return listUnavailable ? Response.json({ error: "List unavailable." }, { status: 503 }) : list();
           }
           if (url.endsWith("/uploads")) {
             uploads++;
@@ -135,6 +135,33 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     },
   };
 }
+
+test("the pending list opens the original conversation and drops tasks that are no longer pending", async () => {
+  let waiting = true;
+  const device = harness((url) => Response.json({
+    cursor: 1, messages: [{ role: "user", sequence: 1, text: url.pathname.endsWith("/report") ? "Original report request" : "First chat" }],
+    progressEvents: [], task: null,
+  }), undefined, () => Response.json([
+    { conversationId, title: "First chat", task: { group: "running", status: "running" } },
+    { conversationId: "report", title: "Daily report", task: { group: waiting ? "pending" : "delivered", status: waiting ? "waiting_user" : "completed" } },
+  ]));
+  const page = await device.open();
+  await page.type("Unsent first-chat draft");
+  const list = page.field("pending-tasks");
+  assert.equal(page.field("pending-work").hidden, false);
+  assert.deepEqual(list.children.map(row => row.children[0]!.textContent), ["Daily report · Waiting for you"]);
+  await list.children[0]!.children[0]!.trigger("click");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(page.field("conversation").value, "report");
+  assert.equal(page.field("messages").children[0]!.children[1]!.textContent, "Original report request");
+  waiting = false;
+  await page.field("refresh-conversations").trigger("click");
+  assert.equal(page.field("pending-work").hidden, true);
+  assert.equal(page.field("conversation").value, "report");
+  page.field("conversation").value = conversationId;
+  await page.field("conversation").trigger("change");
+  assert.equal(page.field("prompt").value, "Unsent first-chat draft");
+});
 
 test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {
   const initial = { role: "user", sequence: 1, text: "Original request" };

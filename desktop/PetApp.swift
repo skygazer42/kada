@@ -196,6 +196,18 @@ import UniformTypeIdentifiers
             if self.mode == .working { self.hideBubble?() }
         }
     }
+    func decideApproval(_ approval: PetApproval, taskID: String, allow: Bool) {
+        guard let current = task, current.id == taskID, current.pendingApproval == approval,
+              !allow || approval.status == "pending" else { return }
+        perform {
+            let decision = allow ? "allow" : "deny"
+            struct Receipt: Decodable { let id: String; let decision: String }
+            let _: Receipt = try await self.api.request(
+                "/v1/tasks/\(taskID)/approvals/\(approval.id)/\(decision)", method: "POST", body: ["digest": approval.digest]
+            )
+            await self.refresh()
+        }
+    }
     func control(_ action: String) {
         guard let current = task, ["pause", "resume", "cancel"].contains(action) else { return }
         perform {

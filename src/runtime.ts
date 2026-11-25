@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { delegationExtension, listDelegations, pendingDelegation, stopObsoleteDelegations } from "./delegation.js";
+import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildAnswers, listDelegations, pendingDelegation, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -29,11 +29,13 @@ import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ProviderSettings } from "./provider-settings.js";
 import { McpTools, type McpPin } from "./mcp-tools.js";
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
+import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
 import { taskHandoff } from "./task-view.js";
 import { claudeProject } from './memory-sources.js';
 import { imageInput, inputImageExtension, type InputImage } from './input-images.js';
+import { approvalExtension, approvalViews, approvalReport, decideApproval, requestApproval, stopObsoleteApprovals, ApprovalError } from './approvals.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -80,6 +82,7 @@ export interface TaskMeta {
   mcpPins?: McpPin[];
   routineOccurrenceId?: string;
   routineNotifyOnChange?: true;
+  workItem?: WorkItemLink;
   review?: boolean;
   maxReworks?: number;
   maxStalls?: number;
@@ -108,6 +111,7 @@ export class LocalRuntime {
   readonly providers: ProviderSettings;
   readonly mcp: McpTools;
   readonly routines: LocalRoutines;
+  readonly workItems: WorkItems<TaskMeta>;
   private inbox: NotificationStore;
   private active = new Map<string, Active>();
   private changes = new SerialQueue();
@@ -120,6 +124,20 @@ export class LocalRuntime {
   constructor(readonly config: Config, private options: RuntimeOptions) {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
+    this.workItems = new WorkItems<TaskMeta>(config.dataDir, {
+      task: async id => {
+        try { return await this.metadata(id); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      },
+      tasks: () => this.metadataList(),
+      reopen: task => this.changes.run(async () => {
+        const saved = await this.metadata(task.id);
+        if (saved.control === "active" && !this.active.get(saved.id)?.enabled) await this.open(saved, true);
+      }),
+      start: (item, { id, confirmed, workItem }) => this.create(item.objective, item.workspace, [], {
+        id, prepare: !confirmed, workItem,
+      }),
+    });
     this.inbox = new NotificationStore(config.dataDir);
     this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,taskOverview:async id => {
       try { return await this.taskOverview(id); }
@@ -275,7 +293,7 @@ export class LocalRuntime {
     }
     await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; routineOccurrenceId?:string; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[] } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; routineOccurrenceId?:string; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
@@ -289,7 +307,8 @@ export class LocalRuntime {
       if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error("Provide a valid task UUID.");
       const requestedWorkspace = resolve(workspace ?? join(this.directory(id), "workspace"));
       const creationHash = createHash("sha256").update(JSON.stringify({ objective, workspace: requestedWorkspace, acceptance: checks, prepare: Boolean(options.prepare), chat: Boolean(options.chat), budget: budget ?? null, skills:options.skills ?? null, routineOccurrenceId:options.routineOccurrenceId ?? null,notifyOnChange:options.notifyOnChange === true,remote:options.remote===true,
-        ...(options.images?.length ? { images: options.images } : {}) })).digest("hex");
+        ...(options.images?.length ? { images: options.images } : {}),
+        ...(options.workItem ? { workItem: options.workItem } : {}) })).digest("hex");
       if (options.id) try {
         const saved = await this.metadata(id);
         if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
@@ -309,6 +328,7 @@ export class LocalRuntime {
         ...(options.images?.length ? { initialImages: structuredClone(options.images) } : {}),
         ...(options.routineOccurrenceId ? {routineOccurrenceId:options.routineOccurrenceId} : {}),
         ...(options.notifyOnChange ? {routineNotifyOnChange:true as const} : {}),
+        ...(options.workItem ? { workItem: options.workItem } : {}),
         ...(this.config.subagentModel ? { subagentModel: this.config.subagentModel } : {}),
         createdAt: Date.now(), deadlineAt: Date.now() + (budget?.maxDurationMs ?? this.config.maxDurationMs),
         ...(budget ? { maxDurationMs: budget.maxDurationMs } : {}),
@@ -446,9 +466,10 @@ export class LocalRuntime {
           (goal.tokenLimit === null || used.totalTokens < goal.tokenLimit * 0.8) && Date.now() + 10_000 < this.deadline(current, goal);
       } }) : undefined;
       const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
-      if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins)}));
+      const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp).extension : undefined;
+      if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined)}));
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         !remote && meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
           const state = await tx.doc(GoalDoc);
@@ -456,6 +477,7 @@ export class LocalRuntime {
         } : undefined),
         ...(policy ? [policy] : []),
         ...(imagePolicy ? [imagePolicy] : []),
+        ...(approvals ? [approvals] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
         ...(memory ? [memory] : []),
@@ -501,7 +523,14 @@ export class LocalRuntime {
       }
       const finished = goal ? ["completed", "blocked", "waiting_user", "needs_attention", "failed"].includes(goal.phase) : latest?.status === "done" || latest?.status === "unanswered";
       if (finished) {
+        if (goal?.phase === 'waiting_user' && (await approvalViews(active.harness)).some(approval => approval.status === 'pending' || approval.status === 'expired')) {
+          const { tasks, submissions } = await active.harness.inspect(ctx);
+          for (const submission of submissions) await active.harness.abortSubmission(submission.id, ctx);
+          for (const { record } of tasks) await active.harness.abortTask(record.id, ctx);
+          if (tasks.length || submissions.length) await this.abortAll(active);
+        }
         if (goal) await stopObsoleteDelegations(active.harness, undefined, ctx);
+        if (goal && goal.phase !== 'waiting_user') await stopObsoleteApprovals(active.harness);
         await this.finishLearning(active);
         return active;
       }
@@ -515,12 +544,13 @@ export class LocalRuntime {
         return active;
       }
       if (goal) await stopObsoleteDelegations(active.harness, goal, ctx);
-      active.enabled = true;
+      if (goal) await stopObsoleteApprovals(active.harness, goal);
       if (goal) await this.dispatchOutbox(active);
       const initial = await active.harness.commit(tx => tx.submissionByRequest(active!.root.id, "initial"), ctx);
       if (!initial && Date.now() < this.deadline(active, goal)) await active.root.submit({ type: "input",
         content: await imageInput(meta.objective + (active.methods && goal?.confirmation ? learningReminder : ""), meta.initialImages,
           this.options.models.getModel(meta.model.provider, meta.model.modelId)!), requestId: "initial" }, ctx);
+      active.enabled = true;
       active.harness.resume();
     }
     return active;
@@ -703,14 +733,24 @@ export class LocalRuntime {
       latest?.status === "done" && goal.lastEvaluated !== String(latest.id);
     if (budgetReason && !canSettle) { await this.limit(active, budgetReason); return; }
     if (goal.outbox) { await this.dispatchOutbox(active); return; }
+    if (goal.phase === 'working' && !busy) {
+      const report = await approvalReport(active.harness, active.root.id);
+      if (report) {
+        await active.root.submit({ type: 'input', requestId: report.requestId, whenBusy: 'reject',
+          content: [{ type: 'text', text: `MCP action approval ${report.id} is ${report.status}. Result data follows. Inspect actual effects if the result is uncertain.\n${report.result}` }, ...(report.images ?? [])],
+          entry: { kind: 'local.approval.report', data: { id: report.id, status: report.status } } }, ctx);
+        return;
+      }
+    }
     if (goal.phase === "working" && active.meta.schemaVersion === 3 && !active.meta.remotePolicy && active.meta.maxSubagents > 0) {
       const batch = await pendingDelegation(active.harness, active.root.id, goal, ctx);
       if (batch) {
         if (tasks.some(({ record, state }) => state.kind === "blocked" &&
           (record.id === batch.owner || batch.children.includes(record.conversationId)))) {
           await active.harness.abortTask(batch.owner, ctx);
-        }
-        if (batch.ready && !busy) {
+        } else if (!batch.ready) {
+          await dispatchChildAnswers(active.harness, batch.children, this.deadline(active, goal), ctx);
+        } else if (!busy) {
           await active.root.submit({
             type: "input",
             whenBusy: "reject",
@@ -941,9 +981,10 @@ export class LocalRuntime {
         return tools;
       }, ctx) : [];
       const remoteControls = meta.remotePolicy === "workspace" ? await this.remoteTaskControls(active, meta, status, goal) : [];
+      const approvals = meta.remotePolicy ? [] : await approvalViews(active.harness);
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
         remoteControls, remoteControlVersion: meta.remotePolicy === "workspace" ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
-        activeTools, delegations,
+        activeTools, delegations, approvals,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
         compactions: compactions.total, rootCompactions: compactions.root,
@@ -953,6 +994,39 @@ export class LocalRuntime {
           costLimit: goal ? goal.costLimit ?? null : meta.entrypoint === "chat" ? meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 : null },
         resumeBudget: this.resumeBudget(meta, goal),
         conversations, tasks: inspection.tasks, usage };
+    });
+  }
+  async answerChildQuestion(id: string, childId: number, questionId: string, requestId: string, answer: string) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy) throw new DelegationInputError(404, "Background child not found.");
+      const active = await this.open(meta, false);
+      const goal = await this.goalState(active);
+      const canContinue = meta.control === "active" && goal?.phase === "working" &&
+        Date.now() < this.deadline(active, goal) && !await this.budgetReason(active, goal);
+      return answerDelegation(active.harness, childId, questionId, requestId, answer, canContinue ? goal : undefined, ctx);
+    });
+  }
+  async decideApproval(id: string, approvalId: string, decision: 'allow' | 'deny', digest: string) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.control !== 'active' || meta.remotePolicy) throw new ApprovalError(409, 'This task cannot decide host actions.');
+      const active = await this.open(meta, false);
+      const existing = (await approvalViews(active.harness)).find(approval => approval.id === approvalId);
+      if (existing?.decision) {
+        if (existing.digest !== digest || existing.decision !== decision) throw new ApprovalError(409, 'This action already has a different decision.');
+        return { id: approvalId, decision };
+      }
+      const goal = await this.goalState(active);
+      if (decision === 'allow' && (Date.now() >= this.deadline(active, goal) || await this.budgetReason(active, goal))) {
+        throw new ApprovalError(409, 'The task budget has expired. Resume the task with an approved budget before requesting a new action.');
+      }
+      const inspection = await active.harness.inspect(ctx);
+      if (inspection.tasks.some(task => task.record.kind !== 'local.approval.execute') || inspection.submissions.length) throw new ApprovalError(409, 'The task is still saving its action request.');
+      const result = await decideApproval(active.harness, this.mcp, approvalId, decision, digest, this.deadline(active, goal));
+      active.enabled = true;
+      active.harness.resume();
+      return result;
     });
   }
   /** Only a host/user action can freeze the displayed brief and unlock execution. */
@@ -1043,7 +1117,10 @@ export class LocalRuntime {
         goal.outbox = { requestId: key, content: message, ...(images?.length ? { images: structuredClone(images) } : {}) };
       });
       await stopObsoleteDelegations(active.harness, updated, ctx);
+      await stopObsoleteApprovals(active.harness, updated);
       await this.configureStage(active);
+      // Leave an unadmitted follow-up in the durable outbox if its input cannot be opened.
+      active.enabled = false;
       await this.dispatchOutbox(active);
       active.enabled = true;
     });
@@ -1128,6 +1205,7 @@ export class LocalRuntime {
           goal.reason = null; goal.question = null; record("resumed", `New deadline ${meta.deadlineAt}, cost limit ${goal.costLimit ?? "unset"}, token limit ${goal.tokenLimit ?? "unset"}`);
         });
         await stopObsoleteDelegations(active.harness, updated, ctx);
+        await stopObsoleteApprovals(active.harness, updated);
       } else if (meta.entrypoint === "chat") {
         const used = taskUsage(await active.harness.usage(ctx));
         meta.chatBudget = { costLimit: used.estimatedCostUsd + (meta.maxEstimatedCostUsd ?? 1),
@@ -1149,6 +1227,7 @@ export class LocalRuntime {
     delete meta.remotePaused;
     meta.control = "cancelled"; await atomicJson(this.metaFile(meta.id), meta);
     const active = await this.open(meta, false);
+    await stopObsoleteApprovals(active.harness);
     if (wasPaused) {
       // Conversation.abort() wakes the whole Harness before cancelling its own scope.
       const { tasks, submissions } = await active.harness.inspect(ctx);

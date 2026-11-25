@@ -48,6 +48,8 @@ export const remotePage = String.raw`<!doctype html>
     .task ol, .task ul { margin: .3rem 0 0; padding-left: 1.4rem; }
     .task li { margin-top: .3rem; }
     .task li button { text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+    #pending-tasks { display: grid; gap: .4rem; list-style: none; margin: 0; padding: 0; }
+    #pending-tasks button { width: 100%; text-align: left; overflow-wrap: anywhere; }
     .receipt { margin-top: .5rem; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem; }
     .receipt .pending-message { flex-basis: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }
     #composer { margin-bottom: 1.5rem; }
@@ -83,6 +85,10 @@ export const remotePage = String.raw`<!doctype html>
         <button type="button" id="refresh-conversations" aria-label="Refresh conversations">Refresh</button>
         <button type="button" id="new">New chat</button>
       </div>
+      <section id="pending-work" class="panel" hidden aria-labelledby="pending-heading">
+        <h2 id="pending-heading">Pending work</h2>
+        <ul id="pending-tasks"></ul>
+      </section>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
       <details id="task-history" class="panel task" hidden>
         <summary>Task history</summary>
@@ -113,6 +119,8 @@ const assistant = field("assistant");
 const signout = field("signout");
 const status = field("status");
 const conversations = field("conversation");
+const pendingWork = field("pending-work");
+const pendingTasks = field("pending-tasks");
 const task = field("task");
 const taskHistory = field("task-history");
 const taskEvents = field("task-events");
@@ -284,12 +292,20 @@ async function refreshList() {
   const rows = await get("/conversations");
   if (version !== listVersion || !identity) return;
   conversations.replaceChildren();
+  pendingTasks.replaceChildren();
   for (const row of rows) {
     const state = row.task && taskStatusLabel(row.task.status);
     const reason = row.task?.question ?? row.task?.reason;
     const option = element("option", [state, row.title, reason].filter(Boolean).join(" · "), conversations);
     option.value = row.conversationId;
+    if (row.task?.group === "pending") {
+      const item = element("li", "", pendingTasks);
+      action([row.title, state].filter(Boolean).join(" · "), item, () => {
+        if (conversationId !== row.conversationId) choose(row.conversationId);
+      });
+    }
   }
+  pendingWork.hidden = !pendingTasks.children.length;
   for (const [id, record] of composerRecords()) {
     if (rows.some((row) => row.conversationId === id)) continue;
     addLocalConversation(id, record);
@@ -640,6 +656,8 @@ async function connect(value) {
   if (conversationId) localStorage.setItem(selectionKey(), conversationId);
   listVersion++;
   conversations.replaceChildren();
+  pendingTasks.replaceChildren();
+  pendingWork.hidden = true;
   resetConversationView();
   restoreComposer();
   if (pending) displayReceipt({ state: "unknown" });

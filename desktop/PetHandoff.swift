@@ -111,7 +111,9 @@ struct PetBubble: View {
         case nil: compose
         case .chat: conversation
         case .confirm: if model.editing { editBrief } else { confirmation }
-        case .clarify: clarification
+        case .clarify:
+            if let task = model.task, let approval = task.pendingApproval { actionApproval(approval, taskID: task.id) }
+            else { clarification }
         case .working: working
         case .delivered: delivery
         case .paused, .budget, .attention: attention
@@ -217,6 +219,26 @@ struct PetBubble: View {
                 Spacer()
                 sendButton("更新约定")
             }
+        }.padding([.horizontal, .bottom], 24).padding(.top, 10)
+    }
+    private func actionApproval(_ approval: PetApproval, taskID: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            heading("审批工具动作")
+            Text(model.taskTitle).font(.system(size: 14))
+            Text(approval.connection + "/" + approval.tool).foregroundColor(Palette.muted)
+            ScrollView {
+                Text(approval.argumentsPreview).font(.system(size: 13, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            }
+            HStack {
+                Button("拒绝") { model.decideApproval(approval, taskID: taskID, allow: false) }.buttonStyle(PetButton(primary: false))
+                Spacer()
+                if approval.status == "pending" {
+                    Button("允许一次") { model.decideApproval(approval, taskID: taskID, allow: true) }.buttonStyle(PetButton())
+                } else {
+                    Text("审批已过期").foregroundColor(Palette.muted)
+                }
+            }.disabled(model.busy)
         }.padding([.horizontal, .bottom], 24).padding(.top, 10)
     }
     private var clarification: some View {

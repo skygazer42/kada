@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
-import { defineTool } from '@earendil-works/pi-durable';
+import { defineTool, type ToolExecutionApi, type ToolExecutionResult } from '@earendil-works/pi-durable';
+import type { Context } from '@earendil-works/chord/context';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -13,14 +14,14 @@ export type McpDefinition = { id: string } & (
   | { transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
   | { transport: 'http'; url: string; headers?: Record<string, string> }
 );
-export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[] };
+export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[]; approvalTools?: string[] };
 export type ProjectMcpTool = { id: string; tool: string };
 type FoundTool = Pick<ServerTool, 'name' | 'description' | 'inputSchema'>;
 type McpTest = { checkedAt: string; tools?: FoundTool[] } & (
   | { status: 'ok'; tools: FoundTool[] }
   | { status: 'failed'; message: string }
 );
-type SavedConnection = { definition: McpDefinition; revision: string; allowedTools: string[]; enabled: boolean; test?: McpTest };
+type SavedConnection = { definition: McpDefinition; revision: string; allowedTools: string[]; enabled: boolean; test?: McpTest; approvalTools?: string[] };
 export type McpConnection = Omit<SavedConnection, 'definition' | 'test'> & {
   id: string;
   transport: McpDefinition['transport'];
@@ -32,6 +33,7 @@ const pinOf = (connection: SavedConnection): McpPin => ({
   revision: connection.revision,
   tools: connection.allowedTools,
   discovery: connection.test?.tools?.filter(tool => connection.allowedTools.includes(tool.name)),
+  ...(connection.approvalTools?.length ? { approvalTools: connection.approvalTools.filter(tool => connection.allowedTools.includes(tool)) } : {}),
 });
 
 const idPattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -228,6 +230,22 @@ export class McpTools {
     return this.update(id, old => ({ ...this.require(old), enabled: false }));
   }
 
+  setApproval(id: string, tools: string[], expectedRevision: string): Promise<McpConnection> {
+    if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string')) throw new Error('Select MCP tools requiring approval.');
+    return this.update(id, old => {
+      const connection = this.require(old);
+      if (connection.revision !== expectedRevision) throw new Error('MCP connection changed. Review the current revision.');
+      if (!connection.enabled || tools.some(tool => !connection.allowedTools.includes(tool))) throw new Error('Only enabled MCP tools can require approval.');
+      return { ...connection, approvalTools: [...new Set(tools)].sort() };
+    });
+  }
+
+  async requiresApproval(pin: McpPin, name: string): Promise<boolean> {
+    const connection = this.current(await this.read(), pin);
+    if (!connection.enabled || !connection.allowedTools.includes(name)) throw new Error('This MCP tool is no longer enabled or allowed.');
+    return pin.approvalTools?.includes(name) === true || connection.approvalTools?.includes(name) === true;
+  }
+
   private async readProjects(): Promise<Record<string, ProjectMcpTool[]>> {
     try {
       return await readJson<Record<string, ProjectMcpTool[]>>(this.projectsPath);
@@ -278,7 +296,7 @@ export class McpTools {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
-  async tools(pins?: McpPin[]) {
+  async tools(pins?: McpPin[], approval?: (pin: McpPin, name: string, args: Record<string, unknown>, api: ToolExecutionApi, context: Context) => Promise<ToolExecutionResult>) {
     const connections = await this.read();
     const selected = pins ?? connections.filter(connection => connection.enabled).map(pinOf);
     return selected.flatMap(pin => {
@@ -290,19 +308,27 @@ export class McpTools {
           name: toolName(pin.id, name),
           description: tool?.description ?? `Use the ${name} tool from ${pin.id}.`,
           parameters: Type.Unsafe<Record<string, unknown>>(tool?.inputSchema ?? { type: 'object' }),
-          replay: 'unsafe',
+          replay: pin.approvalTools?.includes(name) ? 'safe' : 'unsafe',
           executionMode: 'sequential',
-          execute: async (args, _api, context) => {
-            const result = await this.call(pin, name, args, context.abortSignal);
-            return { output: result.content.map(item => {
-              if (item.type === 'text') return { type: 'text' as const, text: item.text };
-              if (item.type === 'image') return { type: 'image' as const, data: item.data, mimeType: item.mimeType };
-              return { type: 'text' as const, text: `MCP returned a ${item.type} result. This content type is unavailable in Kada.` };
-            }), isError: result.isError === true };
+          execute: async (args, api, context) => {
+            if (await this.requiresApproval(pin, name)) {
+              if (!approval) throw new Error('This MCP action requires approval in the main task.');
+              return approval(pin, name, args, api, context);
+            }
+            return this.executeApproved(pin, name, args, context.abortSignal);
           },
         });
       });
     });
+  }
+
+  async executeApproved(pin: McpPin, name: string, args: Record<string, unknown>, signal?: AbortSignal, beforeApprovedDispatch?: () => Promise<void>): Promise<ToolExecutionResult> {
+    const result = await this.call(pin, name, args, signal, beforeApprovedDispatch);
+    return { output: result.content.map(item => {
+      if (item.type === 'text') return { type: 'text' as const, text: item.text };
+      if (item.type === 'image') return { type: 'image' as const, data: item.data, mimeType: item.mimeType };
+      return { type: 'text' as const, text: `MCP returned a ${item.type} result. This content type is unavailable in Kada.` };
+    }), isError: result.isError === true };
   }
 
   private current(connections: SavedConnection[], pin: McpPin): SavedConnection {
@@ -311,12 +337,23 @@ export class McpTools {
     return connection;
   }
 
-  private async call(pin: McpPin, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined) {
-    const pending = await this.changes.run(async () => {
+  private async call(pin: McpPin, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined, beforeApprovedDispatch?: () => Promise<void>) {
+    const authorizedConnection = async () => {
       const connection = this.current(await this.read(), pin);
       if (!connection.enabled || !connection.allowedTools.includes(name)) throw new Error('This MCP tool is no longer enabled or allowed.');
+      if (!beforeApprovedDispatch && (connection.approvalTools?.includes(name) || pin.approvalTools?.includes(name))) throw new Error('This MCP action requires a current user approval.');
+      return connection;
+    };
+    const pending = await this.changes.run(async () => {
+      const connection = await authorizedConnection();
       return { result: this.connect(connection.definition, 60_000, signal, async (client, activeSignal, credentials) => {
-        const result = await client.callTool({ name, arguments: args }, undefined, { signal: activeSignal, timeout: 60_000 }) as CallToolResult;
+        const { call } = await this.changes.run(async () => {
+          await authorizedConnection();
+          await beforeApprovedDispatch?.();
+          activeSignal.throwIfAborted();
+          return { call: client.callTool({ name, arguments: args }, undefined, { signal: activeSignal, timeout: 60_000 }) };
+        });
+        const result = await call as CallToolResult;
         if (credentials.length && hasCredential(result, credentials)) {
           return {
             isError: true,

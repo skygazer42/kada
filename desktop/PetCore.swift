@@ -95,6 +95,14 @@ struct PetResumeBudget: Decodable, Equatable {
     let maxTotalTokens: Int?
 }
 struct PetReply: Decodable, Equatable { let timestamp: Double; let text: String }
+struct PetApproval: Decodable, Equatable {
+    let id: String
+    let connection: String
+    let tool: String
+    let status: String
+    let digest: String
+    let argumentsPreview: String
+}
 struct PetTask: Decodable, Equatable {
     let id: String
     let objective: String
@@ -110,6 +118,12 @@ struct PetTask: Decodable, Equatable {
     let delivery: PetDelivery?
     var interaction: String?
     var reply: PetReply?
+    var approvals: [PetApproval]?
+
+    var pendingApproval: PetApproval? {
+        guard status == "waiting_user" else { return nil }
+        return approvals?.first { $0.status == "pending" || $0.status == "expired" }
+    }
 
     enum Mode: String { case chat, working, clarify, confirm, delivered, paused, budget, attention, cancelled }
     var mode: Mode {

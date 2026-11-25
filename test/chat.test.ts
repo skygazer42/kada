@@ -40,6 +40,24 @@ test("memory list shows certainty, state and the versions of each fact and sourc
   assert.match(text, /Keep it short/);
 });
 
+test('terminal action decisions require the displayed digest', async () => {
+  let digest = 'a'.repeat(64);
+  const writes: unknown[] = [];
+  const client = { healthy: async () => true, async request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+    if (method === 'POST') { writes.push(body); return { ok: true } as T; }
+    if (path.endsWith('/approvals')) return [{ id: '10', connection: 'counter', tool: 'append', arguments: { text: 'once' },
+      digest, expiresAt: Date.now() + 60_000, status: 'pending' }] as T;
+    throw new Error('Unexpected status read');
+  } };
+  const session = new ChatSession(client, () => {});
+  session.taskId = 'test-task';
+  await assert.rejects(session.handle('/allow 10'), /先用 \/approvals/);
+  await session.handle('/approvals');
+  digest = 'b'.repeat(64);
+  await assert.rejects(session.handle('/allow 10'), /先用 \/approvals/);
+  assert.equal(writes.length, 0);
+});
+
 test("task list includes handoff steps, budget and delivered artifacts", async () => {
   const events: ChatEvent[] = [];
   const requests: string[] = [];
@@ -184,7 +202,7 @@ test("exiting chat during an active response leaves the task running in the back
   } finally { input.end(); await running; await f.close(); }
 });
 
-test("chat starts a separate daemon when needed and reuses the existing one", { timeout: 25_000 }, async () => {
+test("chat starts a separate daemon when needed and reuses the existing one", { timeout: 45_000 }, async () => {
   const f = await demoFixture();
   let pid: number | undefined;
   const config = { ...f.config, dataDir: join(f.directory, "daemon"), port: await freePort(), model: undefined };

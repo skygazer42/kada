@@ -27,6 +27,7 @@ try {
     console.log("\n默认 run 先准备待确认说明；在 chat 中 /attach 后确认。只有已有明确授权时使用 run --yes 或聊天 /run，沿用配置预算直接执行。");
     console.log("\n记忆审阅与事件入口（npm run harness -- …）\n  memory capture|review [on|off] --workspace 路径\n  memory candidates|accept 候选ID|reject 候选ID --workspace 路径\n  routines event 规则ID event.json");
     console.log(`\n个人助手入口（npm run harness -- …）：\n  memory list|edit ID 内容|forget ID|used 任务ID\n  tasks --filter pending|running|delivered\n  inbox [read 通知ID]\n  files 任务ID | files open 任务ID 编号\n  model list [provider] [--workspace 路径] | model check provider modelId\n  model select provider modelId [--workspace 路径] | model clear --workspace 路径\n  skills list|enable 名称|disable 名称 --workspace 路径\n  skills rollback 名称 版本 | skills capture 任务ID 目录\n  mcp list|add 配置.json|test ID|enable ID revision 工具…|disable ID\n  routines list|history ID [--task-status]|add 规则.json|update ID 规则.json\n  routines run ID [请求ID] | routines pause|resume|cancel ID\n  remote list|pair 账户ID 设备ID|revoke 账户ID 设备ID\n  computer status|takeover|return\n\nrun --skills 名称,名称@版本 可固定所选方法。空字符串表示不选方法。`);
+    console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
   } else if (command === "chat") {
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
@@ -72,7 +73,7 @@ try {
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
-  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks'].includes(command)) {
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items'].includes(command)) {
     const {ensureDaemon} = await import('./daemon.js');
     await ensureDaemon(config,args.values.config);
     const action = id ?? 'list';
@@ -87,6 +88,17 @@ try {
     };
     let result:unknown;
     if (command === 'tasks') result = await request('/v1/tasks?filter='+encodeURIComponent(args.values.filter ?? 'all'));
+    else if (command === 'work-items') {
+      const path = '/v1/work-items';
+      if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));
+      else if (action === 'add') result = await request(path, 'POST', await json(rest[0]));
+      else if (action === 'edit') result = await request(path + '/' + segment(rest[0]), 'PATCH', await json(rest[1]));
+      else if (action === 'runs') result = await request(path + '/' + segment(rest[0]) + '/runs');
+      else if (action === 'run') result = await request(path + '/' + segment(rest[0]) + '/runs', 'POST', {
+        revision: Number(rest[1]), requestId: rest[2] ?? randomUUID(), confirmed: args.values.yes,
+      });
+      else throw new Error('Use work-items list, add, edit, runs or run.');
+    }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {
       const project = args.values.workspace ? workspace : undefined;
@@ -121,8 +133,8 @@ try {
         result = action === 'project'
           ? await request(projectPath + '?workspace=' + encodeURIComponent(workspace))
           : await request(projectPath, 'PUT', { workspace, tools: action === 'project-clear' ? null : await json(rest[0]) });
-      } else if (['test','enable','disable'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',action === 'enable' ? {revision:rest[1],tools:rest.slice(2)} : {});
-      else throw new Error('Use mcp list, add, test, enable, disable, project, project-set or project-clear.');
+      } else if (['test','enable','disable','approval'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',['enable','approval'].includes(action) ? {revision:rest[1],tools:rest.slice(2)} : {});
+      else throw new Error('Use mcp list, add, test, enable, disable, approval, project, project-set or project-clear.');
     } else if (command === 'routines') {
       if (action === 'list') result = await request('/v1/routines');
       else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences'+(args.values['task-status'] ? '?includeTaskStatus=true' : ''));

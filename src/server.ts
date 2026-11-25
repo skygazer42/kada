@@ -148,14 +148,27 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           return send(200, { tools: await runtime.mcp.setProjectTools(workspace, tools) });
         }
       }
-      const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable)$/.exec(url.pathname);
+      const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable|approval)$/.exec(url.pathname);
       if (mcp && req.method === 'POST') {
         const id = decodeURIComponent(mcp[1]!);
         if (mcp[2] === 'test') return send(200,await runtime.mcp.test(id));
         if (mcp[2] === 'disable') return send(200,await runtime.mcp.disable(id));
         const input = await body(req);
         if (!Array.isArray(input.tools) || !input.tools.every(tool => typeof tool === 'string') || typeof input.revision !== 'string') throw new Error('Enable the displayed tools with their tested revision.');
+        if (mcp[2] === 'approval') return send(200, await runtime.mcp.setApproval(id, input.tools, input.revision));
         return send(200,await runtime.mcp.enable(id,input.tools,input.revision));
+      }
+      if (url.pathname === '/v1/work-items') {
+        if (req.method === 'GET') return send(200, await runtime.workItems.list(url.searchParams.get('workspace')));
+        if (req.method === 'POST') return send(201, await runtime.workItems.create(await body(req)));
+      }
+      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(\/runs)?$/.exec(url.pathname);
+      if (workItem) {
+        const id = workItem[1]!;
+        if (workItem[2]) {
+          if (req.method === 'GET') return send(200, await runtime.workItems.runs(id));
+          if (req.method === 'POST') return send(201, await runtime.workItems.run(id, await body(req)));
+        } else if (req.method === 'PATCH') return send(200, await runtime.workItems.update(id, await body(req)));
       }
       if (url.pathname === '/v1/routines') {
         if (req.method === 'GET') return send(200,await runtime.routines.list());
@@ -226,6 +239,21 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.mode !== undefined && input.mode !== "chat") throw new Error("mode must be chat when supplied");
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
         return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined }));
+      }
+      const childAnswer = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/questions\/(\d+)\/answer$/.exec(url.pathname);
+      if (childAnswer && req.method === "POST") {
+        const { requestId, answer } = await body(req);
+        if (typeof requestId !== "string" || typeof answer !== "string") throw new Error("Provide requestId and answer strings.");
+        return send(200, await runtime.answerChildQuestion(childAnswer[1]!, Number(childAnswer[2]), childAnswer[3]!, requestId, answer));
+      }
+      const approvalRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/approvals(?:\/(\d+)\/(allow|deny))?$/.exec(url.pathname);
+      if (approvalRoute) {
+        if (req.method === 'GET' && !approvalRoute[2]) return send(200, (await runtime.status(approvalRoute[1]!)).approvals);
+        if (req.method === 'POST' && approvalRoute[2]) {
+          const { digest } = await body(req);
+          if (typeof digest !== 'string') throw new Error('Provide the displayed action digest.');
+          return send(200, await runtime.decideApproval(approvalRoute[1]!, approvalRoute[2], approvalRoute[3] as 'allow' | 'deny', digest));
+        }
       }
       const match = /^\/v1\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|cancel|messages|confirm|view|memory))?$/.exec(url.pathname);
       if (!match) return send(404, { error: "Not found" });

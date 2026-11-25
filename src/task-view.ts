@@ -22,6 +22,9 @@ export function taskView(status: TaskStatus) {
     progress: { steps: goal?.plan ?? [], tools: status.activeTools },
     skills: skillRecords(status),
     delegations:status.delegations,
+    approvals: status.approvals.map(({ arguments: args, ...approval }) => ({
+      ...approval, argumentsPreview: JSON.stringify(args, null, 2),
+    })),
     delivery: status.status === "completed" && goal?.candidate ? {
       summary: goal.candidate.summary, artifacts: goal.candidate.artifacts,
       verification: verificationText(status), assumptions: goal.brief?.assumptions ?? [],
@@ -38,11 +41,13 @@ export function taskGroup(status: TaskStatus['status']) {
 
 export function taskHandoff(status:TaskStatus) {
   const goal = status.goal;
-  const group = taskGroup(status.status);
+  const child = status.status === "running" ? status.delegations.find(item => item.status === "waiting_input") : undefined;
+  const group = child ? "pending" : taskGroup(status.status);
   const step = goal?.plan.find(step => step.status === 'running')?.title;
-  const summary = group === 'pending' ? goal?.question ?? goal?.reason ?? (status.status === 'awaiting_confirmation' ? '等待确认任务说明和预算' : status.status)
+  const question = goal?.question ?? child?.question?.text ?? null;
+  const summary = group === 'pending' ? question ?? goal?.reason ?? (status.status === 'awaiting_confirmation' ? '等待确认任务说明和预算' : status.status)
     : goal?.candidate?.summary ?? step ?? (status.interaction === 'chat' ? '普通对话' : '执行目标');
-  return {group,summary:summary.slice(0,2000),question:goal?.question ?? null,step:step ?? null,
+  return {group,summary:summary.slice(0,2000),question,step:step ?? null,
     budget:{totalTokens:status.budget.totalTokens,estimatedCostUsd:status.budget.priceKnown ? status.budget.estimatedCostUsd : null,costLimit:status.budget.costLimit},
     artifacts:status.status === 'completed' ? goal?.candidate?.artifacts ?? [] : []};
 }

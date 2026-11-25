@@ -91,6 +91,26 @@ npm run harness -- mcp project-clear --workspace E:/project
 
 项目可以从全局已启用的工具中选择一个子集。`tools.json` 格式为 `[{"id":"local-tools","tool":"工具名"}]`，空数组关闭该项目新任务的所有 MCP 工具。`project-clear` 恢复继承全局设置。
 
+已启用的工具可要求逐次审批。任务停在待答状态后，用 `/approvals` 查看参数、摘要和有效期，再用 `/allow 动作ID` 或 `/deny 动作ID` 答复。批准绑定已展示的动作，断线后重发同一个决定会查询原回执。执行已派发但回执丢失时，任务会报告结果未知。
+
+```powershell
+npm run harness -- mcp approval local-tools 当前revision 工具名
+```
+
+## 项目工作项
+
+工作项保存项目范围、标题、目标和修订号。用一个工作项可以多次执行同一个项目任务，每次运行记录启动时采用的修订，原任务可以继续接回。`item.json` 包含 `workspace`、`title` 和 `objective`。编辑时用 `edit.json` 传入当前 `revision` 和要修改的字段。
+
+```powershell
+npm run harness -- work-items add item.json
+npm run harness -- work-items list --workspace E:/project
+npm run harness -- work-items edit 工作项ID edit.json
+npm run harness -- work-items run 工作项ID 1 本次请求ID
+npm run harness -- work-items runs 工作项ID
+```
+
+新运行先准备任务说明和预算。已有明确授权时可附加 `--yes`。断线后用同一请求 ID 和原修订重试，返回原任务。
+
 ## 提醒与例行任务
 
 单次提醒可直接用聊天 `/remind`，规则可通过 JSON 管理。每日、每周保存明确时区与补跑政策：
@@ -160,7 +180,7 @@ npm run harness -- remote revoke owner phone
 
 配对返回一次性展示的设备令牌，在 `/remote` 页面输入。设备只访问自己的会话；daemon 管理令牌不会提供给手机。每个会话使用独立工作区和项目边界。附件每条消息最多 4 个、每个 5 MiB，输入和下载核对 SHA-256。已受理消息通过原请求身份查询，中断状态保留原请求。
 
-会话列表把待处理会话排在前面，并显示待答问题、等待原因和交付状态。连接、回到页面或点击 **Refresh** 都会更新列表。展开 **Task history** 可查看原会话中的请求补充、确认和交付阶段。
+从 **Pending work** 直接打开本设备待处理的原会话。会话下拉列表也将待处理会话排在前面，并显示待答问题、等待原因和交付状态。连接、回到页面或点击 **Refresh** 都会更新列表。展开 **Task history** 可查看原会话中的请求补充、确认和交付阶段。
 
 打开会话时加载完整历史，之后使用 Pi 条目游标接收新增消息和进度，同时刷新任务状态和回执。临时断线后从最后收到的位置继续读取，切换会话或游标失效后重新同步。
 
@@ -200,6 +220,8 @@ npm run test:computer:browser -- --live --command C:/path/to/agent-browser-win32
 任务状态与 `/v1/tasks/:id/view` 的 `delegations` 显示 Pi 子会话职责、状态、结果目录与用量。接回任务后，主 Agent 可通过 `task_status` 查询已有子任务和原结果。常规响应显示完整用户要求、待办和简要失败信息，完整确认说明与证据可按需读取。任务总用量已包含子会话。
 
 已授权的本地任务可通过 `delegate_background` 启动一批子任务，收到回执后继续独立工作。子任务使用 Pi 原生本地文件和终端工具。结果就绪后，主会话会收到一次提示，读取结果后再交付。
+
+后台子任务需要用户补充信息时，原任务会进入终端的 `/tasks pending` 列表。用 `/attach 任务ID` 查看问题，再用 `/reply-child 子会话ID 问题ID 答复` 将回复送回原子会话。其他子任务可以继续执行，主任务等待这一批结果再交付。
 
 ## 验证
 
