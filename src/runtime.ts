@@ -1023,11 +1023,12 @@ export class LocalRuntime {
         }
         return { activeTools: tools, interruptibleChildTools: interruptible };
       }, ctx) : { activeTools: [], interruptibleChildTools: [] };
-      const remoteControls = meta.remotePolicy === "workspace" ? await this.remoteTaskControls(active, meta, status, goal) : [];
+      const remotelyControlled = meta.remotePolicy === "workspace" || (!meta.remotePolicy && Boolean(meta.workItem));
+      const remoteControls = remotelyControlled ? await this.remoteTaskControls(active, meta, status, goal) : [];
       const approvals = meta.remotePolicy ? [] : await approvalViews(active.harness);
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
         workItemAnswerVersion: workItemAnswerVersion(meta, goal),
-        remoteControls, remoteControlVersion: meta.remotePolicy === "workspace" ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
+        remoteControls, remoteControlVersion: remotelyControlled ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
         activeTools, interruptibleChildTools, delegations, approvals,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
@@ -1249,12 +1250,14 @@ export class LocalRuntime {
     return [];
   }
   private remoteControlVersion(meta: TaskMeta, status: string, submissionId?: number, goal?: GoalState): string {
-    return createHash("sha256").update(JSON.stringify([meta.id, meta.remoteControlRevision, status, submissionId, goal?.revision])).digest("hex");
+    return createHash("sha256").update(JSON.stringify([meta.id, meta.remoteControlRevision, status, submissionId, goal?.revision, goal?.epoch])).digest("hex");
   }
-  async controlRemoteTask(id: string, workspace: string, action: RemoteTaskControl, version: string): Promise<void> {
+  async controlRemoteTask(id: string, workspace: string | undefined, action: RemoteTaskControl, version: string): Promise<void> {
     await this.changes.run(async () => {
       const meta = await this.metadata(id);
-      if (meta.remotePolicy !== "workspace" || meta.workspace !== workspace) throw new TaskConflictError("The original task is unavailable.");
+      if (workspace === undefined ? meta.remotePolicy !== undefined || !meta.workItem : meta.remotePolicy !== "workspace" || meta.workspace !== workspace) {
+        throw new TaskConflictError("The original task is unavailable.");
+      }
       const active = await this.open(meta, false);
       const { status, goal, submission } = await this.taskState(active, meta);
       if (version !== this.remoteControlVersion(meta, status, submission?.id, goal) || !(await this.remoteTaskControls(active, meta, status, goal)).includes(action)) {
@@ -1275,7 +1278,7 @@ export class LocalRuntime {
     });
   }
   private async pauseTask(meta: TaskMeta): Promise<void> {
-    if (meta.remotePolicy === "workspace") meta.remoteControlRevision = randomUUID();
+    if (meta.remotePolicy === "workspace" || meta.workItem) meta.remoteControlRevision = randomUUID();
     meta.control = "paused";
     await atomicJson(this.metaFile(meta.id), meta);
     await this.closeTask(meta.id);
@@ -1301,7 +1304,7 @@ export class LocalRuntime {
         catch(error) {meta.initializationError=previous;await this.closeTask(id);throw error;}
       }
       delete meta.remotePaused;
-      if (meta.remotePolicy === "workspace") meta.remoteControlRevision = randomUUID();
+      if (meta.remotePolicy === "workspace" || meta.workItem) meta.remoteControlRevision = randomUUID();
       meta.control = "active"; meta.deadlineAt = Date.now() + (meta.maxDurationMs ?? this.config.maxDurationMs);
       await atomicJson(this.metaFile(id), meta);
       if (await this.goalState(active)) {

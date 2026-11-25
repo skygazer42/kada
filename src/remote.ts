@@ -22,6 +22,7 @@ export interface RemoteDevice {
   sharedApprovals?: SharedApproval[];
   sharedWorkItems?: string[];
   sharedWorkItemReplies?: string[];
+  sharedWorkItemControls?: string[];
 }
 
 export interface RemoteOptions {
@@ -704,13 +705,13 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       const { pairingId, tokenHash, ...scope } = await authenticate(request);
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
-      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(\/answers)?)?)?$/.exec(route);
+      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(?:\/(answers|child-answers|control))?)?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true } : {}) });
       } else if (options.sharedDevices && workItem) {
-        const [, id, runId, answers] = workItem;
-        if (method !== (answers ? "POST" : "GET")) throw new HttpError(405, "This method is unavailable for shared work items.");
-        const input = answers ? await json(request) : undefined;
+        const [, id, runId, action] = workItem;
+        if (method !== (action ? "POST" : "GET")) throw new HttpError(405, "This method is unavailable for shared work items.");
+        const input = action ? await json(request) : undefined;
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const grants = device.sharedWorkItems ?? [];
           if (id === undefined) {
@@ -724,8 +725,26 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             });
             if (meta.workItem?.id !== id) throw new HttpError(404, "Shared work item run not found.");
             const canReply = device.sharedWorkItemReplies?.includes(id);
+            const canControl = device.sharedWorkItemControls?.includes(id);
             if (input) {
+              if (action === "control") {
+                if (!canControl) throw new HttpError(403, "The host has not shared control access to this work item.");
+                const { action: control, version } = input;
+                if ((control !== "pause" && control !== "continue" && control !== "cancel") || typeof version !== "string" || !shaPattern.test(version) ||
+                  Object.keys(input).some(key => !["action", "version"].includes(key))) throw new HttpError(400, "Provide an action and the displayed control version.");
+                await runtime.controlRemoteTask(runId, undefined, control, version);
+                return { updated: true };
+              }
               if (!canReply) throw new HttpError(403, "The host has not shared reply access to this work item.");
+              if (action === "child-answers") {
+                const { childId, questionId, requestId, answer } = input;
+                if (typeof childId !== "number" || typeof questionId !== "string" || typeof requestId !== "string" || !idPattern.test(requestId) ||
+                  typeof answer !== "string" || answer.includes("\0") || Object.keys(input).some(key => !["childId", "questionId", "requestId", "answer"].includes(key))) {
+                  throw new HttpError(400, "Provide a child, question, request ID and answer.");
+                }
+                await runtime.answerChildQuestion(runId, childId, questionId, digest(JSON.stringify(["shared-child", pairingId, requestId])), answer);
+                return { childId, questionId, requestId };
+              }
               const { requestId, answer, version } = input;
               if (typeof requestId !== "string" || !idPattern.test(requestId) || typeof answer !== "string" ||
                 !answer.trim() || answer.length > 32_000 || answer.includes("\0") || typeof version !== "string" || !shaPattern.test(version) ||
@@ -737,7 +756,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             }
             const run = await runtime.status(runId);
             const childQuestions = run.status === "running" ? run.delegations.flatMap(child => child.question
-              ? [{ name: child.name, text: child.question.text }] : []) : [];
+              ? [{ name: child.name, text: child.question.text,
+                ...(canReply ? { childId: child.conversationId, questionId: child.question.id } : {}) }] : []) : [];
             return {
               id: run.id, revision: meta.workItem.revision, objective: run.objective, status: run.status,
               reason: run.goal?.reason ?? run.initializationError ?? null, question: run.goal?.question ?? null,
@@ -745,6 +765,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               steps: (run.goal?.plan ?? []).map(({ id, title, status }) => ({ id, title, status })),
               childQuestions,
               answerVersion: canReply ? run.workItemAnswerVersion : null,
+              controls: canControl ? run.remoteControls : [], controlVersion: canControl ? run.remoteControlVersion : null,
             };
           }
           const { title, revision, updatedAt, objective } = await runtime.workItems.get(id);

@@ -178,6 +178,7 @@ let workItemVersion = 0;
 let selectedWorkItem = "";
 let selectedWorkItemRun = "";
 const workItemAnswerForms = new Map();
+const workItemControlRequests = new Set();
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -406,6 +407,7 @@ function selectWorkItem(id) {
 function clearWorkItems() {
   workItemsVersion++;
   workItemAnswerForms.clear();
+  workItemControlRequests.clear();
   workItemList.replaceChildren();
   workItemsPanel.hidden = true;
   selectWorkItem("");
@@ -529,27 +531,66 @@ async function refreshWorkItemRun(workItemId, runId, panel, currentWorkItem) {
     if (note) element("p", note, panel);
   }
   presentSteps(run.steps, panel);
+  if (run.controls?.length) {
+    const controls = element("div", "", panel);
+    controls.className = "controls";
+    const labels = { pause: "Pause", continue: "Continue", cancel: "Cancel task" };
+    const device = identity;
+    const selected = () => device === identity && selectedWorkItem === workItemId && selectedWorkItemRun === runId;
+    for (const control of run.controls) {
+      const button = action(labels[control], controls, async () => {
+        if (device !== identity || !currentWorkItem() || selectedWorkItemRun !== runId || workItemControlRequests.has(runId) ||
+          control === "cancel" && !confirm("Cancel this task?")) return;
+        workItemControlRequests.add(runId);
+        for (const button of controls.children) button.disabled = true;
+        try {
+          await post("/work-items/" + encodeURIComponent(workItemId) + "/runs/" + encodeURIComponent(runId) + "/control", { action: control, version: run.controlVersion });
+        } catch (error) {
+          if (selected()) report(error);
+        } finally {
+          if (device === identity) {
+            workItemControlRequests.delete(runId);
+            if (selected()) await refreshWorkItems();
+          }
+        }
+      });
+      button.disabled = workItemControlRequests.has(runId);
+    }
+  }
+  const answerKeys = new Set();
   for (const question of run.childQuestions) {
     const entry = element("p", "", panel);
     element("strong", question.name, entry);
     element("span", " · " + question.text, entry);
+    if (question.childId !== undefined && question.questionId !== undefined) {
+      const key = runId + ":" + question.childId + ":" + question.questionId;
+      const form = workItemAnswerForms.get(key)?.form ?? workItemAnswerForm(workItemId, run, question);
+      workItemAnswerForms.set(key, { form });
+      answerKeys.add(key);
+      panel.append(form);
+    }
   }
   if (run.answerVersion) {
     const previous = workItemAnswerForms.get(runId);
     const form = previous?.version === run.answerVersion ? previous.form : workItemAnswerForm(workItemId, run);
     workItemAnswerForms.set(runId, { version: run.answerVersion, form });
+    answerKeys.add(runId);
     panel.append(form);
-  } else workItemAnswerForms.delete(runId);
+  }
+  if (run.status !== "paused") for (const key of workItemAnswerForms.keys()) {
+    if ((key === runId || key.startsWith(runId + ":")) && !answerKeys.has(key)) workItemAnswerForms.delete(key);
+  }
 }
 
-function workItemAnswerForm(workItemId, run) {
+function workItemAnswerForm(workItemId, run, child) {
   const device = identity;
+  const key = child ? run.id + ":" + child.childId + ":" + child.questionId : run.id;
   const form = document.createElement("form");
-  const label = element("label", "Answer this run", form);
+  const label = element("label", child ? "Answer " + child.name : "Answer this run", form);
   const input = element("textarea", "", form);
-  input.id = "work-item-answer-" + run.id;
+  input.id = "work-item-answer-" + key;
   input.required = true;
-  input.maxLength = 32000;
+  input.maxLength = child ? 4000 : 32000;
   label.htmlFor = input.id;
   const submit = element("button", "Send answer", form);
   submit.type = "submit";
@@ -559,14 +600,15 @@ function workItemAnswerForm(workItemId, run) {
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (identity !== device || selectedWorkItem !== workItemId || selectedWorkItemRun !== run.id ||
-      workItemAnswerForms.get(run.id)?.form !== form || submit.disabled || !form.parentNode) return;
+      workItemAnswerForms.get(key)?.form !== form || submit.disabled || !form.parentNode) return;
     if (!input.value.trim()) { feedback.textContent = "Enter your answer."; return; }
-    pending ??= { requestId: crypto.randomUUID(), answer: input.value, version: run.answerVersion };
+    pending ??= { requestId: crypto.randomUUID(), answer: input.value,
+      ...(child ? { childId: child.childId, questionId: child.questionId } : { version: run.answerVersion }) };
     submit.disabled = true;
     input.readOnly = true;
     feedback.textContent = "Sending answer…";
     try {
-      await post("/work-items/" + encodeURIComponent(workItemId) + "/runs/" + encodeURIComponent(run.id) + "/answers", pending);
+      await post("/work-items/" + encodeURIComponent(workItemId) + "/runs/" + encodeURIComponent(run.id) + (child ? "/child-answers" : "/answers"), pending);
     } catch (error) {
       if (identity !== device) return;
       if (error instanceof RequestError && error.status < 500) {

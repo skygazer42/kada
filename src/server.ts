@@ -167,7 +167,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'GET') return send(200, await runtime.workItems.list(url.searchParams.get('workspace')));
         if (req.method === 'POST') return send(201, await runtime.workItems.create(await body(req)));
       }
-      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|share|unshare|share-replies|unshare-replies))?$/.exec(url.pathname);
+      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|share|unshare|share-replies|unshare-replies|share-controls|unshare-controls))?$/.exec(url.pathname);
       if (workItem) {
         const id = workItem[1]!;
         if (workItem[2] === 'runs') {
@@ -176,9 +176,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         } else if (workItem[2] && req.method === 'POST') {
           const { accountId, deviceId } = await body(req);
           if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide accountId and deviceId.');
-          const shared = workItem[2] === 'share' || workItem[2] === 'share-replies';
+          const shared = workItem[2].startsWith('share');
           if (shared) await runtime.workItems.get(id);
-          return send(200, await devices.setSharedWorkItem(accountId, deviceId, id, shared, workItem[2].endsWith('-replies')));
+          const access = workItem[2].endsWith('-replies') ? 'replies' : workItem[2].endsWith('-controls') ? 'controls' : 'view';
+          return send(200, await devices.setSharedWorkItem(accountId, deviceId, id, shared, access));
         } else if (!workItem[2] && req.method === 'PATCH') return send(200, await runtime.workItems.update(id, await body(req)));
       }
       if (url.pathname === '/v1/routines') {

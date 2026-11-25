@@ -510,6 +510,95 @@ test("shared run answers preserve the original request on retry and leave chat d
   assert.match(visibleText(detail), /Running/);
 });
 
+test("shared child answers keep their draft through run controls and retry the same worker without changing chats", async () => {
+  const itemPath = workItemsUrl + "/" + workItemRow.id, runPath = itemPath + "/runs/original";
+  let state = "running", answered = false;
+  const replies: object[] = [], controls: object[] = [];
+  let allowCancel = false;
+  const device = harness(undefined, undefined, undefined, { request: () => Response.json([]), confirm: () => allowCancel }, (url, _bearer, init) => {
+    if (url === workItemsUrl) return Response.json([workItemRow]);
+    if (url === itemPath) return Response.json({ ...workItemRow, objective: "Work-item goal", runs: [{ id: "original", revision: 1, status: state }] });
+    if (url === runPath) return Response.json({ id: "original", revision: 1, status: state, objective: "Original run goal", steps: [],
+      childQuestions: state === "running" && !answered ? [{ name: "Currency worker", text: "Which currency?", childId: 2, questionId: "7" }] : [],
+      controls: state === "running" ? ["pause", "cancel"] : state === "paused" ? ["continue", "cancel"] : [],
+      controlVersion: (state === "paused" ? "b" : "a").repeat(64),
+    });
+    const body = JSON.parse(init.body as string);
+    if (url === runPath + "/control") {
+      controls.push(body);
+      state = body.action === "pause" ? "paused" : body.action === "continue" ? "running" : "cancelled";
+      return Response.json({ updated: true });
+    }
+    assert.equal(url, runPath + "/child-answers");
+    replies.push(body);
+    if (replies.length === 1) throw new TypeError("Child answer response lost");
+    answered = true;
+    return Response.json({ childId: 2, questionId: "7", requestId: body.requestId });
+  });
+  const page = await device.open();
+  await page.type("Keep my chat draft");
+  await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
+  const detail = page.field("work-item-detail");
+  await detail.children[2]!.children[0]!.children[0]!.trigger("click");
+  const panel = () => detail.children[2]!.children[0]!.children.at(-1)!;
+  const button = (label: string) => panel().children.flatMap(row => row.children).find(node => node.textContent === label);
+  const form = panel().children.at(-1)!;
+  assert.equal(form.children[0]?.textContent, "Answer Currency worker");
+  assert.ok(form.children[1], "A shared child question needs an answer input.");
+  const input = form.children[1]!;
+  input.value = "Use USD.";
+  assert.ok(button("Pause"), "A separately authorized run needs a pause action.");
+  await button("Pause")!.trigger("click");
+  assert.deepEqual(controls[0], { action: "pause", version: "a".repeat(64) });
+  await button("Continue")!.trigger("click");
+  assert.deepEqual(controls[1], { action: "continue", version: "b".repeat(64) });
+  assert.equal(panel().children.at(-1), form);
+  assert.equal(input.value, "Use USD.");
+  await form.trigger("submit");
+  assert.match(visibleText(form), /Retry answer/);
+  await page.field("refresh-conversations").trigger("click");
+  assert.equal(panel().children.at(-1), form);
+  await form.trigger("submit");
+  assert.equal(replies.length, 2);
+  assert.deepEqual(replies[1], replies[0]);
+  assert.deepEqual(replies[0], { childId: 2, questionId: "7", requestId: (replies[0] as { requestId: string }).requestId, answer: "Use USD." });
+  assert.equal(page.field("prompt").value, "Keep my chat draft");
+  await button("Cancel task")!.trigger("click");
+  assert.equal(controls.length, 2);
+  allowCancel = true;
+  await button("Cancel task")!.trigger("click");
+  assert.match(visibleText(detail), /Cancelled/);
+  assert.equal(page.field("prompt").value, "Keep my chat draft");
+});
+
+test("refreshing a shared run during control delivery unlocks its latest controls after the response", async () => {
+  const itemPath = workItemsUrl + "/" + workItemRow.id, runPath = itemPath + "/runs/original";
+  const requested = Promise.withResolvers<void>(), response = Promise.withResolvers<Response>();
+  let paused = false;
+  const page = await harness(undefined, undefined, undefined, undefined, (url) => {
+    if (url === workItemsUrl) return Response.json([workItemRow]);
+    if (url === itemPath) return Response.json({ ...workItemRow, objective: "Work-item goal", runs: [{ id: "original", revision: 1, status: paused ? "paused" : "running" }] });
+    if (url === runPath) return Response.json({ id: "original", revision: 1, status: paused ? "paused" : "running", objective: "Original run goal", steps: [], childQuestions: [],
+      controls: paused ? ["continue", "cancel"] : ["pause", "cancel"], controlVersion: "a".repeat(64),
+    });
+    assert.equal(url, runPath + "/control");
+    requested.resolve();
+    return response.promise;
+  }).open();
+  await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
+  const detail = page.field("work-item-detail");
+  await detail.children[2]!.children[0]!.children[0]!.trigger("click");
+  const buttons = () => detail.children[2]!.children[0]!.children.at(-1)!.children.flatMap(row => row.children);
+  const stopping = buttons().find(button => button.textContent === "Pause")!.trigger("click");
+  await requested.promise;
+  await page.field("refresh-conversations").trigger("click");
+  assert.equal(buttons().find(button => button.textContent === "Pause")?.disabled, true);
+  paused = true;
+  response.resolve(Response.json({ updated: true }));
+  await stopping;
+  assert.equal(buttons().find(button => button.textContent === "Continue")?.disabled, false);
+});
+
 test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {
   const initial = { role: "user", sequence: 1, text: "Original request" };
   const reply = { role: "assistant", sequence: 4, text: "Original reply" };

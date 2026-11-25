@@ -7,7 +7,7 @@ import test, { type TestContext } from "node:test";
 import { WorkItems, type WorkItemLink, type WorkItemRun } from "../src/work-items.js";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { serve } from "../src/server.js";
-import { scriptedFixture, until } from "./helpers.js";
+import { hasTool, scriptedFixture, until } from "./helpers.js";
 
 async function directories(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), "kada-work-items-"));
@@ -142,6 +142,7 @@ test("a paired phone reads shared runs and answers only their authorized current
     assert.deepEqual(await opened.json(), {
       id: waiting.id, revision: item.revision, objective: item.objective, status: "waiting_user",
       reason: "Inventory date missing", question: "Which date should I use?", summary: null, steps: [], childQuestions: [], answerVersion: null,
+      controls: [], controlVersion: null,
     });
     assert.equal((await request(tablet, runDetails)).status, 404);
     assert.equal((await request(phone, remote + "/" + privateItem.id + "/runs/" + waiting.id)).status, 404);
@@ -214,6 +215,117 @@ test("a paired phone reads shared runs and answers only their authorized current
     assert.equal((await request(replacement, runDetails)).status, 404);
     await owner(share, "POST", recipient);
     assert.equal((await request(replacement, answers, "POST", answer)).status, 403);
+  } finally { await server.close(); }
+});
+
+test("shared run controls preserve Pi state and budget while child answers target the original worker", async t => {
+  const { directory, workspace } = await directories(t);
+  let answers = 0;
+  const tool = (name: string, args: Record<string, unknown>) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  const fixture = await scriptedFixture(context => {
+    const users = context.messages.filter(message => message.role === "user");
+    if (hasTool(context, "delegation_ask")) {
+      if (users.some(message => message.content === "Use USD.")) { answers++; return fauxAssistantMessage("Currency is USD."); }
+      return tool("delegation_ask", { question: "Which currency?" });
+    }
+    if (users.some(message => String(message.content).startsWith("Background delegation finished."))) {
+      return tool("task_submit", { summary: "Currency checked.", artifacts: [] });
+    }
+    if (context.messages.some(message => message.role === "toolResult" && message.toolName === "delegate_background")) {
+      return fauxAssistantMessage("Waiting for the worker.");
+    }
+    return tool("delegate_background", { tasks: [{ name: "Currency worker", instructions: "Check the currency." }] });
+  }, { maxDurationMs: 90_000 });
+  t.after(() => fixture.close());
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const open = () => serve({ ...fixture.settings, port, dataDir: directory }, { models: fixture.models });
+  let server = await open();
+  try {
+    const admin = (await readFile(join(directory, "token"), "utf8")).trim();
+    const request = (token: string, path: string, method = "GET", value?: object) => fetch("http://127.0.0.1:" + port + path, {
+      method, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: value === undefined ? undefined : JSON.stringify(value),
+    });
+    const owner = (path: string, value: object) => request(admin, path, "POST", value);
+    const pair = async (deviceId: string) => (await (await owner("/v1/remote/devices", { accountId: "owner", deviceId })).json()).token;
+    const phone = await pair("phone"), tablet = await pair("tablet");
+    const recipient = { accountId: "owner", deviceId: "phone" };
+    const item = await server.runtime.workItems.create({ workspace, title: "Currency", objective: "Check the currency" });
+    const run = await server.runtime.workItems.run(item.id, { revision: item.revision, requestId: "currency", confirmed: true });
+    const before = await until(() => server.runtime.status(run.id), status => Boolean(status.delegations[0]?.question));
+    const path = "/remote/api/work-items/" + item.id + "/runs/" + run.id;
+    const permissions = "/v1/work-items/" + item.id;
+    const view = async () => (await (await request(phone, path)).json());
+    assert.equal((await owner(permissions + "/share-controls", recipient)).status, 409);
+    await owner(permissions + "/share", recipient);
+    assert.deepEqual((await view()).controls, []);
+    assert.deepEqual((await view()).childQuestions, [{ name: "Currency worker", text: "Which currency?" }]);
+    const child = before.delegations[0]!;
+    const reply = { childId: child.conversationId, questionId: child.question!.id, requestId: "currency-answer", answer: "Use USD." };
+    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 403);
+    await owner(permissions + "/share-replies", recipient);
+    assert.deepEqual((await view()).childQuestions, [{ name: "Currency worker", text: "Which currency?", childId: reply.childId, questionId: reply.questionId }]);
+    assert.equal((await request(phone, path + "/control", "POST", { action: "pause", version: "0".repeat(64) })).status, 403);
+    assert.equal((await request(phone, permissions + "/share-controls", "POST", recipient)).status, 401);
+    assert.equal((await owner(permissions + "/share-controls", recipient)).status, 200);
+    const initial = await view();
+    assert.deepEqual(initial.controls, ["pause", "cancel"]);
+    const pause = { action: "pause", version: initial.controlVersion };
+    assert.equal((await request(tablet, path + "/control", "POST", pause)).status, 404);
+    assert.equal((await request(phone, path + "/control", "POST", { ...pause, action: "resume" })).status, 400);
+    const rival = await Promise.all([request(phone, path + "/control", "POST", pause), request(phone, path + "/control", "POST", pause)]);
+    assert.deepEqual(rival.map(response => response.status).sort(), [200, 409]);
+    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 409);
+    await server.close();
+    server = await open();
+    const paused = await view();
+    assert.equal(paused.status, "paused");
+    assert.deepEqual(paused.controls, ["continue", "cancel"]);
+    await owner(permissions + "/unshare-controls", recipient);
+    assert.equal((await request(phone, path + "/control", "POST", { action: "continue", version: paused.controlVersion })).status, 403);
+    await owner(permissions + "/share-controls", recipient);
+    assert.equal((await request(phone, path + "/control", "POST", { action: "continue", version: paused.controlVersion })).status, 200);
+    const continued = await until(() => server.runtime.status(run.id), status => Boolean(status.delegations[0]?.question));
+    assert.equal(continued.deadlineAt, before.deadlineAt);
+    assert.deepEqual(continued.budget.tokenLimit, before.budget.tokenLimit);
+    assert.deepEqual(continued.budget.costLimit, before.budget.costLimit);
+    assert.equal(continued.goal?.epoch, before.goal?.epoch);
+    assert.equal(continued.delegations[0]?.conversationId, child.conversationId);
+    assert.equal((await request(phone, path + "/control", "POST", pause)).status, 409);
+    assert.equal((await request(tablet, path + "/child-answers", "POST", reply)).status, 404);
+    assert.equal((await request(phone, path + "/child-answers", "POST", { ...reply, questionId: "999999" })).status, 404);
+    await owner(permissions + "/unshare-replies", recipient);
+    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 403);
+    await owner(permissions + "/share-replies", recipient);
+    clearInterval(server.runtime["timer"]);
+    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 200);
+    await server.close();
+    server = await open();
+    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 200);
+    assert.equal((await request(phone, path + "/child-answers", "POST", { ...reply, answer: "Use EUR." })).status, 409);
+    const final = await until(() => server.runtime.status(run.id), status => status.status === "completed");
+    assert.equal(answers, 1);
+    assert.equal(final.delegations[0]?.answer, "Currency is USD.");
+    assert.deepEqual((await view()).controls, []);
+    const next = await server.runtime.workItems.run(item.id, { revision: item.revision, requestId: "cancel-currency", confirmed: true });
+    await until(() => server.runtime.status(next.id), status => Boolean(status.delegations[0]?.question));
+    const nextPath = path.replace(run.id, next.id);
+    const nextView = await (await request(phone, nextPath)).json();
+    assert.equal((await request(phone, nextPath + "/control", "POST", { action: "cancel", version: nextView.controlVersion })).status, 200);
+    const cancelled = await server.runtime.status(next.id);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(cancelled.activeWorkerCount, 0);
+    assert.equal((await request(phone, nextPath + "/control", "POST", { action: "continue", version: nextView.controlVersion })).status, 409);
+    await server.runtime.pause(run.id);
+    assert.deepEqual((await view()).controls, []);
+    assert.equal((await request(phone, path + "/control", "POST", { action: "continue", version: (await view()).controlVersion })).status, 409);
+    await owner(permissions + "/unshare", recipient);
+    await owner(permissions + "/share", recipient);
+    assert.equal((await request(phone, path + "/control", "POST", pause)).status, 403);
+    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 403);
   } finally { await server.close(); }
 });
 
