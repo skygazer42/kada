@@ -20,6 +20,7 @@ export type GoalState = {
   epoch: number;
   objective: string;
   userMessages: string[];
+  lastUserAt?: number;
   phase: GoalPhase;
   brief?: TaskBrief;
   confirmation?: Confirmation;
@@ -66,6 +67,7 @@ function goalEvent(goal: GoalState, type: string, detail: string, workspace?: st
     ]).sort()
     : goal.candidate?.summary;
   const at = Date.now();
+  if (type === 'user_input' || type === 'confirmed') goal.lastUserAt = Math.max(goal.lastUserAt ?? 0, at);
   goal.events.push({ at, type, detail: detail.slice(0, 4000), revision:goal.revision,
     ...(type === 'completed' ? {resultHash:createHash('sha256').update(JSON.stringify(outputs ?? null)).digest('hex')} : {}) });
   if (goal.events.length > 200) goal.events.splice(0, goal.events.length - 200);

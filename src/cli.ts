@@ -31,6 +31,7 @@ try {
     console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
+    console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("\nMCP 账户登录（HTTP 定义中设置 oauth: true）\n  mcp login 连接ID\n打开返回的 authorizationUrl，完成后运行 mcp test，再按返回修订 enable 工具。mcp logout 连接ID 清除本机凭据并停用工具；服务端授权需在对应应用撤销。");
     console.log("预注册客户端可将 oauth 配为 { clientId, issuer, clientSecretEnv?, scope? }。clientSecretEnv 是 daemon 环境变量名；不在配置中填入 secret。issuer 必须与服务发现的授权服务器一致。");
     console.log("\nGitHub Issue Webhook：daemon 配置 githubWebhooks: [{ routineId, secretEnv }]，入口 POST /hooks/github/规则ID；JSON 原始正文按 X-Hub-Signature-256 验签。默认关闭，外部代理只转发该 Webhook 路径。");

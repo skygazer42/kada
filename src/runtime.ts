@@ -33,7 +33,7 @@ import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
 import { taskHandoff } from "./task-view.js";
-import { claudeProject } from './memory-sources.js';
+import { claudeProject, memoryProject } from './memory-sources.js';
 import { imageInput, inputImageExtension, type InputImage } from './input-images.js';
 import { approvalExtension, approvalViews, approvalReport, decideApproval, requestApproval, stopObsoleteApprovals, ApprovalError } from './approvals.js';
 import type { GithubIssue } from './github-routine-events.js';
@@ -146,7 +146,7 @@ export class LocalRuntime {
       }),
     });
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,taskOverview:async id => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
       try { return await this.taskOverview(id); }
       catch (error) {
         const cause = error as NodeJS.ErrnoException;
@@ -158,7 +158,7 @@ export class LocalRuntime {
       const task = await this.create(occurrence.objective,occurrence.workspace,occurrence.acceptance,{id:occurrence.taskId,budget:occurrence.budget,routineOccurrenceId:occurrence.id,notifyOnChange:occurrence.notifyOnChange,signal,
         ...(occurrence.event?.issue ? { routineIssue: occurrence.event.issue } : {})});
       if (task.control === 'budget_limited') return {status:'budget_exhausted'};
-      return {taskId:task.id,status:'started'};
+      return {taskId:task.id,status:'started',startedAt:task.createdAt};
     }});
     this.discovery = new LocalDiscovery(config.dataDir, options.discovery);
     this.timer = setInterval(() => {
@@ -237,6 +237,32 @@ export class LocalRuntime {
     });
   }
   async metadata(id: string): Promise<TaskMeta> { return readJson<TaskMeta>(this.metaFile(id)); }
+  async lastUserActivity(workspace: string): Promise<number | undefined> {
+    return this.changes.run(async () => {
+      const project = await memoryProject(workspace);
+      if (!project) throw new Error("The activity workspace must be an existing project directory.");
+      let latest: number | undefined;
+      for (const meta of await this.metadataList()) {
+        if (meta.remotePolicy || await memoryProject(meta.workspace) !== project) continue;
+        if (!meta.routineOccurrenceId) latest = Math.max(latest ?? 0, meta.createdAt);
+        const active = await this.open(meta, false), goal = await this.goalState(active);
+        if (goal?.lastUserAt !== undefined) latest = Math.max(latest ?? 0, goal.lastUserAt);
+        if (goal?.confirmation) latest = Math.max(latest ?? 0, goal.confirmation.at);
+        for (const event of goal?.events ?? []) if (event.type === "user_input") latest = Math.max(latest ?? 0, event.at);
+        if (goal && meta.entrypoint !== "chat") continue;
+        let cursor: Cursor | undefined;
+        do {
+          const page = await active.storage.scanSubmissions({ conversationId: active.root.id, order: "descending" }, 200, cursor, ctx);
+          for (const record of page.items) if (record.requestId?.startsWith("user:") && record.entry !== undefined) {
+            const entry = await active.harness.commit(tx => tx.entry(record.entry!), ctx);
+            for (const message of entry?.model ?? []) if (message.role === "user") latest = Math.max(latest ?? 0, message.timestamp);
+          }
+          cursor = page.next;
+        } while (cursor);
+      }
+      return latest;
+    });
+  }
   private async metadataList(): Promise<TaskMeta[]> {
     await mkdir(join(this.config.dataDir, "tasks"), { recursive: true, mode: 0o700 });
     const names = await readdir(join(this.config.dataDir, "tasks"));
@@ -969,7 +995,7 @@ export class LocalRuntime {
       const childQuestion = status === "running" && goal?.phase === "working"
         ? await firstChildQuestion(active.harness, active.root.id, goal, ctx) : undefined;
       return {
-        status, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null, childQuestion,
+        status, createdAt: meta.createdAt, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null, childQuestion,
         summary: status === "completed" ? goal?.candidate?.summary ?? null : null,
       };
     });

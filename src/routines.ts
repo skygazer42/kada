@@ -36,6 +36,7 @@ export type RoutineInput = {
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
   precheck?: { command: string[] } | { mcp: McpPrecheck };
+  activity?: { withinMinutes: number; minIntervalMinutes: number };
   event?: RoutineEvent;
 };
 
@@ -58,14 +59,15 @@ export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPoli
 };
 
 export type RoutineExecution =
-  | { status?: "started"; taskId: string }
+  | { status?: "started"; taskId: string; startedAt?: number }
   | { status: "notified" | "budget_exhausted" };
 
 type PrecheckResult =
   | { status: "changed" | "unchanged" | "pending"; sha256: string }
   | { status: "failed" | "interrupted"; detail: string };
+type ActivityResult = { status: "allowed" | "inactive" | "cooldown" | "failed"; checkedAt: number; lastUserAt?: number; lastStartedAt?: number };
 
-type TaskOverview = Awaited<ReturnType<LocalRuntime["taskOverview"]>>;
+type TaskOverview = Omit<Awaited<ReturnType<LocalRuntime["taskOverview"]>>, "createdAt"> & { createdAt?: number };
 type TaskState = TaskOverview["status"];
 type StartedOccurrence = { occurrenceId: string; taskId: string };
 
@@ -75,6 +77,8 @@ type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt" | "trigger" | "event
   detail?: string;
   timing?: RoutineTiming;
   precheck?: PrecheckResult;
+  activity?: ActivityResult;
+  startedAt?: number;
   blockedBy?: StartedOccurrence & { status: TaskState };
   eventFingerprint?: string;
 };
@@ -160,7 +164,7 @@ export type Routine = RoutineDefinition & {
 };
 
 type TimerId = Parameters<Harness["abortTask"]>[0];
-type Claim = RoutineOccurrence & { precheckResult?: PrecheckResult };
+type Claim = RoutineOccurrence & { precheckResult?: PrecheckResult; activityResult?: ActivityResult };
 type StoredRoutine = Routine & {
   timerId?: TimerId;
   claim?: Claim;
@@ -168,6 +172,7 @@ type StoredRoutine = Routine & {
   lastPrecheckSha256?: string;
   lastPrecheckScheduledAt?: string;
   lastStarted?: StartedOccurrence;
+  lastStartedAt?: number;
   firstSlotAfterResume?: string;
 };
 
@@ -176,6 +181,7 @@ export interface LocalRoutineOptions {
   execute(occurrence: RoutineOccurrence, signal: AbortSignal): Promise<RoutineExecution>;
   taskOverview?(taskId: string): Promise<TaskOverview | undefined>;
   mcp?: Pick<McpTools, "validatePrecheck" | "samplePrecheck">;
+  lastUserActivity?(workspace: string): Promise<number | undefined>;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
 }
@@ -205,7 +211,7 @@ function snapshot<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
-function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample, lastStarted: _lastStarted, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
+function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
@@ -271,7 +277,14 @@ function definition(input: RoutineInput): RoutineDefinition {
   if (budgetPolicy !== "pause" && budgetPolicy !== "skip") {
     throw new RoutineError(400, "A routine budget policy must be pause or skip.");
   }
-  const overlapPolicy = input.overlapPolicy;
+  const activity = input.activity;
+  if (activity !== undefined && (!activity || typeof activity !== "object" || Array.isArray(activity) ||
+    input.action !== "task" || !input.workspace || input.event !== undefined || ["once", "event"].includes(schedule.kind) ||
+    Object.keys(activity).some(key => !["withinMinutes", "minIntervalMinutes"].includes(key)) ||
+    ![activity.withinMinutes, activity.minIntervalMinutes].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 43_200))) {
+    throw new RoutineError(400, "An activity gate requires a recurring project task and minute limits from 1 to 43,200.");
+  }
+  const overlapPolicy = input.overlapPolicy ?? (activity ? "skip" : undefined);
   if (overlapPolicy !== undefined && (overlapPolicy !== "skip" || input.action !== "task" || schedule.kind === "once")) {
     throw new RoutineError(400, "The skip overlap policy requires a recurring task.");
   }
@@ -307,6 +320,7 @@ function definition(input: RoutineInput): RoutineDefinition {
     missedPolicy,
     budgetPolicy,
     ...(overlapPolicy ? { overlapPolicy } : {}),
+    ...(activity ? { activity: { withinMinutes: activity.withinMinutes, minIntervalMinutes: activity.minIntervalMinutes } } : {}),
     notifyOnChange: input.notifyOnChange ?? false,
     ...(input.event === undefined ? {} : { event: eventRule(input.event) }),
     ...(precheck ? { precheck } : {}),
@@ -339,7 +353,7 @@ function occurrenceFor(rule: StoredRoutine, at: number, requestKey?: string): Ro
   const scheduledAt = new Date(at).toISOString();
   const id = [rule.id, rule.revision, requestKey ?? scheduledAt].join("/");
   const taskId=taskIdFor(id);
-  const { action, objective, workspace, acceptance, budget, budgetPolicy, notifyOnChange, precheck } = rule;
+  const { action, objective, workspace, acceptance, budget, budgetPolicy, notifyOnChange, precheck, activity } = rule;
   const timing = requestKey ? undefined : routineTiming(rule.schedule, at);
   return {
     id, routineId: rule.id, revision: rule.revision, scheduledAt, taskId, action, objective, acceptance, budgetPolicy,
@@ -349,6 +363,7 @@ function occurrenceFor(rule: StoredRoutine, at: number, requestKey?: string): Ro
     ...(workspace ? { workspace } : {}),
     ...(budget ? { budget } : {}),
     ...(precheck ? { precheck } : {}),
+    ...(activity ? { activity } : {}),
   };
 }
 
@@ -359,6 +374,7 @@ function endSchedule(rule: StoredRoutine, status: "paused" | "completed" | "canc
 
 function recordStarted(rule: StoredRoutine, receipt: Receipt): StoredRoutine {
   const saved = { ...rule };
+  if (receipt.status === "started" && receipt.startedAt !== undefined) saved.lastStartedAt = Math.max(saved.lastStartedAt ?? 0, receipt.startedAt);
   if (rule.overlapPolicy === "skip" && receipt.status === "started" && receipt.taskId) {
     saved.lastStarted = { occurrenceId: receipt.id, taskId: receipt.taskId };
   }
@@ -440,9 +456,13 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         };
         let occurrence: RoutineOccurrence | undefined;
         let precheck: PrecheckResult | undefined;
+        let activity: ActivityResult | undefined;
         let newClaim = false;
         let previousTaskId: string | undefined;
-        const claimDue = (checked?: { taskId: string; status?: TaskState; failed?: true }) => runtime.commit(async (tx) => {
+        let checked: { taskId: string; status?: TaskState; createdAt?: number; failed?: true } | undefined;
+        let activityWorkspace: string | undefined;
+        let activitySample: { workspace: string; lastUserAt?: number; failed?: true } | undefined;
+        const claimDue = () => runtime.commit(async (tx) => {
           const { rules } = await tx.doc(routinesDoc);
           const rule = snapshot(rules[key]);
           if (!current(rule)) return completed;
@@ -450,6 +470,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           if (claim) {
             occurrence = { ...claim, notifyOnChange: claim.notifyOnChange ?? false };
             precheck = claim.precheckResult;
+            activity = claim.activityResult;
             return;
           }
           const now = runtime.now();
@@ -476,6 +497,10 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
                 await recordOccurrence(tx, runtime.conversationId, rule, failure, now);
                 return finish(rules, rule, failure, now);
               }
+              if (rule.activity && checked.createdAt !== undefined) {
+                rule.lastStartedAt = Math.max(rule.lastStartedAt ?? 0, checked.createdAt);
+                rules[key] = rule;
+              }
               const status = checked.status;
               if (status && !["completed", "answered", "cancelled", "failed", "budget_limited"].includes(status)) {
                 blockedBy = { ...rule.lastStarted, status };
@@ -491,25 +516,46 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             await recordOccurrence(tx, runtime.conversationId, rule, skipped, now);
             return finish(rules, rule, skipped, now);
           }
-          if (!manual) await recordOccurrence(tx,runtime.conversationId,rule,{id:due.id,scheduledAt:due.scheduledAt,status:'claimed',...(due.action==='task' ? {taskId:due.taskId} : {}),...(due.timing ? {timing:due.timing} : {})},now);
-          rules[key] = storeClaim(rule, due);
+          if (rule.activity && !manual) {
+            const cooling = rule.lastStartedAt !== undefined && now < rule.lastStartedAt + rule.activity.minIntervalMinutes * 60_000;
+            if (!cooling && activitySample?.workspace !== rule.workspace) { activityWorkspace = rule.workspace!; return; }
+            const lastUserAt = activitySample?.lastUserAt;
+            const recent = lastUserAt !== undefined && Number.isFinite(lastUserAt) && lastUserAt <= now && now - lastUserAt <= rule.activity.withinMinutes * 60_000;
+            activity = { status: cooling ? "cooldown" : activitySample?.failed ? "failed" : recent ? "allowed" : "inactive", checkedAt: now,
+              ...(lastUserAt === undefined ? {} : { lastUserAt }), ...(rule.lastStartedAt === undefined ? {} : { lastStartedAt: rule.lastStartedAt }) };
+            if (activity.status !== "allowed") {
+              const receipt: Receipt = { id: due.id, scheduledAt: due.scheduledAt, status: activity.status === "failed" ? "failed" : "skipped", activity,
+                detail: activity.status === "failed" ? "Could not read project user activity." : activity.status === "inactive" ? "No recent project user activity." : "The minimum run interval has not elapsed.",
+                ...(due.timing ? { timing: due.timing } : {}) };
+              await recordOccurrence(tx, runtime.conversationId, rule, receipt, now);
+              return finish(rules, rule, receipt, now);
+            }
+          }
+          if (!manual) await recordOccurrence(tx,runtime.conversationId,rule,{id:due.id,scheduledAt:due.scheduledAt,status:'claimed',...(due.action==='task' ? {taskId:due.taskId} : {}),...(due.timing ? {timing:due.timing} : {}),...(activity ? {activity} : {})},now);
+          rules[key] = storeClaim(rule, { ...due, ...(activity ? { activityResult: activity } : {}) });
           occurrence = due;
           newClaim = true;
         }, ctx);
         await claimDue();
         // Budget settlement can abort this timer before its queued task lookup runs.
-        while (previousTaskId && options.taskOverview && !runtime.signal.aborted) {
-          const taskId = previousTaskId;
-          previousTaskId = undefined;
-          let overview: TaskOverview | undefined;
-          try {
-            overview = await awaitWithContext(options.taskOverview(taskId), ctx);
-          } catch {
-            if (runtime.signal.aborted) return;
-            await claimDue({ taskId, failed: true });
-            continue;
+        while ((previousTaskId || activityWorkspace) && !runtime.signal.aborted) {
+          if (previousTaskId && options.taskOverview) {
+            const taskId = previousTaskId;
+            previousTaskId = undefined;
+            try {
+              const overview = await awaitWithContext(options.taskOverview(taskId), ctx);
+              checked = { taskId, status: overview?.status, createdAt: overview?.createdAt };
+            }
+            catch { if (runtime.signal.aborted) return; checked = { taskId, failed: true }; }
+          } else if (activityWorkspace) {
+            const workspace = activityWorkspace;
+            activityWorkspace = undefined;
+            try {
+              if (!options.lastUserActivity) throw new Error("Project activity is unavailable.");
+              activitySample = { workspace, lastUserAt: await awaitWithContext(options.lastUserActivity(workspace), ctx) };
+            } catch { if (runtime.signal.aborted) return; activitySample = { workspace, failed: true }; }
           }
-          await claimDue({ taskId, status: overview?.status });
+          await claimDue();
         }
         if (!occurrence || runtime.signal.aborted) return;
 
@@ -540,7 +586,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         }
         const timing=occurrence.timing ? {timing:occurrence.timing} : {};
         const evidence = { id, scheduledAt, ...timing, ...(due.trigger ? { trigger: due.trigger } : {}),
-          ...(due.event ? { event: due.event } : {}), ...(precheck ? { precheck } : {}) };
+          ...(due.event ? { event: due.event } : {}), ...(precheck ? { precheck } : {}), ...(activity ? { activity } : {}) };
         let receipt: Receipt;
         try {
           if (precheck && precheck.status !== "changed") {
@@ -548,6 +594,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
           } else {
             const result = await awaitWithContext(options.execute(due, runtime.signal), ctx);
             receipt = { ...evidence, status: result.status ?? "started", ...("taskId" in result ? { taskId: result.taskId } : {}) };
+            if (due.activity && receipt.status === "started") receipt.startedAt = "startedAt" in result ? result.startedAt ?? runtime.now() : runtime.now();
           }
         } catch {
           receipt = { ...evidence, status: "failed" };
@@ -792,9 +839,14 @@ export class LocalRoutines {
         return { routine: toRoutine(previous) };
       }
       const revision = previous.revision + 1;
+      const priorClaim = previous.claim ?? previous.manual?.claim;
       const next: StoredRoutine = {
         ...details, id, revision, status: "scheduled",
         ...(previous.lastOccurrence ? { lastOccurrence: previous.lastOccurrence } : {}),
+        ...(previous.lastStartedAt === undefined ? {} : { lastStartedAt: previous.lastStartedAt }),
+        ...(details.activity && (priorClaim || previous.lastStarted) ? {
+          lastStarted: priorClaim ? { occurrenceId: priorClaim.id, taskId: priorClaim.taskId } : previous.lastStarted,
+        } : {}),
       };
       if (details.schedule.kind !== "event") {
         const firstAt = firstTime(details.schedule, this.now());

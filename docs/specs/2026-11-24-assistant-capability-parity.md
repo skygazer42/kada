@@ -18,6 +18,7 @@
 | 项目默认模型 | 以现有记忆项目根保存通过 Pi 连通性检查的默认模型。新建本地项目任务采用该模型，清除后恢复全局默认。核对不同工作区、子目录以及重启后继续使用旧任务的原模型。 | [Rakazo Bot](https://github.com/elie222/rakazo/blob/e64d73292179/packages/db/prisma/schema.prisma#L1053) · [Rakazo Run](https://github.com/elie222/rakazo/blob/e64d73292179/packages/db/prisma/schema.prisma#L1323) |
 | 自动化规则手动运行 | 从现有规则立即受理一次独立发生项，保持原下次自动执行时间。验证相同请求 ID、重启、预检、防重叠和预算回执。 | [OpenMausBot runNow](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routines.ts#L738) · [手动执行沿用预检](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routine-checks-engine.test.ts#L376) |
 | 已连接应用的 MCP 变更预检 | 规则可用固定版本、参数的 MCP 工具做无模型预检。工具须在当前项目启用、由服务声明只读且无需单次审批；实际派发前再次核对。只保存内容指纹，不注入外部工具正文；结果未变时不启动任务。Pi 保留预检、基线和发生项恢复。 | [Rakazo 连接器预检与权限](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L735) · [稳定结果指纹](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L792) · [原 MCP 边界](../../src/mcp-tools.ts) · [API 与恢复回归](../../test/routine-mcp-precheck.test.ts) |
+| 例行任务的近期活动与运行间隔 | 项目循环任务可显式设置活动门槛；无近期用户活动或仍在运行间隔时，在命令/MCP 预检前跳过，不请求模型。原 Pi 发生项保存判断与原因，重启沿原受理身份继续。手动运行跳过活动门槛，仍遵守预算、预检和防重叠，并更新后续自动运行间隔。 | [Amuse 心跳门槛](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L97) · [Rakazo 先做免费检查](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/strategic-initiative.ts#L175) · [活动与 API 回归](../../test/routine-activity.test.ts) · [强杀恢复](../../test/routine-activity-recovery.test.ts) |
 | MCP 应用账户 OAuth 登录 | 本机用户显式开启 HTTP OAuth，取得授权 URL 并在浏览器登录。SDK 负责 PKCE、发现、动态客户端注册、issuer 绑定与令牌刷新。一次性 state 有效期 10 分钟，回调绑定原尝试及端点。登录完成后重新测试和启用工具；后台不会打开授权页面。退出清除本机凭据、停用工具并取消旧调用。 | [Rakazo SDK provider](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L605) · [原尝试回调](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L1518) · [Suparagent owner 连接入口](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/routers/integrations.py#L116) · [协议与恢复回归](../../test/mcp-oauth.test.ts) |
 | MCP 预注册客户端 | 不支持动态注册的服务可配置客户端 ID、指定 issuer 和可选 secret 环境变量。SDK 按服务声明选择 public、Basic 或 POST 认证，并检查 issuer。预注册模式不提供动态注册回退，secret 不写入连接配置或 OAuth 材料。修改客户端配置使旧回调和工具修订失效。 | [Rakazo 预注册客户端绑定](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L369) · [provider 采用原客户端](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-oauth.ts#L674) · [协议回归](../../test/mcp-oauth.test.ts) |
 | 手机上次草稿与待发恢复 | 用相同配对重新打开会话可恢复原文和待发消息。待发记录保留消息 ID 和已上传的附件引用。双标签发送时，同一草稿只会转换成一条待发消息。 | [Codync 发送与草稿 ID](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/AppStoreDrafts.kt#L63) · [远程页面回归](../../test/remote-pending-page.test.ts) |
@@ -111,12 +112,29 @@ GitHub Webhook 默认关闭。先创建 `event: { source: "github", type: "issue
 
 仓库与编号以 `routineIssue` 保存到原任务，作为数据提供给模型；重启、后续追加消息和原任务受理重试均保留原身份及目标。轮询入口也沿用相同字段。其他事件正文仍只用于匹配，GitHub 标题、正文、URL 和 secret 不进入模型。HTTP 回归覆盖验签、并发重放、默认关闭、过滤、分块上限、响应丢失、规则修改、暂停、secret 轮换和重启；具体 GitHub 外部投递及 HTTPS 代理未验收。
 
+循环 `task` 规则可增加以下字段，配合现有工作区、计划、预算和可选预检使用。两个分钟数均为 1–43,200 的整数，默认没有活动门槛；通知、单次、纯事件或同时接收事件的规则不接受该字段。
+
+```json
+{
+  "activity": {
+    "withinMinutes": 4320,
+    "minIntervalMinutes": 360
+  }
+}
+```
+
+自动发生项先核对原任务是否仍在执行，再检查距上次受理是否已满 `minIntervalMinutes`，以及同项目最近的用户请求是否在 `withinMinutes` 内。活动范围复用项目记忆的项目根：本机直接创建任务、确认任务和向原会话追加消息计入，子目录归同一项目。自动任务首次输入、监督消息、后台委派回传、压缩和手机私有工作区不计入。该功能不采集键鼠、其他应用或外部聊天，不能表示用户当前在电脑前。
+
+`routines history` 中的 `activity.status` 区分 `allowed`、`inactive`、`cooldown` 和 `failed`。无活动或间隔未满记录跳过；读取失败记录失败，均不执行预检和模型。成功受理才推进间隔，预检无变化或受理失败不推进。手动 `routines run` 表示用户直接要求，活动门槛不拦截它，原预算、预检和防重叠仍生效；手动受理也更新间隔。暂停/恢复和编辑规则保留原受理时间；回执保存前暂停的任务，在恢复检查时从原任务找回创建时间。已保存的活动判断随原 Pi claim 恢复，不重新判定或补预算。
+
+活动来源使用已有任务元数据及 Pi 用户提交/目标状态。目标状态保存最新用户受理时间，避免内部进度超过日志保留上限后忘记用户活动；历史任务可从原确认及仍保留的用户事件读取。普通聊天仍从 Pi 的用户提交读取。回归覆盖不活跃时零预检、间隔、手动行为、项目隔离、日志滚动、查询时暂停和并发手动受理、daemon 重启及实际 SIGKILL。该策略的真实任务质量和净成本收益尚未作对照验证。
+
 ## 已定位的能力差距
 
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |
 | --- | --- | --- | --- |
 | macOS 子任务控制实机验收 | macOS 任务卡已接入定向答复、单独停止和指定调用的中断。Windows 已验证本地 API 和 Swift 语法，原生交互待运行。 | 在运行和待答时打开任务卡，停止一个子任务，或中断指定调用并观察原子会话继续。 | [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823) · [本地 API 回归](../../test/delegation.test.ts) · [任务卡解码回归](../../desktop/PetCoreTests.swift) |
-| 应用连接器与主动检查 | GitHub Issue 已支持后台轮询和显式签名 Webhook；MCP 可做只读变更预检，HTTP OAuth 支持动态及预注册客户端。具体第三方账户与外部投递实测、其他应用事件接入与按用户活动触发仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo GitHub Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
+| 应用连接器与主动检查 | GitHub Issue 已支持轮询及签名 Webhook；MCP 可做变更预检及 OAuth 登录；循环项目任务可按近期活动和运行间隔跳过。具体第三方账户、外部投递实测与其他应用事件接入仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo GitHub Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
 | 手机后台通知实机验收 | Web Push 与会话跳转已有本地回归。仍需通过真实推送服务，在实体 iOS 与 Android 设备验收。 | 订阅的手机在页面关闭时收到提醒，打开后进入具备访问权限的原会话。 | [Codync Android 通知](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |
 
 应用原生入口、渠道和更广义的桌面操作继续按项目源码核对。AppuBot 的公开仓库提供产品说明与发布资料，无法用它验证 Telegram 实现。 [AppuBot 公开资料](https://github.com/sarthakguptadev/appubot/blob/e0a25494a7c0/README.md)
