@@ -38,6 +38,7 @@ export type GoalState = {
   lastFingerprint: string | null;
   lastEvaluated: string | null;
   outbox: { requestId: string; content: string; images?: InputImage[] } | null;
+  sharedAnswers?: Record<string, string>;
   tokenLimit: number | null;
   costLimit?: number;
   reason: string | null;

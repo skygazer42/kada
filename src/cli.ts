@@ -29,6 +29,7 @@ try {
     console.log("\n记忆审阅与事件入口（npm run harness -- …）\n  memory capture|review [on|off] --workspace 路径\n  memory candidates|accept 候选ID|reject 候选ID --workspace 路径\n  routines event 规则ID event.json\n  routines github-sync 规则ID");
     console.log(`\n个人助手入口（npm run harness -- …）：\n  memory list|edit ID 内容|forget ID|used 任务ID\n  tasks --filter pending|running|delivered\n  inbox [read 通知ID]\n  files 任务ID | files open 任务ID 编号\n  model list [provider] [--workspace 路径] | model check provider modelId\n  model select provider modelId [--workspace 路径] | model clear --workspace 路径\n  skills list|enable 名称|disable 名称 --workspace 路径\n  skills rollback 名称 版本 | skills capture 任务ID 目录\n  mcp list|add 配置.json|test ID|enable ID revision 工具…|disable ID\n  routines list|history ID [--task-status]|add 规则.json|update ID 规则.json\n  routines run ID [请求ID] | routines pause|resume|cancel ID\n  remote list|pair 账户ID 设备ID|revoke 账户ID 设备ID\n  computer status|takeover|return\n\nrun --skills 名称,名称@版本 可固定所选方法。空字符串表示不选方法。`);
     console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
+    console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n先分享查看，再单独授予答复权限。撤回查看会同时撤回答复权限。");
   } else if (command === "chat") {
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
@@ -98,12 +99,12 @@ try {
       else if (action === 'run') result = await request(path + '/' + segment(rest[0]) + '/runs', 'POST', {
         revision: Number(rest[1]), requestId: rest[2] ?? randomUUID(), confirmed: args.values.yes,
       });
-      else if (action === 'share' || action === 'unshare') {
+      else if (['share', 'unshare', 'share-replies', 'unshare-replies'].includes(action!)) {
         const [id, accountId, deviceId] = rest;
         if (rest.length !== 3) throw new Error('Use work-items ' + action + ' <work-item-id> <account-id> <device-id>.');
         result = await request(path + '/' + segment(id) + '/' + action, 'POST', { accountId, deviceId });
       }
-      else throw new Error('Use work-items list, add, edit, runs, run, share or unshare.');
+      else throw new Error('Use work-items list, add, edit, runs, run, share, unshare, share-replies or unshare-replies.');
     }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {

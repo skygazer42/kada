@@ -177,6 +177,7 @@ let workItemsVersion = 0;
 let workItemVersion = 0;
 let selectedWorkItem = "";
 let selectedWorkItemRun = "";
+const workItemAnswerForms = new Map();
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -404,6 +405,7 @@ function selectWorkItem(id) {
 
 function clearWorkItems() {
   workItemsVersion++;
+  workItemAnswerForms.clear();
   workItemList.replaceChildren();
   workItemsPanel.hidden = true;
   selectWorkItem("");
@@ -532,6 +534,63 @@ async function refreshWorkItemRun(workItemId, runId, panel, currentWorkItem) {
     element("strong", question.name, entry);
     element("span", " · " + question.text, entry);
   }
+  if (run.answerVersion) {
+    const previous = workItemAnswerForms.get(runId);
+    const form = previous?.version === run.answerVersion ? previous.form : workItemAnswerForm(workItemId, run);
+    workItemAnswerForms.set(runId, { version: run.answerVersion, form });
+    panel.append(form);
+  } else workItemAnswerForms.delete(runId);
+}
+
+function workItemAnswerForm(workItemId, run) {
+  const device = identity;
+  const form = document.createElement("form");
+  const label = element("label", "Answer this run", form);
+  const input = element("textarea", "", form);
+  input.id = "work-item-answer-" + run.id;
+  input.required = true;
+  input.maxLength = 32000;
+  label.htmlFor = input.id;
+  const submit = element("button", "Send answer", form);
+  submit.type = "submit";
+  const feedback = element("p", "", form);
+  feedback.setAttribute("role", "status");
+  let pending;
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (identity !== device || selectedWorkItem !== workItemId || selectedWorkItemRun !== run.id ||
+      workItemAnswerForms.get(run.id)?.form !== form || submit.disabled || !form.parentNode) return;
+    if (!input.value.trim()) { feedback.textContent = "Enter your answer."; return; }
+    pending ??= { requestId: crypto.randomUUID(), answer: input.value, version: run.answerVersion };
+    submit.disabled = true;
+    input.readOnly = true;
+    feedback.textContent = "Sending answer…";
+    try {
+      await post("/work-items/" + encodeURIComponent(workItemId) + "/runs/" + encodeURIComponent(run.id) + "/answers", pending);
+    } catch (error) {
+      if (identity !== device) return;
+      if (error instanceof RequestError && error.status < 500) {
+        feedback.textContent = error.message;
+        if ([401, 403, 404, 409].includes(error.status)) {
+          submit.textContent = "Refresh required";
+          return;
+        }
+        input.readOnly = false;
+        pending = undefined;
+        submit.textContent = "Send answer";
+      } else {
+        feedback.textContent = "Could not confirm delivery. Retry to check your answer.";
+        submit.textContent = "Retry answer";
+      }
+      submit.disabled = false;
+      return;
+    }
+    if (identity !== device) return;
+    feedback.textContent = "Answer received.";
+    try { await refreshWorkItems(); }
+    catch (error) { if (identity === device) report(error); }
+  });
+  return form;
 }
 
 async function refreshApprovals() {

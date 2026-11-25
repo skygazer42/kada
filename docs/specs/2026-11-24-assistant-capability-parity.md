@@ -10,6 +10,7 @@
 | 配对手机处理单项审批 | 本机用户按原任务、动作、摘要和配对设备分享审批。手机展示脱敏参数并提交决定，沿用原任务的权限和期限检查。回归覆盖设备重配、撤回分享、重复决定和动作只派发一次。 | [Suparagent 待处理审批](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L155) · [Rakazo 批准参数执行](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/approvals/approval-effect.ts#L91) · [服务端回归](../../test/approvals.test.ts) · [手机页面回归](../../test/remote-pending-page.test.ts) |
 | 项目持久工作项 | 工作项有独立 ID 和修订。新运行固定启动时的修订和任务设置，历史任务按原 ID 查阅。并发或重启重试返回原任务。 | [Suparagent 工作项与运行](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L31) · [运行提交](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_execution.py#L74) · [工作项回归](../../test/work-items.test.ts) |
 | 手机共享工作项与原运行 | 本机用户分享指定工作项后，配对手机可查看其目标、修订和历史运行。展开运行时核对它的工作项归属，再从原 Pi 任务读取目标、步骤和待答。撤回分享和重新配对会使旧链接失效。 | [Suparagent 运行详情](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_execution.py#L25) · [服务端回归](../../test/work-items.test.ts) · [手机页面回归](../../test/remote-pending-page.test.ts) |
+| 手机答复共享工作项的原运行 | 本机单独授予答复权限后，手机可回答原运行的主任务待答。版本绑定原任务、目标修订、执行轮次与问题，Pi 在同一事务保存答复摘要、用户消息和 outbox。响应丢失或重启后重试沿用原回执。撤回查看同时撤回答复，重新配对不继承权限。 | [Suparagent 原任务答复](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L829) · [服务端回归](../../test/work-items.test.ts) · [手机页面回归](../../test/remote-pending-page.test.ts) |
 | 周期规则暂停与恢复 | 在本地管理入口暂停规则。重启后仍暂停，恢复从未来第一个时间点继续，保留原规则版本、历史、预检基线和已受理任务。验证持续暂停、快速切换时旧定时器失效、重复请求以及迟到预算事件。 | [OpenMausBot 规则开关](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routines.ts#L632) |
 | 间隔与工作时间窗口 | `interval` 以固定时间锚点按 5–1440 分钟重复，可配置截止时间、星期和时段。有星期或时段限制时指定 IANA 时区。间隔按实际经过时间计算，本地窗口过滤时间点。验证跨夏令时、错过补跑、恢复后稳定身份及截止时间。 | [OpenMausBot 规则字段](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routine-schedules.ts#L7) · [间隔对齐与窗口](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routine-intervals.ts#L23) |
 | 手机控制正在执行的任务 | 设备通过原会话暂停或取消任务，可在原额度与时限内继续自己暂停的任务。核对设备归属、原任务与请求回执、状态过期、重启和本机管理员操作。 | [nanoMuse 停止原任务](https://github.com/nano-muse/nanoMuse/blob/09850259cab0/harness/dsh-nanomuse/src/device-conversations.ts#L97) · [Codync 任务操作](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/host/src/api/bots.rs#L358) |
@@ -32,6 +33,10 @@
 | 记忆候选审阅 | 项目可选择审阅模型写入的候选。候选保留来源和任务身份，接受时核对来源与旧记忆版本，拒绝后同一工具重放保留原决定。 | [Suparagent 候选处理](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/memory_proposals.py#L116) · [候选回归](../../test/memory-review.test.ts) |
 | 手机图片模型输入 | Pi 的图片处理器按固定模型能力处理原件，首条消息和目标任务待发消息保存原件引用供重启恢复。请求钩子限制跨轮图片总数，原消息仍保留完整图片。纯文本模型和无法解码的图片给出说明及文件路径。 | [Errand 图片提交](https://github.com/runta-dev/errand/blob/a20b925b740b/src/clients/http/RuntaCloudAgentsClient.ts#L332) · [Pi 图片处理](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/src/images/node.ts) · [图片恢复回归](../../test/input-images.test.ts) |
 
+本机先用 `work-items share 工作项ID 账户ID 设备ID` 分享查看，再用 `work-items share-replies 工作项ID 账户ID 设备ID` 单独授权答复。`unshare-replies` 保留查看，`unshare` 同时撤回答复。手机向 `/remote/api/work-items/{itemId}/runs/{runId}/answers` 提交 `{ requestId, answer, version }`；`version` 取自原运行详情的 `answerVersion`。无权限、跨工作项和旧问题均不受理；已暂停或耗尽预算的任务需要本机处理。重试同一请求 ID、原文和版本只返回原回执，不能借重试更换答复。
+
+共享答复在 Chromium 的 390 × 844 视口验证了只读状态、单独授权、刷新后输入保留、原任务完成与普通聊天草稿保留。Pi 集成回归另覆盖撤权、重新配对、暂停与旧问题、时限过期、保存答复后中断及 daemon 重启。共享答复的当前范围是主任务的 `waiting_user` 问题，子任务待答另列在剩余工作中。
+
 间隔调度回归覆盖夏令时跳过窗口、重复本地时段、含截止点的单一时间点和重启后的补跑。规则回归还覆盖手动请求重放、手动与定时同时触发、预检过程中强杀，以及原预算事件保留历史。有相同预检样本正在受理时，后来的触发保留 `pending` 跳过原因。前一次受理失败后，后续触发仍可使用相同样本。 [间隔回归](../../test/routine-interval.test.ts) · [手动回归](../../test/routine-manual.test.ts) · [强杀恢复](../../test/routine-precheck-recovery.test.ts)
 
 手机控制在 Chromium 的 390 × 844 视口验证暂停、接回、取消确认以及原消息和草稿保留。服务端回归另外验证，取消已暂停的任务时 Pi 不会重新启动独立评审。项目模型的重启回归使用两个脚本化模型，重新打开旧会话后发新消息核对实际执行模型。 [手机 API 回归](../../test/remote.test.ts) · [页面回归](../../test/remote-pending-page.test.ts) · [项目模型回归](../../test/assistant-entry.test.ts)
@@ -42,7 +47,7 @@ Chromium 双标签发送同一草稿时，拦掉首个回执后仍只有一次�
 
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |
 | --- | --- | --- | --- |
-| 共享工作项的运行操作 | 手机 Web 已可展开共享工作项的原运行，查看目标、步骤、待答和交付摘要。对这些本机运行的定向答复、暂停和继续仍待接入。 | 用户可在授权范围内处理原运行的待答或执行状态，决定绑定原任务及当前修订。 | [Suparagent 待处理视图](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L133) · [手机页面回归](../../test/remote-pending-page.test.ts) |
+| 共享工作项的其他运行操作 | 手机 Web 已可答复单独授权的原运行主任务待答。共享运行的子任务定向答复、暂停和继续仍待接入。 | 用户可在单独授权范围内处理子任务待答或执行状态，决定绑定原任务及当前修订。 | [Suparagent 待处理视图](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L133) · [手机页面回归](../../test/remote-pending-page.test.ts) |
 | macOS 子任务控制实机验收 | macOS 任务卡已接入定向答复、单独停止和指定调用的中断。Windows 已验证本地 API 和 Swift 语法，原生交互待运行。 | 在运行和待答时打开任务卡，停止一个子任务，或中断指定调用并观察原子会话继续。 | [Pots 工具中断](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L823) · [本地 API 回归](../../test/delegation.test.ts) · [任务卡解码回归](../../desktop/PetCoreTests.swift) |
 | 应用连接器与主动检查 | 公开 GitHub Issue 已支持后台轮询。其他应用的账户连接、事件订阅与按用户活动触发仍待实现。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
 | 手机后台通知实机验收 | Web Push 与会话跳转已有本地回归。仍需通过真实推送服务，在实体 iOS 与 Android 设备验收。 | 订阅的手机在页面关闭时收到提醒，打开后进入具备访问权限的原会话。 | [Codync Android 通知](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |

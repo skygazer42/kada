@@ -21,6 +21,7 @@ export interface RemoteDevice {
   tokenHash: string;
   sharedApprovals?: SharedApproval[];
   sharedWorkItems?: string[];
+  sharedWorkItemReplies?: string[];
 }
 
 export interface RemoteOptions {
@@ -703,12 +704,13 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       const { pairingId, tokenHash, ...scope } = await authenticate(request);
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
-      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36}))?)?$/.exec(route);
+      const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(\/answers)?)?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true } : {}) });
       } else if (options.sharedDevices && workItem) {
-        if (method !== "GET") throw new HttpError(405, "Shared work items are read-only.");
-        const [, id, runId] = workItem;
+        const [, id, runId, answers] = workItem;
+        if (method !== (answers ? "POST" : "GET")) throw new HttpError(405, "This method is unavailable for shared work items.");
+        const input = answers ? await json(request) : undefined;
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const grants = device.sharedWorkItems ?? [];
           if (id === undefined) {
@@ -721,6 +723,18 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               throw error;
             });
             if (meta.workItem?.id !== id) throw new HttpError(404, "Shared work item run not found.");
+            const canReply = device.sharedWorkItemReplies?.includes(id);
+            if (input) {
+              if (!canReply) throw new HttpError(403, "The host has not shared reply access to this work item.");
+              const { requestId, answer, version } = input;
+              if (typeof requestId !== "string" || !idPattern.test(requestId) || typeof answer !== "string" ||
+                !answer.trim() || answer.length > 32_000 || answer.includes("\0") || typeof version !== "string" || !shaPattern.test(version) ||
+                Object.keys(input).some(key => !["requestId", "answer", "version"].includes(key))) {
+                throw new HttpError(400, "Provide an answer, request ID and displayed question version.");
+              }
+              await runtime.followUp(runId, answer, "shared:" + pairingId + ":" + requestId, undefined, version);
+              return { requestId };
+            }
             const run = await runtime.status(runId);
             const childQuestions = run.status === "running" ? run.delegations.flatMap(child => child.question
               ? [{ name: child.name, text: child.question.text }] : []) : [];
@@ -730,6 +744,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               summary: run.status === "completed" ? run.goal?.candidate?.summary ?? null : null,
               steps: (run.goal?.plan ?? []).map(({ id, title, status }) => ({ id, title, status })),
               childQuestions,
+              answerVersion: canReply ? run.workItemAnswerVersion : null,
             };
           }
           const { title, revision, updatedAt, objective } = await runtime.workItems.get(id);
@@ -865,7 +880,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;

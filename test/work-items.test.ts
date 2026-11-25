@@ -76,7 +76,7 @@ test("the authenticated work item API replays original tasks after editing and r
   } finally { await server.close(); }
 });
 
-test("a paired phone can read only explicitly shared work items and their original runs", async t => {
+test("a paired phone reads shared runs and answers only their authorized current questions across restart", async t => {
   const { directory, workspace } = await directories(t);
   let needsInput = true;
   const fixture = await scriptedFixture(() => fauxAssistantMessage(
@@ -141,7 +141,7 @@ test("a paired phone can read only explicitly shared work items and their origin
     assert.equal(opened.status, 200);
     assert.deepEqual(await opened.json(), {
       id: waiting.id, revision: item.revision, objective: item.objective, status: "waiting_user",
-      reason: "Inventory date missing", question: "Which date should I use?", summary: null, steps: [], childQuestions: [],
+      reason: "Inventory date missing", question: "Which date should I use?", summary: null, steps: [], childQuestions: [], answerVersion: null,
     });
     assert.equal((await request(tablet, runDetails)).status, 404);
     assert.equal((await request(phone, remote + "/" + privateItem.id + "/runs/" + waiting.id)).status, 404);
@@ -153,15 +153,67 @@ test("a paired phone can read only explicitly shared work items and their origin
     } finally { readStatus.mock.restore(); }
     assert.equal((await request(phone, runDetails, "POST", {})).status, 405);
     assert.equal((await request(phone, details, "POST", {})).status, 405);
+    const answers = runDetails + "/answers";
+    const answer = { requestId: "inventory-answer", answer: "Use November 25.", version: "0".repeat(64) };
+    assert.equal((await request(phone, answers, "POST", answer)).status, 403);
+    const replies = "/v1/work-items/" + item.id + "/share-replies";
+    assert.equal((await owner("/v1/work-items/" + privateItem.id + "/share-replies", "POST", recipient)).status, 409);
+    assert.equal((await request(phone, replies, "POST", recipient)).status, 401);
+    assert.equal((await owner(replies, "POST", recipient)).status, 200);
+    const current = await (await request(phone, runDetails)).json();
+    assert.match(current.answerVersion, /^[a-f0-9]{64}$/);
+    answer.version = current.answerVersion;
+    assert.equal((await request(tablet, answers, "POST", answer)).status, 404);
+    assert.equal((await request(phone, answers.replace(waiting.id, privateRun.id), "POST", answer)).status, 404);
+    for (const invalid of [{ ...answer, answer: " " }, { ...answer, answer: "a".repeat(32_001) },
+      { ...answer, requestId: "../another" }, { ...answer, version: "invalid" }, { ...answer, confirmed: true }]) {
+      assert.equal((await request(phone, answers, "POST", invalid)).status, 400);
+    }
+    assert.equal((await request(phone, answers, "POST", { ...answer, version: "0".repeat(64) })).status, 409);
+    assert.equal((await owner(replies.replace(/\/share-replies$/, "/unshare-replies"), "POST", recipient)).status, 200);
+    assert.equal((await request(phone, answers, "POST", answer)).status, 403);
+    await owner(replies, "POST", recipient);
+    await server.runtime.pause(waiting.id);
+    assert.equal((await (await request(phone, runDetails)).json()).answerVersion, null);
+    assert.equal((await request(phone, answers, "POST", answer)).status, 409);
+    needsInput = true;
+    await server.runtime.resume(waiting.id);
+    await until(() => server.runtime.status(waiting.id), status => status.status === "waiting_user");
+    assert.equal((await request(phone, answers, "POST", answer)).status, 409);
+    answer.version = (await (await request(phone, runDetails)).json()).answerVersion;
+    needsInput = false;
+    const deadline = (await server.runtime.status(waiting.id)).deadlineAt;
+    const expiredClock = t.mock.method(Date, "now", () => deadline + 1);
+    try { assert.equal((await request(phone, answers, "POST", answer)).status, 409); }
+    finally { expiredClock.mock.restore(); }
+    const dispatch = t.mock.method(server.runtime, "dispatchOutbox", async () => { throw new Error("Interrupted after saving the shared answer"); });
+    assert.equal((await request(phone, answers, "POST", answer)).status, 500);
+    dispatch.mock.restore();
+    assert.equal(Object.values((await server.runtime.status(waiting.id)).goal?.sharedAnswers ?? {})[0]?.length, 64);
+    await server.close();
+    server = await open();
+    const accepted = await request(phone, answers, "POST", answer);
+    assert.equal(accepted.status, 200, await accepted.clone().text());
+    assert.deepEqual(await accepted.json(), { requestId: answer.requestId });
+    assert.equal((await request(phone, answers, "POST", { ...answer, answer: "Use a different date." })).status, 409);
+    const answered = await until(() => server.runtime.status(waiting.id), status => status.status === "completed");
+    assert.equal(answered.goal?.revision, 2);
+    assert.deepEqual(answered.goal?.userMessages, ["Use November 25."]);
+    assert.equal((await (await request(phone, runDetails)).json()).answerVersion, null);
+    assert.equal((await request(phone, answers, "POST", { ...answer, requestId: "new-stale-answer" })).status, 409);
+    assert.equal((await request(phone, answers, "POST", answer)).status, 200);
     assert.equal((await owner(share.replace(/\/share$/, "/unshare"), "POST", recipient)).status, 200);
     assert.equal((await request(phone, details)).status, 404);
     assert.equal((await request(phone, runDetails)).status, 404);
     await owner(share, "POST", recipient);
+    assert.equal((await request(phone, answers, "POST", answer)).status, 403);
     await owner("/v1/remote/devices/owner/phone", "DELETE");
     assert.equal((await request(phone, details)).status, 401);
     const replacement = await pair("phone");
     assert.equal((await request(replacement, details)).status, 404);
     assert.equal((await request(replacement, runDetails)).status, 404);
+    await owner(share, "POST", recipient);
+    assert.equal((await request(replacement, answers, "POST", answer)).status, 403);
   } finally { await server.close(); }
 });
 

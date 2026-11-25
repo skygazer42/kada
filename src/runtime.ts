@@ -40,6 +40,10 @@ import { approvalExtension, approvalViews, approvalReport, decideApproval, reque
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
 export class TaskConflictError extends Error { readonly status = 409; }
+function workItemAnswerVersion(meta: TaskMeta, goal?: GoalState): string | null {
+  if (!meta.workItem || meta.remotePolicy || meta.control !== "active" || goal?.phase !== "waiting_user" || !goal.question) return null;
+  return createHash("sha256").update(JSON.stringify([meta.id, goal.revision, goal.epoch, goal.question, goal.reason])).digest("hex");
+}
 export interface TaskMeta {
   id: string;
   objective: string;
@@ -1022,6 +1026,7 @@ export class LocalRuntime {
       const remoteControls = meta.remotePolicy === "workspace" ? await this.remoteTaskControls(active, meta, status, goal) : [];
       const approvals = meta.remotePolicy ? [] : await approvalViews(active.harness);
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
+        workItemAnswerVersion: workItemAnswerVersion(meta, goal),
         remoteControls, remoteControlVersion: meta.remotePolicy === "workspace" ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
         activeTools, interruptibleChildTools, delegations, approvals,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
@@ -1160,17 +1165,31 @@ export class LocalRuntime {
       active.harness.resume();
     });
   }
-  async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[]): Promise<void> {
+  async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[], answerVersion?: string): Promise<void> {
     await this.changes.run(async () => {
       if (!message.trim() || message.length > 32000) throw new Error("Provide a message between 1 and 32000 characters");
       if (!requestId.trim() || requestId.length > 200) throw new Error("requestId must contain 1 to 200 characters");
       const meta = await this.metadata(id);
       if (images?.length && meta.remotePolicy !== "workspace") throw new Error("Image references require a scoped remote submission.");
-      if (meta.control !== "active") throw new Error(`Task is ${meta.control}; resume it first`);
+      if (meta.control !== "active") {
+        if (answerVersion !== undefined) throw new TaskConflictError(`Task is ${meta.control}; the host must resume it first.`);
+        throw new Error(`Task is ${meta.control}; resume it first`);
+      }
       const active = await this.open(meta, false);
       const key = `user:${requestId}`;
-      if (await active.harness.commit(tx => tx.submissionByRequest(active.root.id, key), ctx)) return;
       const before = await this.goalState(active);
+      const fingerprint = answerVersion === undefined ? undefined : createHash("sha256").update(JSON.stringify([answerVersion, message])).digest("hex");
+      if (fingerprint !== undefined) {
+        const receipt = before?.sharedAnswers?.[key];
+        if (receipt !== undefined) {
+          if (receipt !== fingerprint) throw new TaskConflictError("This answer request already has different content.");
+          if (before?.outbox?.requestId === key) { await this.dispatchOutbox(active); active.enabled = true; }
+          return;
+        }
+        if (workItemAnswerVersion(meta, before) !== answerVersion) throw new TaskConflictError("This question changed. Read the current run before answering.");
+        if (await this.budgetReason(active, before)) throw new TaskConflictError("The task budget is exhausted; the host must resume it before answering.");
+      }
+      if (await active.harness.commit(tx => tx.submissionByRequest(active.root.id, key), ctx)) return;
       if (!before) {
         const reason = await this.budgetReason(active);
         if (reason) { await this.limit(active, reason); throw new Error(reason); }
@@ -1186,7 +1205,10 @@ export class LocalRuntime {
         active.enabled = true; return;
       }
       const preparing = meta.preparation && !before.confirmation;
-      if (!preparing && Date.now() >= this.deadline(active, before)) throw new Error("Task time budget has expired; resume with a fresh budget first");
+      if (!preparing && Date.now() >= this.deadline(active, before)) {
+        if (answerVersion !== undefined) throw new TaskConflictError("Task time budget has expired; the host must resume it before answering.");
+        throw new Error("Task time budget has expired; resume with a fresh budget first");
+      }
       if (before.outbox?.requestId === key) { await this.dispatchOutbox(active); active.enabled = true; return; }
       if (before.outbox) await this.dispatchOutbox(active);
       if (preparing) {
@@ -1197,6 +1219,11 @@ export class LocalRuntime {
       }
       if (before.review) await (await active.harness.conversation(before.review.conversationId, ctx))?.abort(ctx, { background: true });
       const updated = await this.updateGoal(active, (goal, record) => {
+        if (fingerprint !== undefined) {
+          if (workItemAnswerVersion(meta, goal) !== answerVersion) throw new TaskConflictError("This question changed. Read the current run before answering.");
+          goal.sharedAnswers ??= {};
+          goal.sharedAnswers[key] = fingerprint;
+        }
         goal.revision++; goal.phase = "working"; goal.candidate = null; goal.review = null; goal.mechanical = null; goal.verification = null;
         goal.reworks = 0; goal.stalls = 0; goal.lastFingerprint = null; goal.lastEvaluated = null; goal.reason = null; goal.question = null;
         goal.userMessages.push(message);

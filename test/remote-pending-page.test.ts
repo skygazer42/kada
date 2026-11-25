@@ -47,7 +47,7 @@ function storage(values: Map<string, string>, beforeSet?: (key: string) => void)
 
 type Message = { messageId: string; text: string; attachmentIds: string[] };
 type ApprovalFixture = (init: RequestInit, url: string) => Response | Promise<Response>;
-type WorkItemsFixture = (url: string, bearer: string) => Response | Promise<Response>;
+type WorkItemsFixture = (url: string, bearer: string, init: RequestInit) => Response | Promise<Response>;
 const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
@@ -113,7 +113,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
           const deviceToken = (init.headers as Record<string, string>).Authorization.slice("Bearer ".length);
           if (url === "/remote/api/push" && push) return push.request(init);
           if (url.startsWith("/remote/api/action-approvals") && approvals) return approvals.request(init, url);
-          if (url.startsWith("/remote/api/work-items") && workItems) return workItems(url, deviceToken);
+          if (url.startsWith("/remote/api/work-items") && workItems) return workItems(url, deviceToken, init);
           if (url === "/remote/api/session") {
             await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
@@ -461,6 +461,53 @@ test("a late shared run response cannot restore a revoked work item", async () =
   await opening;
   assert.equal(page.field("shared-work-items").hidden, true);
   assert.deepEqual(detail.children, []);
+});
+
+test("shared run answers preserve the original request on retry and leave chat drafts intact", async () => {
+  const itemPath = workItemsUrl + "/" + workItemRow.id;
+  const runPath = itemPath + "/runs/original";
+  const version = "a".repeat(64);
+  const answers: object[] = [];
+  let answered = false;
+  const device = harness(undefined, undefined, undefined, undefined, (url, _bearer, init) => {
+    if (url === workItemsUrl) return Response.json([workItemRow]);
+    if (url === itemPath) return Response.json({ ...workItemRow, objective: "Updated work item", runs: [
+      { id: "original", revision: 1, status: answered ? "running" : "waiting_user", question: answered ? null : "Which date?" },
+    ] });
+    if (url === runPath) return Response.json({ id: "original", revision: 1, objective: "Original goal",
+      status: answered ? "running" : "waiting_user", question: answered ? null : "Which date?",
+      steps: [], childQuestions: [], answerVersion: answered ? null : version,
+    });
+    assert.equal(url, runPath + "/answers");
+    assert.equal(init.method, "POST");
+    answers.push(JSON.parse(init.body as string));
+    if (answers.length === 1) throw new TypeError("Answer response lost");
+    answered = true;
+    return Response.json({ requestId: (answers[1] as { requestId: string }).requestId });
+  });
+  const page = await device.open();
+  await page.type("Keep my chat draft");
+  await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
+  const detail = page.field("work-item-detail");
+  await detail.children[2]!.children[0]!.children[0]!.trigger("click");
+  const form = detail.children[2]!.children[0]!.children.at(-1)!.children.at(-1)!;
+  const input = form.children[1]!;
+  assert.ok(input, "The shared question needs an answer input.");
+  input.value = "Use November 25.";
+  await page.field("refresh-conversations").trigger("click");
+  const restored = detail.children[2]!.children[0]!.children.at(-1)!.children.at(-1)!;
+  assert.equal(restored, form);
+  assert.equal(input.value, "Use November 25.");
+  await form.trigger("submit");
+  assert.match(visibleText(form), /Retry answer/);
+  assert.equal(input.value, "Use November 25.");
+  await form.trigger("submit");
+  assert.equal(answers.length, 2);
+  assert.deepEqual(answers[1], answers[0]);
+  assert.deepEqual(answers[0], { requestId: (answers[0] as { requestId: string }).requestId,
+    answer: "Use November 25.", version });
+  assert.equal(page.field("prompt").value, "Keep my chat draft");
+  assert.match(visibleText(detail), /Running/);
 });
 
 test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {
