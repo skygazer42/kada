@@ -61,6 +61,29 @@ test("SIGKILL during background delegation preserves the child and delivers one 
   }
 });
 
+test("SIGKILL after saving a child stop prevents the stopped worker from running again", { timeout: recoveryTestTimeoutMs }, async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "kada-delegation-crash-")));
+  const fixture = new URL("./fixtures/delegation-worker.ts", import.meta.url);
+  let worker = startRecoveryWorker(fixture, "create", directory, "child-stop");
+  try {
+    const before = await worker.ready();
+    assert.equal(before.childStatus, "running");
+    assert.equal(await worker.stop(), "SIGKILL");
+    worker = startRecoveryWorker(fixture, "recover", directory, "child-stop");
+    const after = await worker.complete();
+    assert.equal(after.childId, before.childId);
+    assert.equal(after.batchId, before.batchId);
+    assert.equal(after.childStatus, "cancelled");
+    assert.equal(after.workerRequests, 0);
+    assert.equal(after.reports, 1);
+    assert.equal(after.deliveries, 1);
+    assert.equal(await readFile(join(before.childDirectory, "evidence.txt"), "utf8"), "Durable child evidence.");
+  } finally {
+    await worker.stop();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
 test("SIGKILL after a parent asks for input cancels the background child on recovery", { timeout: recoveryTestTimeoutMs }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "kada-delegation-crash-")));
   const fixture = new URL("./fixtures/delegation-worker.ts", import.meta.url);

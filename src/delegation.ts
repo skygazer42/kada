@@ -5,7 +5,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, UsageDoc, type ConversationId, type Cursor, type EntryId, type Extension, type Harness, type SubmissionId, type SubmissionRecord, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { taskUsage } from "./budget.js";
 import type { ModelRef } from "./config.js";
-import { mapConcurrent } from "./util.js";
+import { mapConcurrent, SerialQueue } from "./util.js";
 
 type OwnerTaskId = Parameters<Harness["abortTask"]>[0];
 type OwnedConversation = {
@@ -38,13 +38,61 @@ const BackgroundDelegations = defineDoc<{ batches: Record<string, BackgroundBatc
 
 type ChildAnswer = { requestId: string; text: string };
 type ChildQuestion = { id: string; text: string; submissionId: SubmissionId; answer?: ChildAnswer };
-const ChildQuestions = defineDoc<{ current?: string; questions: Record<string, ChildQuestion> }>({
+const ChildQuestions = defineDoc<{ current?: string; questions: Record<string, ChildQuestion>; stopped?: true }>({
   scope: "conversation", kind: "local.delegation_questions", version: 1, history: "latest", fork: "initial",
   initial: () => ({ questions: {} }), checkpointWhen: () => true,
 });
 const answerRequest = (questionId: string) => "delegate-answer:" + questionId;
 export class DelegationInputError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
+}
+
+async function ownedBackgroundBatch(tx: Tx, child: ConversationId) {
+  const owner = (await tx.conversation(child))?.owner;
+  const { batches } = await tx.doc(BackgroundDelegations);
+  const batch = owner && Object.values(batches).find(item =>
+    item.owner === owner.taskId && item.children.some(item => item.id === child));
+  if (!batch) throw new DelegationInputError(404, "Background child not found.");
+  return batch;
+}
+
+export async function markChildStopped(harness: Harness, childId: number, goal: GoalRevision | undefined, context: Context) {
+  if (!Number.isSafeInteger(childId) || childId < 1) throw new DelegationInputError(400, "Provide a valid child ID.");
+  const child = childId as ConversationId;
+  return harness.commit(async tx => {
+    const batch = await ownedBackgroundBatch(tx, child);
+    const state = await tx.doc(ChildQuestions, child);
+    if (state.stopped) return child;
+    const owner = await tx.task(batch.owner);
+    const result = await childResult(tx, child, batch.owner);
+    if (!goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch ||
+      !owner || owner.abortRequested || owner.state.status === "terminal" || owner.state.status === "completing" ||
+      !["queued", "running", "waiting_input"].includes(result.status)) {
+      throw new DelegationInputError(409, "This child is no longer active in the current batch.");
+    }
+    state.stopped = true;
+    return child;
+  }, context);
+}
+
+export async function restoreChildStops(harness: Harness, context: Context) {
+  const batches = (await harness.snapshot(BackgroundDelegations, context))?.batches ?? {};
+  const stopped = new Set<ConversationId>();
+  for (const batch of Object.values(batches)) {
+    if ((await harness.getTask(batch.owner, context))?.state.status === "terminal") continue;
+    for (const child of batch.children) {
+      if ((await harness.snapshot(ChildQuestions, child.id, context))?.stopped) stopped.add(child.id);
+    }
+  }
+  if (!stopped.size) return;
+  // Mark saved work before the Harness resumes scheduling.
+  const { tasks, submissions } = await harness.inspect(context);
+  for (const submission of submissions) {
+    if (stopped.has(submission.conversationId)) await harness.abortSubmission(submission.id, context, submission.conversationId);
+  }
+  for (const { record } of tasks) {
+    if (stopped.has(record.conversationId)) await harness.abortTask(record.id, context);
+  }
 }
 
 export async function answerDelegation(harness: Harness, childId: number, questionId: string, requestId: string, answer: string, goal: GoalRevision | undefined, context: Context) {
@@ -55,10 +103,7 @@ export async function answerDelegation(harness: Harness, childId: number, questi
   const child = childId as ConversationId;
   const answerText = answer.trim();
   return harness.commit(async tx => {
-    const conversation = await tx.conversation(child);
-    const { batches } = await tx.doc(BackgroundDelegations);
-    const batch = Object.values(batches).find(item => item.owner === conversation?.owner?.taskId && item.children.some(item => item.id === child));
-    if (!batch) throw new DelegationInputError(404, "Background child not found.");
+    const batch = await ownedBackgroundBatch(tx, child);
     const state = await tx.doc(ChildQuestions, child);
     const question = state.questions[questionId];
     if (!question) throw new DelegationInputError(404, "Child question not found.");
@@ -67,7 +112,7 @@ export async function answerDelegation(harness: Harness, childId: number, questi
       return { childId, questionId, requestId };
     }
     const owner = await tx.task(batch.owner);
-    if (!goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch || state.current !== questionId ||
+    if (state.stopped || !goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch || state.current !== questionId ||
         !owner || owner.abortRequested || owner.state.status === "terminal" || owner.state.status === "completing") {
       throw new DelegationInputError(409, "This child is no longer waiting on the question.");
     }
@@ -98,7 +143,7 @@ export async function dispatchChildAnswers(harness: Harness, children: readonly 
   for (const child of children) {
     const state = await harness.snapshot(ChildQuestions, child, context);
     const question = state?.current ? state.questions[state.current] : undefined;
-    if (!question?.answer) continue;
+    if (state?.stopped || !question?.answer) continue;
     const requestId = answerRequest(question.id);
     if (await harness.commit(tx => tx.submissionByRequest(child, requestId), context)) continue;
     const asking = await harness.submission(question.submissionId, context);
@@ -125,36 +170,43 @@ export async function stopObsoleteDelegations(harness: Harness, goal: GoalRevisi
   for (const id of stopped) await harness.waitForTask(id, context);
 }
 
-const BackgroundBatchTask = defineTask<{ key: string; workspace: string }, { phase: "run" }, null>({
-  name: "local.delegation.background", version: 1, initial: () => ({ phase: "run" }),
-  phases: {
-    run: async (task, runtime, context) => {
-      const batch = (await runtime.snapshot(BackgroundDelegations, context))?.batches[task.input.key];
-      if (!batch) throw new Error("Missing background delegation batch.");
-      const initial = await Promise.all(batch.children.map(async child => {
-        await mkdir(join(task.input.workspace, "agents", String(child.id)), { recursive: true });
-        const conversation = await runtime.conversation(child.id, context);
-        if (!conversation) throw new Error("Missing child conversation " + child.id);
-        const submission = await conversation.submit({ type: "input", content: child.instructions, requestId: requestIdFor(task.id, child.id) }, context);
-        return (await submission.wait(context)).status;
-      }));
-      await runtime.commit(async tx => {
-        for (const [index, child] of batch.children.entries()) {
-          if (initial[index] !== "done") continue;
-          const state = await tx.doc(ChildQuestions, child.id);
-          const current = state.current ? state.questions[state.current] : undefined;
-          if (!current) continue;
-          const answered = await tx.submissionByRequest(child.id, answerRequest(current.id));
-          if (!answered || answered.status === "queued" || answered.status === "placed") {
-            return { status: "sleeping", until: runtime.now() + 500, checkpoint: { phase: "run" } };
+const backgroundBatchName = "local.delegation.background";
+
+function backgroundBatchTask(admission: SerialQueue) {
+  return defineTask<{ key: string; workspace: string }, { phase: "run" }, null>({
+    name: backgroundBatchName, version: 1, initial: () => ({ phase: "run" }),
+    phases: {
+      run: async (task, runtime, context) => {
+        const batch = (await runtime.snapshot(BackgroundDelegations, context))?.batches[task.input.key];
+        if (!batch) throw new Error("Missing background delegation batch.");
+        const initial = await Promise.all(batch.children.map(async child => {
+          await mkdir(join(task.input.workspace, "agents", String(child.id)), { recursive: true });
+          const conversation = await runtime.conversation(child.id, context);
+          if (!conversation) throw new Error("Missing child conversation " + child.id);
+          const submission = await admission.run(async () => {
+            if ((await runtime.snapshot(ChildQuestions, child.id, context))?.stopped) return;
+            return conversation.submit({ type: "input", content: child.instructions, requestId: requestIdFor(task.id, child.id) }, context);
+          });
+          return (await submission?.wait(context))?.status;
+        }));
+        await runtime.commit(async tx => {
+          for (const [index, child] of batch.children.entries()) {
+            if (initial[index] !== "done") continue;
+            const state = await tx.doc(ChildQuestions, child.id);
+            const current = !state.stopped && state.current ? state.questions[state.current] : undefined;
+            if (!current) continue;
+            const answered = await tx.submissionByRequest(child.id, answerRequest(current.id));
+            if (!answered || answered.status === "queued" || answered.status === "placed") {
+              return { status: "sleeping", until: runtime.now() + 500, checkpoint: { phase: "run" } };
+            }
           }
-        }
-        return { status: "terminal", outcome: { status: "completed", result: null } };
-      }, context);
+          return { status: "terminal", outcome: { status: "completed", result: null } };
+        }, context);
+      },
     },
-  },
-  abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
-});
+    abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+  });
+}
 
 const Delegations = defineDoc<{ byOwner: Record<string, DelegatedChild[]> }>({
   scope: "session",
@@ -196,9 +248,10 @@ async function childAnswer(tx: Tx, answerId: EntryId) {
 async function childResult(tx: Tx, id: ConversationId, taskId: OwnerTaskId) {
   let submission = await tx.submissionByRequest(id, requestIdFor(taskId, id));
   const owner = await tx.task(taskId);
-  const background = owner?.kind === BackgroundBatchTask.definition.name;
-  if (background && submission) {
+  const background = owner?.kind === backgroundBatchName;
+  if (background) {
     const questions = await tx.doc(ChildQuestions, id);
+    if (questions.stopped) return { mode: "background" as const, status: "cancelled" as const, reason: "Stopped by the user." };
     const current = questions.current && questions.questions[questions.current];
     if (current) {
       const answered = await tx.submissionByRequest(id, answerRequest(current.id));
@@ -280,7 +333,8 @@ const Delegation = defineDoc<{ children: { id: ConversationId; name: string; ins
   scope: "task", kind: "local.delegation", version: 1, initial: () => ({ children: [] }), checkpointWhen: () => true,
 });
 
-export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>): Extension {
+export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue()): Extension {
+  const batchTask = backgroundBatchTask(admission);
   const permittedExtensions = async (api: ToolExecutionApi, context: Context) =>
     (await api.agent(context)).extensions.filter(e => e.name !== "local_delegation" && !coordinatorOnly.some(c => c.name === e.name));
   const parameters = Type.Object({ tasks: Type.Array(Type.Object({ name: Type.String({ minLength: 1, maxLength: 80 }), instructions: Type.String({ minLength: 1, maxLength: 32000 }) }), { minItems: 1, maxItems: maxSubagents }) });
@@ -301,6 +355,7 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
           throw new Error("This child is outside the active background batch.");
         }
         const state = await tx.doc(ChildQuestions, api.conversationId);
+        if (state.stopped) throw new Error("This child was stopped.");
         const id = String(api.taskId);
         if (state.questions[id]) return { id };
         const live = await tx.doc(LiveDoc, api.conversationId);
@@ -370,7 +425,7 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
           const goal = await backgroundGoal(tx);
           if (!goal) throw new Error("Background delegation requires an active execution goal.");
           if (await outstandingDelegation(tx, api.conversationId, goal)) throw new Error("A background delegation is still outstanding.");
-          const owner = await tx.createTask(BackgroundBatchTask, { key, workspace }, { ownership: { kind: "conversation" }, background: true });
+          const owner = await tx.createTask(batchTask, { key, workspace }, { ownership: { kind: "conversation" }, background: true });
           const children: DelegatedChild[] = [];
           for (const task of args.tasks) children.push(await createChild(tx, owner, task, selected, true));
           batch = { ...goal, owner, children };
@@ -381,6 +436,6 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
       }, context);
       return { output: [{ type: "text", text: JSON.stringify(receipt) }], details: receipt };
     },
-  }), ask] : [])], ...(backgroundGoal ? { tasks: [BackgroundBatchTask] } : {}) });
+  }), ask] : [])], ...(backgroundGoal ? { tasks: [batchTask] } : {}) });
   return extension;
 }

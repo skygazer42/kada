@@ -243,6 +243,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
         return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined }));
       }
+      const childStop = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/stop$/.exec(url.pathname);
+      if (childStop && req.method === "POST") {
+        return send(200, await runtime.stopChild(childStop[1]!, Number(childStop[2])));
+      }
       const childAnswer = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/questions\/(\d+)\/answer$/.exec(url.pathname);
       if (childAnswer && req.method === "POST") {
         const { requestId, answer } = await body(req);

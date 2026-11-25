@@ -48,6 +48,20 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (command === "/children") {
+        if (!this.taskId) throw new Error("先用 /attach 选择任务。");
+        const { delegations } = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`);
+        this.info(delegations.length ? delegations.map(child => `${child.conversationId} [${child.status}] ${child.name}`).join("\n") : "当前任务没有子任务。");
+        return true;
+      }
+      if (command === "/stop-child") {
+        if (!this.taskId) throw new Error("先用 /attach 选择任务。");
+        if (!argument || !/^\d+$/.test(argument)) throw new Error("用法：/stop-child 子会话ID");
+        await this.client.request(`/v1/tasks/${this.taskId}/delegations/${argument}/stop`, "POST", {});
+        this.info("已停止该子任务。");
+        await this.poll();
+        return true;
+      }
       if (command === "/reply-child") {
         if (!this.taskId) throw new Error("先用 /attach 选择任务。");
         const reply = /^(\d+)\s+(\d+)\s+([\s\S]+)$/.exec(argument ?? "");
@@ -59,7 +73,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');

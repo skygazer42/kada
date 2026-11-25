@@ -48,6 +48,8 @@ macOS 任务卡通过本机任务视图展示脱敏参数，决定提交原动�
 
 后台子任务把问题和用户答复保存在 Pi 子会话文档。父任务的监督循环检查修订和预算后，用固定请求 ID 提交到原子会话。等待期间批次以 Pi 持久休眠释放执行阶段。重启时使用原批次、问题和已受理的回复，其他子任务仍可独立完成。
 
+单个子任务的停止标记也保存在原 Pi 子会话文档。首次提交和写入停止标记在同一任务内串行，队列在等待执行结果前释放。恢复时先撤回已停止子会话的排队输入，并标记其在途任务，再启用 Pi 调度。 [Pots 停止与恢复](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/agent/agent.ts#L884)
+
 纯事件规则只在接受事件或手动运行时创建 Pi 执行任务。公开 GitHub Issue 同步由本机 CLI 发起。每个规则和仓库有独立游标，收到本机 API 的持久受理回执后推进。新事件受理前核对规则修订，原事件重投可取回已有回执。这样可以让系统计划任务负责重复调用，并复用 Pi 的去重和运行历史。 [DuskBot 游标实现](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451)
 
 手机 Web Push 以 Pi 的原会话事件为来源，每个配对保存订阅和已受理的事件位置。锁屏内容只显示通用提醒，通知点击经配对与会话归属检查后打开原会话。浏览器推送中继仅接受已知 HTTPS 服务，服务端密钥留在本机数据目录。 [Codync 通知处理](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179)

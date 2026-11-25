@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { setTimeout } from "node:timers/promises";
 import test from "node:test";
 import { awaitWithContext, BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
@@ -11,6 +12,9 @@ import { delegationExtension } from "../src/delegation.js";
 import { localEnvironment, localExecution } from "../src/execution.js";
 import { goalExtension } from "../src/goal.js";
 import { LocalRuntime } from "../src/runtime.js";
+import { ChatSession } from "../src/chat.js";
+import { createClient } from "../src/client.js";
+import { serve } from "../src/server.js";
 import { hasTool, scriptedFixture, until } from "./helpers.js";
 
 test("background delegation lets the parent work, waits for the report and resumes once after reopening", async () => {
@@ -65,6 +69,83 @@ test("background delegation lets the parent work, waits for the report and resum
     assert.equal(after.messages.filter(message => message.role === "user" && String(message.content).startsWith("Background delegation finished.")).length, 1);
   } finally {
     release.resolve();
+    await reopened?.close();
+    await fixture.close();
+  }
+});
+
+test("stopping one background child preserves its sibling and reports the batch once", async () => {
+  const workerStarted = Promise.withResolvers<void>();
+  const workerStopped = Promise.withResolvers<void>();
+  const finishSibling = Promise.withResolvers<void>();
+  let reports = 0;
+  const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  const fixture = await scriptedFixture(async (conversation, signal) => {
+    const users = conversation.messages.filter(message => message.role === "user");
+    if (!hasTool(conversation, "delegate_background")) {
+      if (users.some(message => message.content === "Keep this sibling working.")) {
+        await awaitWithContext(finishSibling.promise, signal ? withAbortSignal(signal, ctx) : ctx);
+        return fauxAssistantMessage("Sibling evidence ready.");
+      }
+      workerStarted.resolve();
+      try { await setTimeout(60_000, undefined, { signal }); }
+      finally { if (signal?.aborted) workerStopped.resolve(); }
+      return fauxAssistantMessage("Stopped worker should not deliver.");
+    }
+    if (users.some(message => String(message.content).startsWith("Background delegation finished."))) {
+      reports++;
+      return call("task_submit", { summary: "Delivered available evidence.", artifacts: [] });
+    }
+    if (conversation.messages.some(message => message.role === "toolResult" && message.toolName === "delegate_background")) {
+      return fauxAssistantMessage("Working with the available evidence.");
+    }
+    return call("delegate_background", { tasks: [
+      { name: "stop-me", instructions: "Run the first investigation." },
+      { name: "sibling", instructions: "Keep this sibling working." },
+    ] });
+  });
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const settings = { ...fixture.settings, port };
+  const daemon = await serve(settings, { models: fixture.models });
+  const runtime = daemon.runtime;
+  const client = createClient(settings);
+  let reopened: LocalRuntime | undefined;
+  try {
+    const task = await runtime.create("Gather available evidence", fixture.workspace);
+    const before = await until(() => runtime.status(task.id), status =>
+      status.delegations.length === 2 && status.delegations.every(child => child.status === "running"));
+    await workerStarted.promise;
+    const [child, sibling] = before.delegations;
+    const stopPath = `/v1/tasks/${task.id}/delegations/${child!.conversationId}/stop`;
+    const unauthenticated = await fetch(`http://127.0.0.1:${port}${stopPath}`, { method: "POST" });
+    assert.equal(unauthenticated.status, 401);
+    await assert.rejects(client.request(`/v1/tasks/${task.id}/delegations/9999/stop`, "POST", {}), /Background child not found/);
+    const events: string[] = [];
+    const chat = new ChatSession(client, event => events.push(event.text));
+    await chat.attach(task.id);
+    await chat.handle("/children");
+    assert(events.some(event => event.includes(`${child!.conversationId} [running] stop-me`)));
+    await chat.handle(`/stop-child ${child!.conversationId}`);
+    await workerStopped.promise;
+    assert.deepEqual(await client.request(stopPath, "POST", {}), { childId: child!.conversationId, stopped: true });
+    assert.deepEqual((await runtime.status(task.id)).delegations.map(item => item.status), ["cancelled", "running"]);
+    assert.equal(reports, 0);
+    await daemon.close();
+    finishSibling.resolve();
+    reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+    await reopened.recover();
+    const after = await until(() => reopened!.status(task.id), status => status.status === "completed");
+    assert.deepEqual(after.delegations.map(item => [item.conversationId, item.status, item.answer]), [
+      [child!.conversationId, "cancelled", undefined],
+      [sibling!.conversationId, "completed", "Sibling evidence ready."],
+    ]);
+    assert.equal(reports, 1);
+  } finally {
+    finishSibling.resolve();
+    await daemon.close();
     await reopened?.close();
     await fixture.close();
   }

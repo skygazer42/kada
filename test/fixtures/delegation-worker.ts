@@ -4,6 +4,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { GoalDoc } from "../../src/goal.js";
+import { markChildStopped } from "../../src/delegation.js";
 import { LocalRuntime } from "../../src/runtime.js";
 import { hasTool, until } from "../helpers.js";
 
@@ -78,6 +79,12 @@ try {
       goal.userMessages.push(revisedInput);
       goal.outbox = { requestId: "user:revised-crash-fixture", content: revisedInput };
     }, ctx);
+  }
+  if (phase === "create" && stage === "child-stop") {
+    const active = runtime["active"].get(task.id);
+    if (!active || !status.goal) throw new Error("Missing active goal");
+    // Stop at the boundary between persisting the decision and aborting the Pi conversation.
+    await markChildStopped(active.harness, child.conversationId, status.goal, ctx);
   }
   console.log(JSON.stringify({
     type: phase === "create" ? "ready" : "completed",

@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildAnswers, listDelegations, pendingDelegation, stopObsoleteDelegations } from "./delegation.js";
+import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildAnswers, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -96,6 +96,7 @@ interface Active {
   enabled: boolean;
   reviewExtensions: Extension[];
   executionExtensions: Extension[];
+  childAdmission: SerialQueue;
   preparationExtensions: Extension[];
   chatExtensions: Extension[];
   methods?: MethodStore;
@@ -470,11 +471,12 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined)}));
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
       const coordinatorOnly = [goal, verification, ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         !remote && meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
           const state = await tx.doc(GoalDoc);
           if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
-        } : undefined),
+        } : undefined, childAdmission),
         ...(policy ? [policy] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(approvals ? [approvals] : []),
@@ -499,7 +501,7 @@ export class LocalRuntime {
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: meta.entrypoint === "chat" ? chatExtensions : meta.preparation ? preparationExtensions : extensions,
           instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
-          executionExtensions: extensions, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
+          executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
         this.active.set(meta.id, active);
         if (meta.schemaVersion !== undefined && meta.entrypoint !== "chat") await this.updateGoal(active, (state, record) => {
           if (state.initialized) return;
@@ -514,6 +516,7 @@ export class LocalRuntime {
     }
     if (run && meta.control === "active") {
       const goal = await this.goalState(active);
+      if (goal && meta.schemaVersion === 3 && !meta.remotePolicy) await restoreChildStops(active.harness, ctx);
       const latest = goal ? undefined : await this.latest(active);
       if (goal && ["clarifying", "awaiting_confirmation"].includes(goal.phase)) {
         // Finish an admitted read-only proposal tool after a crash, without starting execution.
@@ -1014,6 +1017,21 @@ export class LocalRuntime {
           costLimit: goal ? goal.costLimit ?? null : meta.entrypoint === "chat" ? meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 : null },
         resumeBudget: this.resumeBudget(meta, goal),
         conversations, tasks: inspection.tasks, usage };
+    });
+  }
+  async stopChild(id: string, childId: number) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy) throw new DelegationInputError(404, "Background child not found.");
+      const active = await this.open(meta, false);
+      const goal = await this.goalState(active);
+      const working = meta.control === "active" && goal?.phase === "working" ? goal : undefined;
+      const child = await active.childAdmission.run(() => markChildStopped(active.harness, childId, working, ctx));
+      if (working) {
+        const conversation = await active.harness.conversation(child, ctx);
+        await conversation?.abort(ctx);
+      }
+      return { childId, stopped: true };
     });
   }
   async answerChildQuestion(id: string, childId: number, questionId: string, requestId: string, answer: string) {
