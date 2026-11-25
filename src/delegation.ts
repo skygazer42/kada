@@ -418,7 +418,7 @@ const Delegation = defineDoc<{ children: { id: ConversationId; name: string; ins
   scope: "task", kind: "local.delegation", version: 1, initial: () => ({ children: [] }), checkpointWhen: () => true,
 });
 
-export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue(), scopedWorkspace?: Workspace): Extension {
+export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue(), scopedWorkspace?: Workspace, onQuestion?: (tx: Tx, parent: ConversationId, timestamp: number) => Promise<void>): Extension {
   const batchTask = backgroundBatchTask(admission, scopedWorkspace);
   const permittedExtensions = async (api: ToolExecutionApi, context: Context) =>
     (await api.agent(context)).extensions.filter(e => e.name !== "local_delegation" && !coordinatorOnly.some(c => c.name === e.name));
@@ -433,10 +433,11 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
       if (!question) throw new Error("Provide a concrete question.");
       const receipt = await admission.run(() => api.commit(async tx => {
         const child = await tx.conversation(api.conversationId);
+        const owner = child?.owner;
         const { batches } = await tx.doc(BackgroundDelegations);
-        const batch = Object.values(batches).find(batch => batch.owner === child?.owner?.taskId && batch.children.some(child => child.id === api.conversationId));
+        const batch = Object.values(batches).find(batch => batch.owner === owner?.taskId && batch.children.some(child => child.id === api.conversationId));
         const goal = batch && await backgroundGoal?.(tx);
-        if (!batch || !goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch) {
+        if (!owner || !batch || !goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch) {
           throw new Error("This child is outside the active background batch.");
         }
         const state = await tx.doc(ChildQuestions, api.conversationId);
@@ -453,6 +454,7 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
         if (live.tools?.length !== 1 || !submissionId) throw new Error("Invoke delegation_ask on its own.");
         state.current = id;
         state.questions[id] = { id, text: question, submissionId };
+        await onQuestion?.(tx, owner.conversationId, api.now());
         return { id };
       }, context));
       return { output: [{ type: "text", text: "Question recorded for user input." }], details: receipt, control: { terminate: true } };

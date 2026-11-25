@@ -890,18 +890,37 @@ test("a paired phone answers an owned background child once across restart", asy
   const tablet = pairing("owner", "tablet");
   const directory = join(fixture.directory, "remote");
   const devices = [owner.device, tablet.device];
-  const before = await portal(t, fixture.runtime, directory, devices);
+  const pushes: unknown[] = [];
+  const before = await portal(t, fixture.runtime, directory, devices, async (_subscription, body) => {
+    pushes.push(JSON.parse(body));
+  });
   const path = "/conversations/currency";
   const read = async () => (await before.call(owner.token, path)).json();
   const receipt = await (await before.call(owner.token, path + "/messages", turn("one", "Check the currency."))).json();
   const brief = await until(read, view => view.task?.status === "awaiting_confirmation");
   const post = (value: object) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
+  for (const [token, endpoint] of [[owner.token, "phone"], [tablet.token, "tablet"]]) {
+    const subscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/" + endpoint,
+      keys: { p256dh: webpush.generateVAPIDKeys().publicKey, auth: Buffer.alloc(16, 7).toString("base64url") },
+    };
+    assert.equal((await before.call(token!, "/push", { ...post(subscription), method: "PUT" })).status, 200);
+  }
+  await before.pollPush();
+  assert.deepEqual(pushes, []);
   assert.equal((await before.call(owner.token, path + "/confirm",
     post({ revision: brief.task.brief.revision, digest: brief.task.briefDigest }))).status, 200);
   const waiting = await until(read, view => view.task?.childQuestions?.length === 1);
   const { childId, questionId, name, text } = waiting.task.childQuestions[0];
   assert.equal(name, "Currency worker");
   assert.equal(text, "Which currency?");
+  const { pairingId } = await (await before.call(owner.token, "/session")).json();
+  await before.pollPush();
+  await before.pollPush();
+  assert.deepEqual(pushes, [{ conversationId: "currency", pairingId }]);
+  const childEvents = waiting.progressEvents.filter(event => event.event === "child_waiting_input");
+  assert.equal(childEvents.length, 1);
+  assert(!JSON.stringify(childEvents).includes(text));
   const index = await (await before.call(owner.token, "/conversations")).json();
   assert.equal(index.find(row => row.conversationId === "currency").task.group, "pending");
   const endpoint = path + "/child-answers";
@@ -926,7 +945,9 @@ test("a paired phone answers an owned background child once across restart", asy
   assert.deepEqual(finalStatus.delegations.map(child => [child.conversationId, child.answer]), [[childId, "The currency is USD."]]);
   assert.equal(answers, 1);
   assert.equal(reports, 1);
-  assert.deepEqual((await (await after.call(owner.token, path)).json()).task.childQuestions, []);
+  const delivered = await (await after.call(owner.token, path)).json();
+  assert.deepEqual(delivered.task.childQuestions, []);
+  assert.deepEqual(delivered.progressEvents.filter(event => event.event === "child_waiting_input"), childEvents);
 });
 
 test("F13 historical conversations without a saved workspace policy cannot reopen or confirm", async (t) => {

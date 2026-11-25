@@ -476,7 +476,9 @@ export class LocalRuntime {
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
           const state = await tx.doc(GoalDoc);
           if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
-        } : undefined, childAdmission, remote ? workspace : undefined),
+        } : undefined, childAdmission, remote ? workspace : undefined, remote ? async (tx, parent, timestamp) => {
+          await tx.appendEntry(parent, { kind: remoteProgressKind, data: { event: "child_waiting_input", timestamp } });
+        } : undefined),
         ...(policy ? [policy] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(approvals ? [approvals] : []),
@@ -976,7 +978,8 @@ export class LocalRuntime {
           const { event, timestamp } = entry.data;
           if (typeof timestamp !== "number") continue;
           if (timestamp <= since) return;
-          if (event === "completed" || event === "waiting_user" || event === "awaiting_confirmation" || event === "clarifying") return Number(entry.id);
+          if (event === "completed" || event === "waiting_user" || event === "awaiting_confirmation" ||
+              event === "clarifying" || event === "child_waiting_input") return Number(entry.id);
         }
         cursor = page.next;
       } while (cursor);

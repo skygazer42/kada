@@ -62,6 +62,8 @@ macOS 任务卡从原任务视图读取子任务问题，每张卡以父任务�
 
 手机 Web Push 以 Pi 的原会话事件为来源，每个配对保存订阅和已受理的事件位置。锁屏内容只显示通用提醒，通知点击经配对与会话归属检查后打开原会话。浏览器推送中继仅接受已知 HTTPS 服务，服务端密钥留在本机数据目录。 [Codync 通知处理](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179)
 
+远程子任务登记问题时，在同一个 Pi 事务中向父会话追加通用待答事件。重放同一工具调用沿用原问题和事件。问题正文只在已完成会话归属校验的详情接口中提供。 [Suparagent 待答通知](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/jobs.py#L483)
+
 预算到限时直接停止监督的规则更简单，但会遗漏 Pi 已经结清、只等本地验收的候选。再发一次模型请求也可以让模型重提候选，但会消耗额度，且已有的持久提交足以做本地验收。
 
 使用常见任务队列和独立数据库能提供通用的定时管理，但会增加第二套任务与恢复状态。当前 Pi 1.4.0 已提供持久等待和 ownership，直接使用这些公开能力。

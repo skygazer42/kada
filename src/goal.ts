@@ -75,6 +75,7 @@ export const remoteProgressKind = "local.goal.remote_progress";
 const remoteProgressLabels: Readonly<Record<string, string>> = {
   created: "Task created", clarifying: "More information requested", awaiting_confirmation: "Confirmation requested",
   confirmed: "Task confirmed", plan: "Plan updated", checkpoint: "Step updated", waiting_user: "More information requested",
+  child_waiting_input: "Child task needs an answer",
   user_input: "Task information received", submitted: "Result submitted for checks", verifying: "Verification started",
   rejected: "Result needs revision", completed: "Task completed", blocked: "Task blocked", needs_attention: "Needs attention",
   failed: "Task failed", budget_limited: "Budget limit reached", resumed: "Task resumed",
