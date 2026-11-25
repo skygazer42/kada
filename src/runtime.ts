@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildAnswers, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
+import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildInputs, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -752,7 +752,7 @@ export class LocalRuntime {
           (record.id === batch.owner || batch.children.includes(record.conversationId)))) {
           await active.harness.abortTask(batch.owner, ctx);
         } else if (!batch.ready) {
-          await dispatchChildAnswers(active.harness, batch.children, this.deadline(active, goal), ctx);
+          await dispatchChildInputs(active.harness, batch.owner, batch.children, this.deadline(active, goal), active.childAdmission, ctx);
         } else if (!busy) {
           await active.root.submit({
             type: "input",

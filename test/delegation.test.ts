@@ -74,6 +74,91 @@ test("background delegation lets the parent work, waits for the report and resum
   }
 });
 
+test("the coordinator can send additional instructions to its running child and recover the result", async () => {
+  const childReady = Promise.withResolvers<void>();
+  const releaseChild = Promise.withResolvers<void>();
+  const siblingReady = Promise.withResolvers<void>();
+  const releaseSibling = Promise.withResolvers<void>();
+  const instructions = "Include the updated total of 42.";
+  const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  let childId: number;
+  let reports = 0;
+  let received = 0;
+  const fixture = await scriptedFixture(async (conversation, signal) => {
+    const results = conversation.messages.filter(message => message.role === "toolResult");
+    const users = conversation.messages.filter(message => message.role === "user").map(message => String(message.content));
+    const context = signal ? withAbortSignal(signal, ctx) : ctx;
+    if (!hasTool(conversation, "delegate_background")) {
+      assert.equal(hasTool(conversation, "delegate_send"), false);
+      if (users.includes("Keep working on the other item.")) {
+        siblingReady.resolve();
+        await awaitWithContext(releaseSibling.promise, context);
+        return fauxAssistantMessage("Sibling evidence.");
+      }
+      if (users.some(message => message.includes(instructions))) {
+        received = users.filter(message => message.includes(instructions)).length;
+        assert.equal(results.find(result => result.toolName === "delegation_ask")?.isError, true);
+        return fauxAssistantMessage("Updated total: 42.");
+      }
+      childReady.resolve();
+      await awaitWithContext(releaseChild.promise, context);
+      return call("delegation_ask", { question: "What total should I use?" });
+    }
+    if (users.some(message => message.startsWith("Background delegation finished."))) {
+      reports++;
+      return call("task_submit", { summary: "Collected both child results.", artifacts: [] });
+    }
+    if (!results.some(result => result.toolName === "delegate_background")) {
+      return call("delegate_background", { tasks: [
+        { name: "update", instructions: "Check the current total." },
+        { name: "sibling", instructions: "Keep working on the other item." },
+      ] });
+    }
+    if (!results.some(result => result.toolName === "delegate_send")) {
+      await awaitWithContext(Promise.all([childReady.promise, siblingReady.promise]), context);
+      assert(hasTool(conversation, "delegate_send"));
+      const receipt = results.find(result => result.toolName === "delegate_background")?.content[0];
+      assert(receipt?.type === "text");
+      childId = JSON.parse(receipt.text).children[0].conversationId;
+      return call("delegate_send", { childId, instructions });
+    }
+    const receipt = results.find(result => result.toolName === "delegate_send");
+    assert.equal(receipt?.isError, false);
+    return fauxAssistantMessage("Waiting for both children.");
+  });
+  let reopened: LocalRuntime | undefined;
+  try {
+    const task = await fixture.runtime.create("Collect updated independent evidence", fixture.workspace);
+    await until(() => fixture.runtime.status(task.id), status =>
+      status.messages.some(message => message.role === "assistant" &&
+        message.content.some(part => part.type === "text" && part.text === "Waiting for both children.")));
+    const harness = fixture.runtime["active"].get(task.id)!.harness;
+    await until(async () => (await harness.inspect(ctx)).submissions.some(submission =>
+      submission.conversationId === childId && submission.status === "queued" &&
+      submission.requestId?.startsWith("delegate-instruction:")), Boolean);
+    assert.equal(reports, 0);
+    await fixture.runtime.close();
+    releaseChild.resolve();
+    reopened = new LocalRuntime(fixture.settings, { models: fixture.models });
+    await reopened.recover();
+    const during = await until(async () => (await reopened!.status(task.id)).delegations.map(child =>
+      ({ id: child.conversationId, status: child.status, answer: child.answer, reason: child.reason })), children =>
+      children.some(child => child.id === childId && child.answer === "Updated total: 42."));
+    assert.deepEqual(during.map(child => child.status), ["completed", "running"]);
+    assert.equal(reports, 0);
+    releaseSibling.resolve();
+    const after = await until(() => reopened!.status(task.id), status => status.status === "completed");
+    assert.deepEqual(after.delegations.map(child => child.answer), ["Updated total: 42.", "Sibling evidence."]);
+    assert.equal(received, 1);
+    assert.equal(reports, 1);
+  } finally {
+    releaseChild.resolve();
+    releaseSibling.resolve();
+    await reopened?.close();
+    await fixture.close();
+  }
+});
+
 test("stopping one background child preserves its sibling and reports the batch once", async () => {
   const workerStarted = Promise.withResolvers<void>();
   const workerStopped = Promise.withResolvers<void>();

@@ -38,7 +38,10 @@ const BackgroundDelegations = defineDoc<{ batches: Record<string, BackgroundBatc
 
 type ChildAnswer = { requestId: string; text: string };
 type ChildQuestion = { id: string; text: string; submissionId: SubmissionId; answer?: ChildAnswer };
-const ChildQuestions = defineDoc<{ current?: string; questions: Record<string, ChildQuestion>; stopped?: true }>({
+type ChildInstruction = { requestId: string; text: string };
+const ChildQuestions = defineDoc<{
+  current?: string; questions: Record<string, ChildQuestion>; stopped?: true; instructions?: ChildInstruction[];
+}>({
   scope: "conversation", kind: "local.delegation_questions", version: 1, history: "latest", fork: "initial",
   initial: () => ({ questions: {} }), checkpointWhen: () => true,
 });
@@ -170,20 +173,41 @@ export async function pendingDelegation(harness: Harness, parent: ConversationId
 }
 
 /** Called from the host's serialized supervision loop, alongside revision and budget checks. */
-export async function dispatchChildAnswers(harness: Harness, children: readonly ConversationId[], deadline: number, context: Context) {
+export async function dispatchChildInputs(harness: Harness, owner: OwnerTaskId, children: readonly ConversationId[], deadline: number, admission: SerialQueue, context: Context) {
   for (const child of children) {
-    const state = await harness.snapshot(ChildQuestions, child, context);
-    const question = state?.current ? state.questions[state.current] : undefined;
-    if (state?.stopped || !question?.answer) continue;
-    const requestId = answerRequest(question.id);
-    if (await harness.commit(tx => tx.submissionByRequest(child, requestId), context)) continue;
-    const asking = await harness.submission(question.submissionId, context);
-    if ((await asking?.status(context))?.status !== "done") continue;
-    const conversation = await harness.conversation(child, context);
-    if (!conversation) throw new Error("Missing child conversation " + child);
-    if (Date.now() >= deadline) return;
-    await conversation.submit({ type: "input", content: question.answer.text, requestId, whenBusy: "reject",
-      entry: { kind: "local.delegation.answer", data: { questionId: question.id } } }, context);
+    await admission.run(async () => {
+      const state = await harness.snapshot(ChildQuestions, child, context);
+      if (!state || state.stopped) return;
+      const question = state.current ? state.questions[state.current] : undefined;
+      if (question && !question.answer) return;
+      const pending = await harness.commit(async tx => {
+        if (question?.answer) {
+          const requestId = answerRequest(question.id);
+          const answer = await tx.submissionByRequest(child, requestId);
+          if (!answer) {
+            return { text: question.answer.text, requestId, question };
+          }
+          if (answer.status === "queued" || answer.status === "placed") return;
+        }
+        if (!state.instructions?.length || !await tx.submissionByRequest(child, requestIdFor(owner, child))) return;
+        for (const instruction of state.instructions) {
+          if (!await tx.submissionByRequest(child, instruction.requestId)) return { ...instruction, question: undefined };
+        }
+      }, context);
+      if (!pending) return;
+      if (pending.question) {
+        const asking = await harness.submission(pending.question.submissionId, context);
+        if ((await asking?.status(context))?.status !== "done") return;
+      }
+      const conversation = await harness.conversation(child, context);
+      if (!conversation) throw new Error("Missing child conversation " + child);
+      if (Date.now() >= deadline) return;
+      // An already admitted instruction can start a new run as Pi closes the asking turn.
+      await conversation.submit({ type: "input", content: pending.text, requestId: pending.requestId,
+        ...(pending.question
+          ? { whenBusy: "followUp", entry: { kind: "local.delegation.answer", data: { questionId: pending.question.id } } }
+          : { whenBusy: "steer", entry: { kind: "local.delegation.instruction" } }) }, context);
+    });
   }
 }
 
@@ -222,9 +246,16 @@ function backgroundBatchTask(admission: SerialQueue) {
         }));
         await runtime.commit(async tx => {
           for (const [index, child] of batch.children.entries()) {
-            if (initial[index] !== "done") continue;
             const state = await tx.doc(ChildQuestions, child.id);
-            const current = !state.stopped && state.current ? state.questions[state.current] : undefined;
+            if (state.stopped) continue;
+            for (const instruction of state.instructions ?? []) {
+              const submitted = await tx.submissionByRequest(child.id, instruction.requestId);
+              if (!submitted || submitted.status === "queued" || submitted.status === "placed") {
+                return { status: "sleeping", until: runtime.now() + 500, checkpoint: { phase: "run" } };
+              }
+            }
+            if (initial[index] !== "done" && !state.instructions?.length) continue;
+            const current = state.current ? state.questions[state.current] : undefined;
             if (!current) continue;
             const answered = await tx.submissionByRequest(child.id, answerRequest(current.id));
             if (!answered || answered.status === "queued" || answered.status === "placed") {
@@ -283,6 +314,9 @@ async function childResult(tx: Tx, id: ConversationId, taskId: OwnerTaskId) {
   if (background) {
     const questions = await tx.doc(ChildQuestions, id);
     if (questions.stopped) return { mode: "background" as const, status: "cancelled" as const, reason: "Stopped by the user." };
+    const latest = questions.instructions?.at(-1);
+    const instruction = latest && await tx.submissionByRequest(id, latest.requestId);
+    if (instruction) submission = instruction;
     const current = questions.current && questions.questions[questions.current];
     if (current) {
       const answered = await tx.submissionByRequest(id, answerRequest(current.id));
@@ -294,8 +328,16 @@ async function childResult(tx: Tx, id: ConversationId, taskId: OwnerTaskId) {
       } else if (!current.answer) {
         return { mode: "background" as const, status: "waiting_input" as const, question: { id: current.id, text: current.text } };
       }
-      if (answered) submission = answered;
-      else return { mode: "background" as const, status: "running" as const };
+      if (!answered) return { mode: "background" as const, status: "running" as const };
+      if (!submission || answered.id > submission.id) submission = answered;
+    }
+    if (latest && !instruction) {
+      if (owner.abortRequested || owner.state.status === "terminal") {
+        const cancelled = owner.abortRequested || owner.state.status === "terminal" && owner.state.outcome.status === "aborted";
+        return { mode: "background" as const, status: cancelled ? "cancelled" as const : "failed" as const,
+          reason: "Additional instructions were not submitted." };
+      }
+      return { mode: "background" as const, status: "running" as const };
     }
   }
   if (background && owner.state.status === "terminal" && (!submission || submission.status === "queued")) {
@@ -377,7 +419,7 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
     execute: async (args, api, context) => {
       const question = args.question.trim();
       if (!question) throw new Error("Provide a concrete question.");
-      const receipt = await api.commit(async tx => {
+      const receipt = await admission.run(() => api.commit(async tx => {
         const child = await tx.conversation(api.conversationId);
         const { batches } = await tx.doc(BackgroundDelegations);
         const batch = Object.values(batches).find(batch => batch.owner === child?.owner?.taskId && batch.children.some(child => child.id === api.conversationId));
@@ -389,13 +431,18 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
         if (state.stopped) throw new Error("This child was stopped.");
         const id = String(api.taskId);
         if (state.questions[id]) return { id };
+        for (const instruction of state.instructions ?? []) {
+          if ((await tx.submissionByRequest(api.conversationId, instruction.requestId))?.status === "queued") {
+            throw new Error("Coordinator instructions are arriving. Read them before deciding whether to ask the user.");
+          }
+        }
         const live = await tx.doc(LiveDoc, api.conversationId);
         const submissionId = live.run?.inputs.at(-1);
         if (live.tools?.length !== 1 || !submissionId) throw new Error("Invoke delegation_ask on its own.");
         state.current = id;
         state.questions[id] = { id, text: question, submissionId };
         return { id };
-      }, context);
+      }, context));
       return { output: [{ type: "text", text: "Question recorded for user input." }], details: receipt, control: { terminate: true } };
     },
   });
@@ -464,6 +511,36 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
           (await tx.doc(Delegations)).byOwner[owner] = children;
         }
         return { batchId: batch.owner, children: batch.children.map(child => ({ conversationId: child.id, name: child.name })) };
+      }, context);
+      return { output: [{ type: "text", text: JSON.stringify(receipt) }], details: receipt };
+    },
+  }), defineTool({
+    name: "delegate_send",
+    description: "Send additional task instructions to a child in your current background batch. The child receives them in its existing conversation at a Pi turn boundary. Use the child ID from delegate_background or task_status.",
+    parameters: Type.Object({
+      childId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+      instructions: Type.String({ minLength: 1, maxLength: 32_000 }),
+    }),
+    replay: "safe", executionMode: "sequential", callers: ["model"],
+    execute: async ({ childId, instructions }, api, context) => {
+      const text = instructions.trim();
+      if (!text) throw new Error("Provide additional instructions.");
+      const child = childId as ConversationId;
+      const requestId = "delegate-instruction:" + api.taskId;
+      const receipt = await api.commit(async tx => {
+        const conversation = await tx.conversation(child);
+        if (conversation?.owner?.conversationId !== api.conversationId) throw new Error("Background child not found.");
+        const batch = await ownedBackgroundBatch(tx, child);
+        const state = await tx.doc(ChildQuestions, child);
+        if (state.instructions?.some(instruction => instruction.requestId === requestId)) return { childId, requestId };
+        const goal = await backgroundGoal(tx);
+        const owner = await tx.task(batch.owner);
+        if (!goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch || state.stopped ||
+            !owner || owner.abortRequested || owner.state.status === "terminal" || owner.state.status === "completing") {
+          throw new Error("This child is no longer active in the current batch.");
+        }
+        state.instructions = [...(state.instructions ?? []), { requestId, text: "Additional instructions from the coordinator:\n" + text }];
+        return { childId, requestId };
       }, context);
       return { output: [{ type: "text", text: JSON.stringify(receipt) }], details: receipt };
     },

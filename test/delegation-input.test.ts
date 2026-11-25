@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:net";
 import { once } from "node:events";
+import { awaitWithContext, BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { serve } from "../src/server.js";
@@ -14,11 +15,17 @@ test("a worker question survives reopen and the same child accepts one owner ans
   const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
   let childAnswers = 0;
   let reports = 0;
-  const fixture = await scriptedFixture(conversation => {
+  const questionVisible = Promise.withResolvers<number>();
+  const requestInstructions = "Include a unit label.";
+  const fixture = await scriptedFixture(async (conversation, signal) => {
     const users = conversation.messages.filter(message => message.role === "user");
     const results = conversation.messages.filter(message => message.role === "toolResult");
     if (!hasTool(conversation, "delegate_background")) {
       if (users.some(message => message.content === "Check the separate source.")) return fauxAssistantMessage("Independent sibling done.");
+      if (users.some(message => String(message.content).includes(requestInstructions))) {
+        assert(users.some(message => message.content === "Use the November totals."));
+        return fauxAssistantMessage("Used the November totals, in USD.");
+      }
       if (users.some(message => message.content === "Use the November totals.")) {
         childAnswers++;
         return fauxAssistantMessage("Used the November totals.");
@@ -39,11 +46,18 @@ test("a worker question survives reopen and the same child accepts one owner ans
     if (!results.some(result => result.toolName === "task_submit")) {
       return call("task_submit", { summary: "Wrong early delivery.", artifacts: [] });
     }
+    if (!results.some(result => result.toolName === "delegate_send")) {
+      const childId = await awaitWithContext(questionVisible.promise, signal ? withAbortSignal(signal, ctx) : ctx);
+      return call("delegate_send", { childId, instructions: requestInstructions });
+    }
+    assert.equal(results.find(result => result.toolName === "delegate_send")?.isError, false);
     return fauxAssistantMessage("Waiting for the worker.");
   });
   let daemon: Awaited<ReturnType<typeof serve>> | undefined;
   try {
     const task = await fixture.runtime.create("Verify the totals", fixture.workspace);
+    const asked = await until(() => fixture.runtime.status(task.id), status => status.delegations[0]?.status === "waiting_input");
+    questionVisible.resolve(asked.delegations[0]!.conversationId);
     const before = await until(() => fixture.runtime.status(task.id), status =>
       status.submission?.status === "done" && status.delegations[0]?.status === "waiting_input" && status.delegations[1]?.status === "completed", 15_000);
     const child = before.delegations[0]!;
@@ -92,7 +106,7 @@ test("a worker question survives reopen and the same child accepts one owner ans
     assert.equal(after.goal?.revision, before.goal?.revision);
     assert.equal(after.goal?.candidate?.summary, "The November evidence is ready.");
     assert.deepEqual(after.delegations.map(item => [item.conversationId, item.status, item.answer]),
-      [[child.conversationId, "completed", "Used the November totals."],
+      [[child.conversationId, "completed", "Used the November totals, in USD."],
         [waiting.delegations[1]!.conversationId, "completed", "Independent sibling done."]]);
     assert.equal(childAnswers, 1);
     assert.equal(reports, 1);
