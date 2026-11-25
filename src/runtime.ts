@@ -1079,6 +1079,21 @@ export class LocalRuntime {
       return answerDelegation(active.harness, childId, questionId, requestId, answer, canContinue ? goal : undefined, ctx);
     });
   }
+  async sharedApproval(taskId: string, approvalId: string, digest: string) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(taskId).catch(error => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (!meta || meta.control !== 'active' || meta.remotePolicy) return;
+      const active = await this.open(meta, false);
+      if ((await this.goalState(active))?.phase !== 'waiting_user') return;
+      const approval = (await approvalViews(active.harness)).find(item => item.id === approvalId && item.digest === digest);
+      if (!approval || (approval.status !== 'pending' && approval.status !== 'expired')) return;
+      const { tool, connection, arguments: args, expiresAt, status } = approval;
+      return { taskId, approvalId, tool, connection, argumentsPreview: JSON.stringify(args, null, 2), digest, expiresAt, status };
+    });
+  }
   async decideApproval(id: string, approvalId: string, decision: 'allow' | 'deny', digest: string) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);

@@ -97,6 +97,15 @@ npm run harness -- mcp project-clear --workspace E:/project
 npm run harness -- mcp approval local-tools 当前revision 工具名
 ```
 
+可以把单项 MCP 审批交给已配对的手机处理。先在终端接回任务，用 `/approvals` 查看动作 ID 和摘要，再分享给指定设备。
+
+```powershell
+npm run harness -- remote share-approval 任务ID 动作ID 账户ID 设备ID 摘要
+npm run harness -- remote unshare-approval 任务ID 动作ID 账户ID 设备ID 摘要
+```
+
+配对手机连接或刷新后，在 **Action approvals** 查看脱敏参数和有效期，选择允许一次或拒绝。撤销分享会关闭该设备对这一项的审批权限。撤销设备配对后，重新配对须重新分享。
+
 ## 项目工作项
 
 工作项保存项目范围、标题、目标和修订号。用一个工作项可以多次执行同一个项目任务，每次运行记录启动时采用的修订，原任务可以继续接回。`item.json` 包含 `workspace`、`title` 和 `objective`。编辑时用 `edit.json` 传入当前 `revision` 和要修改的字段。

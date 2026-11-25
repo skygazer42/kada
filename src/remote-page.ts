@@ -54,6 +54,10 @@ export const remotePage = String.raw`<!doctype html>
     #child-questions label { margin-top: .55rem; }
     #pending-tasks { display: grid; gap: .4rem; list-style: none; margin: 0; padding: 0; }
     #pending-tasks button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+    #approval-list { display: grid; gap: .8rem; list-style: none; margin: 0; padding: 0; overflow-wrap: anywhere; }
+    #approval-list li + li { border-top: 1px solid var(--line); padding-top: .8rem; }
+    #approval-list pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow: auto; }
+    #approval-list .controls { flex-wrap: wrap; margin: .55rem 0 0; }
     .receipt { margin-top: .5rem; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem; }
     .receipt .pending-message { flex-basis: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }
     #composer { margin-bottom: 1.5rem; }
@@ -94,6 +98,10 @@ export const remotePage = String.raw`<!doctype html>
         <h2 id="pending-heading">Pending work</h2>
         <ul id="pending-tasks"></ul>
       </section>
+      <section id="action-approvals" class="panel" hidden aria-labelledby="approval-heading">
+        <h2 id="approval-heading">Action approvals</h2>
+        <ul id="approval-list"></ul>
+      </section>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
       <section id="child-questions" class="panel task" hidden aria-label="Child task questions"></section>
       <details id="task-history" class="panel task" hidden>
@@ -128,6 +136,8 @@ const status = field("status");
 const conversations = field("conversation");
 const pendingWork = field("pending-work");
 const pendingTasks = field("pending-tasks");
+const approvalsPanel = field("action-approvals");
+const approvalList = field("approval-list");
 const task = field("task");
 const childQuestions = field("child-questions");
 const taskHistory = field("task-history");
@@ -148,6 +158,9 @@ let busy = false;
 let canSend = true;
 let refreshVersion = 0;
 let listVersion = 0;
+let approvalVersion = 0;
+let approvalSnapshot = "";
+const approvalDecisions = new Map();
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -315,7 +328,7 @@ function resetConversationView() {
 
 async function refreshList() {
   const version = ++listVersion;
-  const rows = await get("/conversations");
+  const [rows] = await Promise.all([get("/conversations"), refreshApprovals()]);
   if (version !== listVersion || !identity) return;
   conversations.replaceChildren();
   pendingTasks.replaceChildren();
@@ -350,6 +363,80 @@ async function refreshList() {
   if (!conversations.value) {
     addLocalConversation(selected);
     conversations.value = selected;
+  }
+}
+
+function clearApprovals() {
+  approvalVersion++;
+  approvalSnapshot = "";
+  approvalDecisions.clear();
+  approvalList.replaceChildren();
+  approvalsPanel.hidden = true;
+}
+
+async function refreshApprovals() {
+  const device = identity;
+  if (!device?.actionApprovals) return;
+  const version = ++approvalVersion;
+  const current = () => device === identity && version === approvalVersion;
+  try {
+    const rows = await get("/action-approvals");
+    if (!current()) return;
+    const visible = rows.filter(row => row.status === "pending" || row.status === "expired")
+      .map(row => ({ ...row, expired: row.status === "expired" || Date.now() >= row.expiresAt }));
+    const snapshot = JSON.stringify(visible);
+    if (snapshot === approvalSnapshot) return;
+    approvalSnapshot = snapshot;
+    approvalList.replaceChildren();
+    for (const row of visible) presentApproval(row, device);
+    approvalsPanel.hidden = !visible.length;
+  } catch (error) {
+    if (current()) report(error);
+  }
+}
+
+function presentApproval(approval, device) {
+  const row = element("li", "", approvalList);
+  const label = approval.connection + " / " + approval.tool;
+  element("h3", label, row);
+  element("p", "Task " + approval.taskId + " · Action " + approval.approvalId, row);
+  element("p", (approval.expired ? "Expired " : "Expires ") + new Date(approval.expiresAt).toLocaleString(), row);
+  element("pre", approval.argumentsPreview, row);
+  const controls = element("div", "", row);
+  controls.className = "controls";
+  const path = "/action-approvals/" + encodeURIComponent(approval.taskId) + "/" + encodeURIComponent(approval.approvalId);
+  async function decide(decision) {
+    if (identity !== device || row.parentNode !== approvalList || approvalDecisions.has(path)) return;
+    if (decision === "allow") {
+      if (Date.now() >= approval.expiresAt) return refreshApprovals();
+      if (!confirm("Allow this " + label + " action once?")) return;
+    }
+    const pending = { controls };
+    approvalDecisions.set(path, pending);
+    for (const button of controls.children) button.disabled = true;
+    try {
+      await post(path, { decision, digest: approval.digest });
+      if (identity !== device) return;
+      status.textContent = decision === "allow" ? "Action approved." : "Action denied.";
+      await refreshApprovals();
+      if (identity === device) await refresh();
+    } catch (error) {
+      if (identity !== device) return;
+      if (error instanceof RequestError && (error.status === 404 || error.status === 409)) await refreshApprovals();
+      if (identity === device) report(error);
+    } finally {
+      if (identity === device) {
+        approvalDecisions.delete(path);
+        for (const button of pending.controls.children) button.disabled = false;
+      }
+    }
+  }
+  if (!approval.expired) action("Allow once", controls, () => decide("allow"));
+  action("Deny", controls, () => decide("deny"));
+  const pending = approvalDecisions.get(path);
+  if (pending) {
+    pending.controls = controls;
+    for (const button of controls.children) button.disabled = true;
   }
 }
 
@@ -823,6 +910,7 @@ async function connect(value) {
   conversations.replaceChildren();
   pendingTasks.replaceChildren();
   pendingWork.hidden = true;
+  clearApprovals();
   resetConversationView();
   restoreComposer();
   if (pending) displayReceipt({ state: "unknown" });
@@ -920,6 +1008,7 @@ signout.addEventListener("click", async () => {
   signout.disabled = true;
   sessionStorage.removeItem("kada-device-token");
   identity = null;
+  clearApprovals();
   childAnswerForms.clear();
   try {
     if (pushSettings?.publicKey) {
@@ -1070,6 +1159,7 @@ setInterval(async () => {
     if (device !== identity) return;
     if (error instanceof RequestError && error.status === 401) {
       identity = null;
+      clearApprovals();
       childAnswerForms.clear();
       sessionStorage.removeItem("kada-device-token");
       assistant.hidden = true;

@@ -46,11 +46,12 @@ function storage(values: Map<string, string>, beforeSet?: (key: string) => void)
 }
 
 type Message = { messageId: string; text: string; attachmentIds: string[] };
+type ApprovalFixture = (init: RequestInit, url: string) => Response | Promise<Response>;
 const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([])) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -104,17 +105,18 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
           locks.set(name, result.catch(() => {}));
           return result;
         } } },
-        confirm: () => true,
+        confirm: approvals?.confirm ?? (() => true),
         setInterval(callback: () => Promise<void>) { poll = callback; },
         async fetch(url: string, init: RequestInit) {
           requests.push(url);
           if (url === "/remote/api/push" && push) return push.request(init);
+          if (url.startsWith("/remote/api/action-approvals") && approvals) return approvals.request(init, url);
           if (url === "/remote/api/session") {
             const deviceToken = (init.headers as Record<string, string>).Authorization.slice("Bearer ".length);
             await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
             const pairingId = createHash("sha256").update("fixture:" + deviceToken).digest("hex");
-            return Response.json({ channel: "web", accountId, deviceId, pairingId });
+            return Response.json({ channel: "web", accountId, deviceId, pairingId, ...(approvals ? { actionApprovals: true } : {}) });
           }
           if (url === "/remote/api/conversations") {
             return listUnavailable ? Response.json({ error: "List unavailable." }, { status: 503 }) : list();
@@ -267,6 +269,7 @@ test("the pending list opens the original conversation and drops tasks that are 
   await page.type("Unsent first-chat draft");
   const list = page.field("pending-tasks");
   assert.equal(page.field("pending-work").hidden, false);
+  assert.ok(!device.requests.includes("/remote/api/action-approvals"));
   assert.deepEqual(list.children.map(row => row.children[0]!.textContent), ["Daily report · Waiting for you"]);
   await list.children[0]!.children[0]!.trigger("click");
   await new Promise<void>(resolve => setImmediate(resolve));
@@ -279,6 +282,78 @@ test("the pending list opens the original conversation and drops tasks that are 
   page.field("conversation").value = conversationId;
   await page.field("conversation").trigger("change");
   assert.equal(page.field("prompt").value, "Unsent first-chat draft");
+});
+
+test("a paired phone confirms the displayed action before allowing it and can only deny an expired action", async () => {
+  const action = {
+    taskId: "local-task", approvalId: "7", tool: "append", connection: "fixture",
+    argumentsPreview: '{"text":"<b>shared</b>"}', digest: "a".repeat(64), status: "pending", expiresAt: Date.now() + 60_000,
+  };
+  const expired = { ...action, approvalId: "8", digest: "b".repeat(64), status: "expired", expiresAt: Date.now() - 60_000 };
+  let rows = [action, expired];
+  let confirmed = false;
+  const decisions: unknown[] = [];
+  const device = harness(undefined, undefined, undefined, {
+    confirm: () => confirmed,
+    request(init, url) {
+      if (init.method !== "POST") return Response.json(rows);
+      const id = url.split("/").pop();
+      const decision = JSON.parse(init.body as string);
+      decisions.push({ url, ...decision });
+      rows = rows.filter(row => row.approvalId !== id);
+      return Response.json({ id, decision: decision.decision });
+    },
+  });
+  const page = await device.open();
+  const list = page.field("approval-list");
+  const controls = (row: Element) => row.children.at(-1)!.children;
+  assert.equal(page.field("action-approvals").hidden, false);
+  assert.ok(list.children[0]!.children.some(child => child.textContent === action.argumentsPreview));
+  assert.deepEqual(controls(list.children[1]!).map(button => button.textContent), ["Deny"]);
+  const allow = controls(list.children[0]!).find(button => button.textContent === "Allow once")!;
+  await allow.trigger("click");
+  assert.deepEqual(decisions, []);
+  confirmed = true;
+  await allow.trigger("click");
+  await controls(list.children[0]!)[0]!.trigger("click");
+  assert.deepEqual(decisions, [
+    { url: "/remote/api/action-approvals/local-task/7", decision: "allow", digest: action.digest },
+    { url: "/remote/api/action-approvals/local-task/8", decision: "deny", digest: expired.digest },
+  ]);
+  assert.equal(page.field("action-approvals").hidden, true);
+});
+
+test("late approval lists and decisions cannot change a replacement pairing", async () => {
+  const action = {
+    taskId: "local-task", approvalId: "7", tool: "append", connection: "fixture",
+    argumentsPreview: '{}', digest: "a".repeat(64), status: "pending", expiresAt: Date.now() + 60_000,
+  };
+  const staleList = Promise.withResolvers<Response>();
+  const staleDecision = Promise.withResolvers<Response>();
+  let deferList = false;
+  const device = harness(undefined, undefined, undefined, {
+    request(init) {
+      if ((init.headers as Record<string, string>).Authorization !== "Bearer phone") return Response.json([]);
+      if (init.method === "POST") return staleDecision.promise;
+      return deferList ? staleList.promise : Response.json([action]);
+    },
+  });
+  const page = await device.open();
+  const list = page.field("approval-list");
+  const oldAllow = list.children[0]?.children.at(-1)?.children.find(button => button.textContent === "Allow once");
+  assert.ok(oldAllow);
+  const deciding = oldAllow.trigger("click");
+  deferList = true;
+  const refreshing = page.field("refresh-conversations").trigger("click");
+  page.field("token").value = "replacement/account";
+  await page.field("pair-form").trigger("submit");
+  staleList.resolve(Response.json([action]));
+  staleDecision.resolve(Response.json({ error: "Old pairing response." }, { status: 409 }));
+  await Promise.all([deciding, refreshing]);
+  assert.equal(page.field("connection").textContent, "replacement");
+  assert.equal(page.field("action-approvals").hidden, true);
+  assert.deepEqual(list.children, []);
+  assert.equal(page.field("status").textContent, "");
 });
 
 test("polling appends new history, updates an idle task, and discards a late response from the previous chat", async () => {

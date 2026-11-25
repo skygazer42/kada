@@ -260,12 +260,23 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (typeof requestId !== "string" || typeof answer !== "string") throw new Error("Provide requestId and answer strings.");
         return send(200, await runtime.answerChildQuestion(childAnswer[1]!, Number(childAnswer[2]), childAnswer[3]!, requestId, answer));
       }
-      const approvalRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/approvals(?:\/(\d+)\/(allow|deny))?$/.exec(url.pathname);
+      const approvalRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/approvals(?:\/(\d+)\/(allow|deny|share|unshare))?$/.exec(url.pathname);
       if (approvalRoute) {
         if (req.method === 'GET' && !approvalRoute[2]) return send(200, (await runtime.status(approvalRoute[1]!)).approvals);
         if (req.method === 'POST' && approvalRoute[2]) {
-          const { digest } = await body(req);
+          const { digest, accountId, deviceId } = await body(req);
           if (typeof digest !== 'string') throw new Error('Provide the displayed action digest.');
+          if (approvalRoute[3] === 'share' || approvalRoute[3] === 'unshare') {
+            if (typeof accountId !== 'string' || typeof deviceId !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) {
+              throw new Error('Provide the account, device and displayed action digest.');
+            }
+            const taskId = approvalRoute[1]!, approvalId = approvalRoute[2];
+            const shared = approvalRoute[3] === 'share';
+            if (shared && !await runtime.sharedApproval(taskId, approvalId, digest)) {
+              return send(409, { error: 'This action is no longer available to share.' });
+            }
+            return send(200, await devices.setSharedApproval(accountId, deviceId, { taskId, approvalId, digest }, shared));
+          }
           return send(200, await runtime.decideApproval(approvalRoute[1]!, approvalRoute[2], approvalRoute[3] as 'allow' | 'deny', digest));
         }
       }
@@ -299,7 +310,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
     runtime = new LocalRuntime(config, { ...options, models: options?.models ?? cloudModels(), extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
-    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),push:config.remotePush && Boolean(config.remoteOrigin)});
+    remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),approvalDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
     await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));
     await runtime.recover();

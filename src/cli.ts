@@ -164,7 +164,13 @@ try {
       if (action === 'list') result = {url:(config.remoteOrigin ?? `http://127.0.0.1:${config.port}`)+'/remote',devices:await request('/v1/remote/devices')};
       else if (action === 'pair') result = await request('/v1/remote/devices','POST',{accountId:rest[0],deviceId:rest[1]});
       else if (action === 'revoke') result = await request('/v1/remote/devices/'+segment(rest[0])+'/'+segment(rest[1]),'DELETE');
-      else throw new Error('Use remote list, pair or revoke.');
+      else if (action === 'share-approval' || action === 'unshare-approval') {
+        const [taskId, approvalId, accountId, deviceId, digest] = rest;
+        if (rest.length !== 5) throw new Error('Use remote '+action+' <task-id> <approval-id> <account-id> <device-id> <digest>.');
+        const route = action === 'share-approval' ? '/share' : '/unshare';
+        result = await request('/v1/tasks/'+segment(taskId)+'/approvals/'+segment(approvalId)+route,'POST',{accountId,deviceId,digest});
+      }
+      else throw new Error('Use remote list, pair, revoke, share-approval or unshare-approval.');
     } else if (command === 'computer') {
       if (!['status','takeover','return'].includes(action)) throw new Error('Use computer status, takeover or return.');
       result = await request('/v1/computer'+(action === 'status' ? '' : '/'+action),action === 'status' ? 'GET' : 'POST',action === 'status' ? undefined : {});

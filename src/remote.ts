@@ -5,6 +5,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { DelegationInputError } from "./delegation.js";
+import { ApprovalError } from "./approvals.js";
+import type { RemoteDevices, SharedApproval } from "./remote-devices.js";
 import { TaskConflictError, type LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
 import { remoteManifest, remoteWorker } from "./remote-worker.js";
@@ -17,6 +19,7 @@ export interface RemoteDevice {
   accountId: string;
   deviceId: string;
   tokenHash: string;
+  sharedApprovals?: SharedApproval[];
 }
 
 export interface RemoteOptions {
@@ -26,6 +29,7 @@ export interface RemoteOptions {
   devices: readonly RemoteDevice[] | (() => readonly RemoteDevice[] | Promise<readonly RemoteDevice[]>);
   push?: boolean;
   pushSender?: PushSender;
+  approvalDevices?: Pick<RemoteDevices, "withSharedApprovals">;
 }
 
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -312,7 +316,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     finally { if (--entry.references === 0) queues.delete(path); }
   }
 
-  async function authenticate(request: IncomingMessage): Promise<Scope & { pairingId: string }> {
+  async function authenticate(request: IncomingMessage): Promise<Scope & { pairingId: string; tokenHash: string }> {
     const token = request.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
     if (!token || !tokenPattern.test(token)) throw new HttpError(401, "Enter this device’s pairing token.");
     const supplied = Buffer.from(digest(token), "hex");
@@ -323,7 +327,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       throw new HttpError(401, "Enter this device’s pairing token.");
     }
     return { channel: "web", accountId: device.accountId, deviceId: device.deviceId,
-      pairingId: pairingIdFor(device) };
+      pairingId: pairingIdFor(device), tokenHash: device.tokenHash };
   }
 
   function freshConversation(scope: Scope, conversationId: string): Conversation {
@@ -696,8 +700,36 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         response.end(script ? remoteScript : remotePage);
         return true;
       }
-      const { pairingId, ...scope } = await authenticate(request);
-      if (method === "GET" && route === "/remote/api/session") send(response, 200, { ...scope, pairingId });
+      const { pairingId, tokenHash, ...scope } = await authenticate(request);
+      const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
+      if (method === "GET" && route === "/remote/api/session") {
+        send(response, 200, { ...scope, pairingId, ...(options.approvalDevices ? { actionApprovals: true } : {}) });
+      } else if (options.approvalDevices && method === "GET" && route === "/remote/api/action-approvals") {
+        const rows = await options.approvalDevices.withSharedApprovals(tokenHash, async grants => {
+          const previews = [];
+          for (const grant of grants) {
+            const approval = await runtime.sharedApproval(grant.taskId, grant.approvalId, grant.digest);
+            if (approval) previews.push(approval);
+          }
+          return previews;
+        });
+        if (!rows) throw new HttpError(401, "Enter this device’s pairing token.");
+        send(response, 200, rows);
+      } else if (options.approvalDevices && method === "POST" && actionApproval) {
+        const [, taskId, approvalId] = actionApproval;
+        const { decision, digest } = await json(request);
+        if ((decision !== "allow" && decision !== "deny") || typeof digest !== "string" || !shaPattern.test(digest)) {
+          throw new HttpError(400, "Provide the decision and displayed digest.");
+        }
+        const receipt = await options.approvalDevices.withSharedApprovals(tokenHash, async grants => {
+          const grant = grants.find(item => item.taskId === taskId && item.approvalId === approvalId);
+          if (!grant) throw new HttpError(404, "Shared action approval not found.");
+          if (grant.digest !== digest) throw new HttpError(409, "The displayed action does not match this approval.");
+          return runtime.decideApproval(taskId!, approvalId!, decision, digest);
+        });
+        if (!receipt) throw new HttpError(401, "Enter this device’s pairing token.");
+        send(response, 200, receipt);
+      }
       else if (route === "/remote/api/push") {
         const pairing = { ...scope, pairingId };
         if (method === "GET") send(response, 200, push ? await push.status(pairing) : { publicKey: null, subscribed: false });
@@ -792,7 +824,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;
