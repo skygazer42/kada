@@ -7,6 +7,7 @@ import type { JsonObject } from "@earendil-works/pi-durable";
 import { serve } from "../src/server.js";
 import { createClient } from "../src/client.js";
 import { ChatSession } from "../src/chat.js";
+import type { TaskView } from "../src/task-view.js";
 import { hasTool, scriptedFixture, until } from "./helpers.js";
 
 test("a worker question survives reopen and the same child accepts one owner answer", async () => {
@@ -63,6 +64,10 @@ test("a worker question survives reopen and the same child accepts one owner ans
     const client = createClient(settings);
     const waiting = await reopened.status(task.id);
     assert.deepEqual(waiting.delegations[0]?.question, child.question);
+    const desktop = await client.request<TaskView>(`/v1/tasks/${task.id}/view`);
+    assert.deepEqual(desktop.delegations.filter(item => item.status === "waiting_input").map(item => ({
+      conversationId: item.conversationId, name: item.name, question: item.question,
+    })), [{ conversationId: child.conversationId, name: child.name, question: child.question }]);
     assert.equal((await reopened.list("pending"))[0]?.id, task.id);
     const output: string[] = [];
     const chat = new ChatSession(client, event => output.push(event.text));
@@ -91,6 +96,7 @@ test("a worker question survives reopen and the same child accepts one owner ans
         [waiting.delegations[1]!.conversationId, "completed", "Independent sibling done."]]);
     assert.equal(childAnswers, 1);
     assert.equal(reports, 1);
+    assert(!(await client.request<TaskView>(`/v1/tasks/${task.id}/view`)).delegations.some(item => item.question));
   } finally {
     await daemon?.close();
     await fixture.close();

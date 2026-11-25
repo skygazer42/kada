@@ -57,7 +57,9 @@ struct PetBubble: View {
                 HStack(alignment: .top, spacing: 10) {
                     Text(error).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
-                    Button("重试") { model.retry() }.buttonStyle(.plain).accessibilityLabel("保留当前输入并重试")
+                    Button(model.mode == .childInput ? "刷新任务" : "重试") { model.retry() }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(model.mode == .childInput ? "刷新任务状态" : "保留当前输入并重试")
                 }.font(.system(size: 13)).foregroundColor(Palette.error)
                     .padding(12).background(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.error.opacity(0.5)))
                     .padding(.horizontal, 22).padding(.bottom, 14)
@@ -115,6 +117,8 @@ struct PetBubble: View {
             if let task = model.task, let approval = task.pendingApproval { actionApproval(approval, taskID: task.id) }
             else { clarification }
         case .working: working
+        case .childInput:
+            if let task = model.task { childInput(task).id(task.id) }
         case .delivered: delivery
         case .paused, .budget, .attention: attention
         case .cancelled: cancelled
@@ -254,6 +258,21 @@ struct PetBubble: View {
             editor("补充说明，或添加所需资料…", height: 88)
             attachments
             HStack { addFilesButton; Spacer(); sendButton("补充并继续") }
+        }.padding([.horizontal, .bottom], 24).padding(.top, 10)
+    }
+    private func childInput(_ task: PetTask) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            heading(model.taskTitle)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(task.childQuestions) { input in
+                        PetChildReply(input: input, busy: model.busy) { text, requestID in
+                            model.answerChild(input, taskID: task.id, text: text, requestID: requestID)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Button("暂停任务") { model.control("pause") }.buttonStyle(.plain).disabled(model.busy)
         }.padding([.horizontal, .bottom], 24).padding(.top, 10)
     }
     private var working: some View {
@@ -513,6 +532,28 @@ struct PetBubble: View {
             }
         }
         return !providers.isEmpty
+    }
+}
+
+private struct PetChildReply: View {
+    let input: PetChildInput
+    let busy: Bool
+    let send: (String, UUID) -> Void
+    @State private var draft = ""
+    @State private var requestID = UUID()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(input.name).font(.system(size: 13, weight: .medium)).foregroundColor(Palette.muted)
+            Text(input.question.text).textSelection(.enabled)
+            TextField("回复子任务", text: $draft, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...5)
+                .accessibilityLabel("回复 \(input.name)")
+            Button("发送答复") { send(draft, requestID) }
+                .buttonStyle(PetButton())
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 4000)
+        }.disabled(busy)
     }
 }
 

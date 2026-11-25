@@ -52,6 +52,21 @@ import AppKit
             "digest": actionDigest, "argumentsPreview": "{}"
         ]]
         try expect(try decode(waiting).pendingApproval?.status == "expired", "expired action remains available for rejection")
+        var delegated = object
+        delegated["status"] = "running"
+        let delegationRows: [[String: Any]] = [
+            ["conversationId": 2, "name": "Research", "status": "waiting_input", "question": ["id": "19", "text": "Which month?"]],
+            ["conversationId": 3, "name": "Review", "status": "running"]
+        ]
+        delegated["delegations"] = delegationRows
+        let childWaiting = try decode(delegated)
+        try expect(childWaiting.mode == .childInput && childWaiting.childQuestions.count == 1, "only the waiting child needs a reply")
+        let question = childWaiting.childQuestions.first
+        try expect(question?.conversationId == 2 && question?.question.id == "19", "reply targets the original child and question")
+        try expect(childWaiting.attentionKey != ready.attentionKey, "child waiting opens the handoff")
+        delegated["status"] = "paused"
+        let pausedChild = try decode(delegated)
+        try expect(pausedChild.mode == .paused && pausedChild.childQuestions.isEmpty, "paused parents cannot accept child replies")
         object["status"] = "running"
         try expect(try decode(object).confirmation == nil, "ordinary execution cannot authorize")
         for state in ["blocked", "failed", "needs_attention", "answered"] {

@@ -103,6 +103,22 @@ struct PetApproval: Decodable, Equatable {
     let digest: String
     let argumentsPreview: String
 }
+struct PetChildQuestion: Decodable, Equatable {
+    let id: String
+    let text: String
+}
+struct PetDelegation: Decodable, Equatable {
+    let conversationId: Int
+    let name: String
+    let status: String
+    let question: PetChildQuestion?
+}
+struct PetChildInput: Equatable, Identifiable {
+    let conversationId: Int
+    let name: String
+    let question: PetChildQuestion
+    var id: String { "\(conversationId):\(question.id)" }
+}
 struct PetTask: Decodable, Equatable {
     let id: String
     let objective: String
@@ -119,15 +135,25 @@ struct PetTask: Decodable, Equatable {
     var interaction: String?
     var reply: PetReply?
     var approvals: [PetApproval]?
+    var delegations: [PetDelegation]?
+
+    var childQuestions: [PetChildInput] {
+        guard status == "running" else { return [] }
+        return (delegations ?? []).compactMap { child in
+            guard child.status == "waiting_input", let question = child.question else { return nil }
+            return PetChildInput(conversationId: child.conversationId, name: child.name, question: question)
+        }
+    }
 
     var pendingApproval: PetApproval? {
         guard status == "waiting_user" else { return nil }
         return approvals?.first { $0.status == "pending" || $0.status == "expired" }
     }
 
-    enum Mode: String { case chat, working, clarify, confirm, delivered, paused, budget, attention, cancelled }
+    enum Mode: String { case chat, working, childInput, clarify, confirm, delivered, paused, budget, attention, cancelled }
     var mode: Mode {
         if interaction == "chat", ["running", "pending", "answered"].contains(status) { return .chat }
+        if !childQuestions.isEmpty { return .childInput }
         switch status {
         case "running", "pending", "verifying": return .working
         case "clarifying", "waiting_user": return .clarify
@@ -140,7 +166,7 @@ struct PetTask: Decodable, Equatable {
         }
     }
     var attentionKey: String {
-        "\(id):\(mode.rawValue):\(brief?.revision ?? 0):\(question ?? ""):\(reason ?? ""):\(reply?.timestamp ?? 0)"
+        "\(id):\(mode.rawValue):\(brief?.revision ?? 0):\(question ?? ""):\(reason ?? ""):\(reply?.timestamp ?? 0):\(childQuestions.map(\.id).joined(separator: ","))"
     }
     var confirmation: [String: Any]? {
         guard mode == .confirm, !confirmed, let brief = brief, brief.questions.isEmpty,

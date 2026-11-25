@@ -246,6 +246,8 @@ npm run test:computer:browser -- --live --command C:/path/to/agent-browser-win32
 
 后台子任务需要用户补充信息时，原任务会进入终端的 `/tasks pending` 列表。用 `/attach 任务ID` 查看问题，再用 `/reply-child 子会话ID 问题ID 答复` 将回复送回原子会话。其他子任务可以继续执行，主任务等待这一批结果再交付。
 
+macOS 任务卡显示每个正在等答复的子任务。每条答复从对应问题下发送，提交失败时可在同一张卡重试。任务卡沿用原任务、子会话和问题 ID。
+
 在已接入的本地任务中用 `/children` 查看子会话 ID 与状态，或用 `/stop-child 子会话ID` 停止其中一个后台子任务。此前写入的文件仍可检查，同批其他子任务继续运行。重启会完成已经保存的停止操作。
 
 ## 验证

@@ -50,6 +50,7 @@ import UniformTypeIdentifiers
         case nil, .chat: return task?.status == "running" ? "正在回复" : "在听"
         case .confirm: return editing ? "调整约定" : "确认交付"
         case .clarify: return "补充资料"
+        case .childInput: return "子任务待答"
         case .working: return task?.confirmed == false ? "理清目标" : "正在工作"
         case .delivered: return "已交付"
         case .paused: return "已暂停"
@@ -68,7 +69,7 @@ import UniformTypeIdentifiers
         switch mode {
         case nil: height = attachments.isEmpty ? 320 : 392
         case .confirm: height = editing ? 520 : 580
-        case .clarify: height = 500
+        case .clarify, .childInput: height = 500
         case .chat:
             let lines = (task?.reply?.text ?? "正在回复…").components(separatedBy: "\n").reduce(0) { $0 + max(1, Int(ceil(Double($1.count) / 25))) }
             height = min(620, max(320, 290 + CGFloat(lines) * 27)) + min(64, CGFloat(attachments.count) * 30)
@@ -168,7 +169,7 @@ import UniformTypeIdentifiers
     }
     func submit() {
         var text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!text.isEmpty || editing), !busy, !showingMemory else { return }
+        guard mode != .childInput, (!text.isEmpty || editing), !busy, !showingMemory else { return }
         if editing {
             do { text = try PetBriefEdit.message(text, cost: editCost, minutes: editMinutes) }
             catch { self.error = error.localizedDescription; return }
@@ -194,6 +195,17 @@ import UniformTypeIdentifiers
             let _: PetOK = try await self.api.request("/v1/tasks/\(current.id)/confirm", method: "POST", body: approval)
             await self.refresh()
             if self.mode == .working { self.hideBubble?() }
+        }
+    }
+    func answerChild(_ input: PetChildInput, taskID: String, text: String, requestID: UUID) {
+        let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let current = task, selectedID == taskID, current.id == taskID,
+              current.childQuestions.contains(input), !answer.isEmpty, answer.utf16.count <= 4000 else { return }
+        perform {
+            struct Receipt: Decodable { let requestId: String }
+            let path = "/v1/tasks/\(taskID)/delegations/\(input.conversationId)/questions/\(input.question.id)/answer"
+            let _: Receipt = try await self.api.request(path, method: "POST", body: ["requestId": requestID.uuidString, "answer": answer])
+            await self.refresh()
         }
     }
     func decideApproval(_ approval: PetApproval, taskID: String, allow: Bool) {
@@ -251,7 +263,7 @@ import UniformTypeIdentifiers
         }
     }
     func retry() {
-        if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editing { submit(); return }
+        if mode != .childInput && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editing) { submit(); return }
         Task {
             do { try await api.checkHealth(); error = nil; await refresh() }
             catch { self.error = "暂时联系不上本地后台。当前输入和任务会保留，请稍后重试。" }
