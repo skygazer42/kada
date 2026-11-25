@@ -9,6 +9,7 @@ import { acceptanceChecks, type AcceptanceCheck } from "./checks.js";
 import { localEnvironment, shellEnvironment } from "./execution.js";
 import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, routineTiming, type RoutineTiming, type RoutineSchedule } from "./routine-schedule.js";
 import type { LocalRuntime } from "./runtime.js";
+import { normalizeMcpPrecheck, type McpPrecheck, type McpTools } from "./mcp-tools.js";
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -33,7 +34,7 @@ export type RoutineInput = {
   overlapPolicy?: "skip";
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
-  precheck?: { command: string[] };
+  precheck?: { command: string[] } | { mcp: McpPrecheck };
   event?: RoutineEvent;
 };
 
@@ -173,6 +174,7 @@ export interface LocalRoutineOptions {
   dataDir: string;
   execute(occurrence: RoutineOccurrence, signal: AbortSignal): Promise<RoutineExecution>;
   taskOverview?(taskId: string): Promise<TaskOverview | undefined>;
+  mcp?: Pick<McpTools, "validatePrecheck" | "samplePrecheck">;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
 }
@@ -275,12 +277,16 @@ function definition(input: RoutineInput): RoutineDefinition {
   if (input.notifyOnChange !== undefined && typeof input.notifyOnChange !== "boolean") {
     throw new RoutineError(400, "The notifyOnChange setting must be a boolean.");
   }
-  const precheck = input.precheck;
-  if (precheck !== undefined && (!precheck || input.action !== "task" || !input.workspace ||
-    !Array.isArray(precheck.command) || precheck.command.length > 64 ||
-    typeof precheck.command[0] !== "string" || !precheck.command[0].trim() ||
-    precheck.command.some(arg => typeof arg !== "string" || arg.includes("\0")) || precheck.command.join("").length > 16_000)) {
-    throw new RoutineError(400, "A precheck requires a task workspace and a command argument array.");
+  let precheck = input.precheck;
+  if (precheck !== undefined) {
+    if (!precheck || typeof precheck !== "object" || Array.isArray(precheck) || input.action !== "task" || !input.workspace ||
+      Object.keys(precheck).length !== 1) throw new RoutineError(400, "A precheck requires a task workspace and exactly one command or MCP check.");
+    if ("mcp" in precheck) precheck = { mcp: normalizeMcpPrecheck(precheck.mcp) };
+    else if ("command" in precheck && Array.isArray(precheck.command) && precheck.command.length <= 64 &&
+      typeof precheck.command[0] === "string" && precheck.command[0].trim() &&
+      precheck.command.every(arg => typeof arg === "string" && !arg.includes("\0")) && precheck.command.join("").length <= 16_000) {
+      precheck = { command: [...precheck.command] };
+    } else throw new RoutineError(400, "A precheck requires a command argument array or a tested MCP tool.");
   }
   const budget = input.budget;
   if (budget !== undefined && (
@@ -302,7 +308,7 @@ function definition(input: RoutineInput): RoutineDefinition {
     ...(overlapPolicy ? { overlapPolicy } : {}),
     notifyOnChange: input.notifyOnChange ?? false,
     ...(input.event === undefined ? {} : { event: eventRule(input.event) }),
-    ...(precheck ? { precheck: { command: [...precheck.command] } } : {}),
+    ...(precheck ? { precheck } : {}),
     ...(budget ? {
       budget: {
         maxEstimatedCostUsd: budget.maxEstimatedCostUsd,
@@ -379,9 +385,19 @@ function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
   };
 }
 
-async function samplePrecheck(workspace: string, command: string[], ctx: typeof context) {
+async function samplePrecheck(workspace: string, precheck: NonNullable<RoutineInput["precheck"]>, ctx: typeof context, mcp: LocalRoutineOptions["mcp"]) {
+  if ("mcp" in precheck) {
+    try {
+      if (!mcp) throw new Error("MCP prechecks are unavailable.");
+      return await mcp.samplePrecheck(workspace, precheck.mcp,
+        AbortSignal.any([AbortSignal.timeout(30_000), ...(ctx.abortSignal ? [ctx.abortSignal] : [])]));
+    } catch {
+      ctx.abortSignal?.throwIfAborted();
+      return { detail: "MCP precheck failed. Check its connection, permissions and read-only tool." };
+    }
+  }
   const output = createHash("sha256");
-  const result = await localEnvironment(workspace).exec(command, {
+  const result = await localEnvironment(workspace).exec(precheck.command, {
     timeout: 30, inheritEnv: false, env: shellEnvironment(),
     onOutput(text, _ctx, info) { if (info.stream === "stdout") output.update(text); },
   }, ctx);
@@ -499,7 +515,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         const due = occurrence;
         const { id, scheduledAt } = due;
         if (due.precheck && newClaim) {
-          const sample = await samplePrecheck(due.workspace!, due.precheck.command, ctx);
+          const sample = await samplePrecheck(due.workspace!, due.precheck, ctx, options.mcp);
           if (runtime.signal.aborted) return;
           await runtime.commit(async (tx) => {
             const { rules } = await tx.doc(routinesDoc);
@@ -507,7 +523,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             if (!current(rule)) return completed;
             const claim = claimFor(rule);
             if (claim?.id !== id) return completed;
-            if (sample.sha256 === undefined) {
+            if ("detail" in sample) {
               precheck = { status: "failed", detail: sample.detail };
             } else {
               const other = (manual ? rule.claim : rule.manual?.claim)?.precheckResult;
@@ -605,8 +621,16 @@ export class LocalRoutines {
     }
   }
 
+  private async validatePrecheck(details: RoutineDefinition) {
+    if (!details.precheck || !("mcp" in details.precheck)) return;
+    if (!this.options.mcp) throw new RoutineError(400, "MCP prechecks are unavailable.");
+    try { await this.options.mcp.validatePrecheck(details.workspace!, details.precheck.mcp); }
+    catch (error) { throw new RoutineError(400, (error as Error).message); }
+  }
+
   async create(input: RoutineInput): Promise<Routine> {
     const details = definition(input);
+    await this.validatePrecheck(details);
     const id = input.id === undefined ? randomUUID() : inputId(input.id);
     const { harness, conversationId, timer } = await this.open();
     const routine = await harness.commit(async (tx) => {
@@ -754,6 +778,7 @@ export class LocalRoutines {
     const key = keyFor(inputId(id));
     if (input?.id !== undefined && input.id !== id) throw new RoutineError(400, "A routine update cannot change its ID.");
     const details = definition(input);
+    await this.validatePrecheck(details);
     const { harness, conversationId, timer } = await this.open();
     const result = await harness.commit(async (tx) => {
       const { rules } = await tx.doc(routinesDoc);

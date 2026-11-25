@@ -44,7 +44,11 @@ Status: implemented
 
 答复权限同时覆盖共享原运行当前批次的子任务问题。入口按配对实例和请求 ID 生成固定摘要，原子会话的 Pi 问题回执负责防重；暂停后沿原会话继续，子任务问题及浏览器尚未提交的输入保持原身份。运行控制用 `share-controls` 单独授权；撤回查看同时清除答复和控制权限。状态版本包含目标轮次，继续只移除手机暂停标记并唤醒原 Harness，保留预算、时限和子会话；本机暂停仍须由本机处理。 [Suparagent 运行操作](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_execution.py#L115) · [Codync 定向操作](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/host/src/api/bots.rs#L358)
 
+应用变更检查复用已启用的 MCP 连接和原 Pi 规则预检。规则固定连接修订、工具名与 JSON 参数；服务的只读声明、项目工具范围和单次审批策略在配置时及实际派发前检查。内容与结构化结果按稳定 JSON 计算指纹，协议 `_meta` 不参与；预检正文不作为用户消息或 Agent 指令。首个有效样本沿用原预检语义启动一次，只有任务受理后推进基线。暂停、取消、超时和重启沿原 Pi 定时任务处理。 [Rakazo 连接器变更检查](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L735)
+
 ## Alternatives considered
+
+另建应用账号库可以提供统一连接页面，但会重复现成 MCP 服务的授权、令牌和工具权限管理。当前预检直接使用已有服务，账户授权仍由连接器自身完成。每次启动模型来判断是否变化更通用，但相同工具内容的指纹足以避免本次额外模型请求；复杂的内容筛选仍可使用已支持的命令预检。
 
 单次 MCP 审批复用 Pi 目标待答与持久任务。审批阶段保存准确参数和任务修订，获得允许后由持久任务在派发前记录意图，同一请求 ID 将结果回送父会话。再发一个普通工具指令会让模型重新生成参数，无法证明派发的参数就是用户看到的版本。项目工作项独立保存项目身份和目标修订，任务自身作为运行回执。
 

@@ -144,7 +144,7 @@ export class LocalRuntime {
       }),
     });
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,taskOverview:async id => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,taskOverview:async id => {
       try { return await this.taskOverview(id); }
       catch (error) {
         const cause = error as NodeJS.ErrnoException;

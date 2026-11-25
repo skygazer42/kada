@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
-import { defineTool, type ToolExecutionApi, type ToolExecutionResult } from '@earendil-works/pi-durable';
+import { defineTool, type JsonObject, type ToolExecutionApi, type ToolExecutionResult } from '@earendil-works/pi-durable';
 import type { Context } from '@earendil-works/chord/context';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -16,7 +16,8 @@ export type McpDefinition = { id: string } & (
 );
 export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[]; approvalTools?: string[] };
 export type ProjectMcpTool = { id: string; tool: string };
-type FoundTool = Pick<ServerTool, 'name' | 'description' | 'inputSchema'>;
+export type McpPrecheck = { id: string; revision: string; tool: string; arguments: JsonObject };
+type FoundTool = Pick<ServerTool, 'name' | 'description' | 'inputSchema'> & { readOnly?: true };
 type McpTest = { checkedAt: string; tools?: FoundTool[] } & (
   | { status: 'ok'; tools: FoundTool[] }
   | { status: 'failed'; message: string }
@@ -25,7 +26,7 @@ type SavedConnection = { definition: McpDefinition; revision: string; allowedToo
 export type McpConnection = Omit<SavedConnection, 'definition' | 'test'> & {
   id: string;
   transport: McpDefinition['transport'];
-  test?: Omit<McpTest, 'tools'> & { message?: string; tools?: Array<Pick<FoundTool, 'name' | 'description'>> };
+  test?: Omit<McpTest, 'tools'> & { message?: string; tools?: Array<Pick<FoundTool, 'name' | 'description' | 'readOnly'>> };
 };
 
 const pinOf = (connection: SavedConnection): McpPin => ({
@@ -39,6 +40,24 @@ const pinOf = (connection: SavedConnection): McpPin => ({
 const idPattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const envPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const headerPattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+}
+
+export function normalizeMcpPrecheck(input: unknown): McpPrecheck {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['id', 'revision', 'tool', 'arguments'].includes(key))) {
+    throw new Error('Provide an MCP precheck connection, revision, tool and arguments.');
+  }
+  const { id, revision, tool, arguments: args } = input as Record<string, unknown>;
+  if (typeof id !== 'string' || !idPattern.test(id) || typeof revision !== 'string' || !revision || revision.length > 120 ||
+    typeof tool !== 'string' || !tool || tool.length > 256 || tool.includes('\0') ||
+    !args || typeof args !== 'object' || Array.isArray(args) || JSON.stringify(args).length > 16_000) {
+    throw new Error('Provide a tested MCP tool revision and an argument object of up to 16,000 characters.');
+  }
+  return { id, revision, tool, arguments: JSON.parse(stableJson(args)) as JsonObject };
+}
 
 async function projectRoot(workspace: string): Promise<string> {
   const project = await memoryProject(workspace);
@@ -105,7 +124,7 @@ function status(connection: SavedConnection): McpConnection {
   return {
     id: definition.id, transport: definition.transport, ...publicFields,
     test: test && (test.status === 'ok'
-      ? { status: 'ok', checkedAt: test.checkedAt, tools: test.tools.map(({ name, description }) => ({ name, description })) }
+      ? { status: 'ok', checkedAt: test.checkedAt, tools: test.tools.map(({ name, description, readOnly }) => ({ name, description, ...(readOnly ? { readOnly } : {}) })) }
       : { status: 'failed', checkedAt: test.checkedAt, message: test.message }),
   };
 }
@@ -121,9 +140,9 @@ async function discover(client: Client, signal: AbortSignal): Promise<FoundTool[
   let cursor: string | undefined;
   do {
     const page = await client.listTools(cursor ? { cursor } : {}, { signal });
-    for (const { name, description, inputSchema } of page.tools) {
+    for (const { name, description, inputSchema, annotations } of page.tools) {
       if (!name || tools.has(name)) throw new Error('MCP discovery returned an invalid tool name.');
-      tools.set(name, { name, description, inputSchema });
+      tools.set(name, { name, description, inputSchema, ...(annotations?.readOnlyHint === true ? { readOnly: true } : {}) });
     }
     if (tools.size > 128 || (page.nextCursor && (page.nextCursor === cursor || page.tools.length === 0))) {
       throw new Error('MCP discovery returned too many tools or an invalid page.');
@@ -246,6 +265,25 @@ export class McpTools {
     return pin.approvalTools?.includes(name) === true || connection.approvalTools?.includes(name) === true;
   }
 
+  async validatePrecheck(workspace: string, input: McpPrecheck): Promise<McpPin> {
+    const check = normalizeMcpPrecheck(input);
+    const pin = (await this.pins(workspace)).find(pin => pin.id === check.id && pin.revision === check.revision && pin.tools.includes(check.tool));
+    if (!pin) throw new Error('Use a currently enabled project MCP tool and its tested revision.');
+    if (!pin.discovery?.some(tool => tool.name === check.tool && tool.readOnly)) throw new Error('MCP prechecks require a tool declared read-only.');
+    if (await this.requiresApproval(pin, check.tool)) throw new Error('An MCP tool requiring per-action approval cannot run as a precheck.');
+    return pin;
+  }
+
+  async samplePrecheck(workspace: string, check: McpPrecheck, signal?: AbortSignal): Promise<{ sha256: string }> {
+    const pin = await this.validatePrecheck(workspace, check);
+    const result = await this.call(pin, check.tool, check.arguments, signal, undefined,
+      async () => { await this.validatePrecheck(workspace, check); });
+    if (result.isError) throw new Error('The MCP precheck returned an error.');
+    const value = stableJson({ content: result.content, structuredContent: result.structuredContent });
+    if (Buffer.byteLength(value) > 1_000_000) throw new Error('The MCP precheck result exceeds 1 MB.');
+    return { sha256: createHash('sha256').update(value).digest('hex') };
+  }
+
   private async readProjects(): Promise<Record<string, ProjectMcpTool[]>> {
     try {
       return await readJson<Record<string, ProjectMcpTool[]>>(this.projectsPath);
@@ -337,7 +375,7 @@ export class McpTools {
     return connection;
   }
 
-  private async call(pin: McpPin, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined, beforeApprovedDispatch?: () => Promise<void>) {
+  private async call(pin: McpPin, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined, beforeApprovedDispatch?: () => Promise<void>, beforeDispatch?: () => Promise<void>) {
     const authorizedConnection = async () => {
       const connection = this.current(await this.read(), pin);
       if (!connection.enabled || !connection.allowedTools.includes(name)) throw new Error('This MCP tool is no longer enabled or allowed.');
@@ -349,6 +387,7 @@ export class McpTools {
       return { result: this.connect(connection.definition, 60_000, signal, async (client, activeSignal, credentials) => {
         const { call } = await this.changes.run(async () => {
           await authorizedConnection();
+          await beforeDispatch?.();
           await beforeApprovedDispatch?.();
           activeSignal.throwIfAborted();
           return { call: client.callTool({ name, arguments: args }, undefined, { signal: activeSignal, timeout: 60_000 }) };
