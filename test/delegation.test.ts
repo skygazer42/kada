@@ -151,6 +151,47 @@ test("stopping one background child preserves its sibling and reports the batch 
   }
 });
 
+test("interrupting a child's current tool lets the same Pi conversation finish", async () => {
+  const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  const fixture = await scriptedFixture(conversation => {
+    const results = conversation.messages.filter(message => message.role === "toolResult");
+    if (!hasTool(conversation, "delegate_background")) {
+      const bash = results.find(result => result.toolName === "bash");
+      if (bash) {
+        assert.match(JSON.stringify(bash), /aborted/i);
+        return fauxAssistantMessage("Continued after the interrupted command.");
+      }
+      return call("bash", {
+        command: `node -e 'const fs=require("node:fs");fs.writeFileSync("started.txt",String(process.pid));setTimeout(()=>fs.writeFileSync("ended.txt","finished"),30000)'`,
+        timeout: 45,
+      });
+    }
+    if (conversation.messages.some(message => message.role === "user" && String(message.content).startsWith("Background delegation finished."))) {
+      return call("task_submit", { summary: "Recovered the child result.", artifacts: [] });
+    }
+    if (results.some(result => result.toolName === "delegate_background")) return fauxAssistantMessage("Waiting for the child.");
+    return call("delegate_background", { tasks: [{ name: "worker", instructions: "Run the command." }] });
+  });
+  try {
+    const task = await fixture.runtime.create("Run an interruptible child", fixture.workspace);
+    const working = await until(() => fixture.runtime.status(task.id), status =>
+      status.delegations.length === 1 && status.activeTools.some(tool => tool.worker && tool.name === "bash"));
+    const child = working.delegations[0]!;
+    const pid = await until(() => readFile(join(child.directory, "started.txt"), "utf8").then(Number, () => 0), value => value > 0);
+    const receipt = await fixture.runtime.interruptChild(task.id, child.conversationId);
+    assert.equal(receipt.interrupted, 1);
+    assert.equal(receipt.pending, 0);
+    const completed = await until(() => fixture.runtime.status(task.id), status => status.status === "completed");
+    assert.deepEqual(completed.delegations.map(item => [item.conversationId, item.status, item.answer]),
+      [[child.conversationId, "completed", "Continued after the interrupted command."]]);
+    await until(async () => {
+      try { process.kill(pid, 0); return true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
+    }, alive => !alive);
+    await assert.rejects(readFile(join(child.directory, "ended.txt")), { code: "ENOENT" });
+  } finally { await fixture.close(); }
+});
+
 test("cancelling a goal stops a background child and keeps its receipt without waking the parent", async () => {
   const childStarted = Promise.withResolvers<void>();
   const childStopped = Promise.withResolvers<void>();

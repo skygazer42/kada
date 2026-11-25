@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
-import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildAnswers, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
+import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildAnswers, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
@@ -1017,6 +1017,16 @@ export class LocalRuntime {
           costLimit: goal ? goal.costLimit ?? null : meta.entrypoint === "chat" ? meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 : null },
         resumeBudget: this.resumeBudget(meta, goal),
         conversations, tasks: inspection.tasks, usage };
+    });
+  }
+  async interruptChild(id: string, childId: number) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy) throw new DelegationInputError(404, "Background child not found.");
+      const active = await this.open(meta, false);
+      const goal = await this.goalState(active);
+      const working = meta.control === "active" && goal?.phase === "working" ? goal : undefined;
+      return interruptChildTools(active.harness, childId, working, ctx);
     });
   }
   async stopChild(id: string, childId: number) {

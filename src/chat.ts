@@ -54,11 +54,19 @@ export class ChatSession {
         this.info(delegations.length ? delegations.map(child => `${child.conversationId} [${child.status}] ${child.name}`).join("\n") : "当前任务没有子任务。");
         return true;
       }
-      if (command === "/stop-child") {
+      if (command === "/stop-child" || command === "/interrupt-child") {
         if (!this.taskId) throw new Error("先用 /attach 选择任务。");
-        if (!argument || !/^\d+$/.test(argument)) throw new Error("用法：/stop-child 子会话ID");
-        await this.client.request(`/v1/tasks/${this.taskId}/delegations/${argument}/stop`, "POST", {});
-        this.info("已停止该子任务。");
+        if (!argument || !/^\d+$/.test(argument)) throw new Error(`用法：${command} 子会话ID`);
+        const path = `/v1/tasks/${this.taskId}/delegations/${argument}`;
+        if (command === "/stop-child") {
+          await this.client.request(path + "/stop", "POST", {});
+          this.info("已停止该子任务。");
+        } else {
+          const { interrupted, pending } = await this.client.request<{ interrupted: number; pending: number }>(path + "/interrupt", "POST", {});
+          if (interrupted) this.info(`已中断 ${interrupted} 个工具调用，子会话继续运行。`);
+          if (pending) this.info(`有 ${pending} 个工具调用的中断尚未确认，请查看任务状态。`);
+          if (!interrupted && !pending) this.info("没有需要中断的工具调用。");
+        }
         await this.poll();
         return true;
       }
@@ -73,7 +81,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');

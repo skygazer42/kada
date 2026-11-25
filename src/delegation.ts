@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, UsageDoc, type ConversationId, type Cursor, type EntryId, type Extension, type Harness, type SubmissionId, type SubmissionRecord, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { taskUsage } from "./budget.js";
@@ -73,6 +73,37 @@ export async function markChildStopped(harness: Harness, childId: number, goal: 
     state.stopped = true;
     return child;
   }, context);
+}
+
+export async function interruptChildTools(harness: Harness, childId: number, goal: GoalRevision | undefined, context: Context) {
+  if (!Number.isSafeInteger(childId) || childId < 1) throw new DelegationInputError(400, "Provide a valid child ID.");
+  const child = childId as ConversationId;
+  const tools = await harness.commit(async tx => {
+    const batch = await ownedBackgroundBatch(tx, child);
+    const { stopped } = await tx.doc(ChildQuestions, child);
+    const owner = await tx.task(batch.owner);
+    if (!goal || batch.revision !== goal.revision || batch.epoch !== goal.epoch || stopped ||
+      !owner || owner.abortRequested || owner.state.status === "terminal" || owner.state.status === "completing") {
+      throw new DelegationInputError(409, "This child is no longer active in the current batch.");
+    }
+    const live = await tx.doc(LiveDoc, child);
+    // Aborting an outer tool also aborts the nested calls it owns.
+    return (live.tools ?? []).flatMap(tool => tool.status === "running" && tool.taskId !== undefined ? [tool.taskId] : []);
+  }, context);
+  const signal = AbortSignal.timeout(15_000);
+  const wait = withAbortSignal(signal, context);
+  const outcomes = await Promise.all(tools.map(async tool => {
+    try {
+      if (await harness.abortTask(tool, wait) === "terminal") return "finished";
+      const result = await harness.waitForTask(tool, wait);
+      return result.state.outcome.status === "aborted" ? "interrupted" : "finished";
+    } catch (error) {
+      if (signal.aborted) return "pending";
+      throw error;
+    }
+  }));
+  return { childId, interrupted: outcomes.filter(value => value === "interrupted").length,
+    pending: outcomes.filter(value => value === "pending").length };
 }
 
 export async function restoreChildStops(harness: Harness, context: Context) {
