@@ -56,7 +56,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
-  type ReceivedThreadReport, type TaskThread, type ThreadOrigin, type ThreadReport } from './task-threads.js';
+  type ReceivedThreadReport, type TaskThread, type ThreadInvocation, type ThreadOrigin, type ThreadReport } from './task-threads.js';
 import { TurnWorkspaceSnapshot, WorkspaceSnapshots, WorkspaceSnapshotError, containsWorkspacePath } from './workspace-snapshots.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
@@ -96,6 +96,7 @@ export interface TaskMeta {
   projectCatalog?: true;
   threadTools?: true;
   thread?: TaskThread;
+  threadEditReceipts?: Record<string, { fingerprint: string; result: TaskThread }>;
   snapshotBeforeTurn?: true;
   structuredQuestions?: true;
   credentialProject?: string;
@@ -131,6 +132,15 @@ export interface TaskMeta {
   maxReworks?: number;
   maxStalls?: number;
 }
+function publicTaskMeta({ threadEditReceipts: _receipts, ...meta }: TaskMeta) { return meta; }
+
+function relatedThread(source: TaskMeta, target: TaskMeta): boolean {
+  if (target.id === source.id || target.remotePolicy || target.routineOccurrenceId || target.workItem || target.workspace !== source.workspace) return false;
+  if (target.thread?.sourceTaskId === source.id) return true;
+  const role = source.assistant;
+  return !!role && target.assistant?.id === role.id && target.assistant.project === role.project;
+}
+
 interface Active {
   harness: Harness;
   storage: Awaited<ReturnType<typeof openNodeSqliteStorage>>;
@@ -333,7 +343,7 @@ export class LocalRuntime {
       if ((filter === 'archived') !== Boolean(meta.thread?.archivedAt)) continue;
       const status = await this.status(meta.id);
       const handoff = taskHandoff(status);
-      if (filter === 'all' || handoff.group === filter) result.push({ ...meta, objective: status.objective, deadlineAt: status.deadlineAt, status: status.status, workerCount: status.workerCount, phase: status.goal?.phase, ...handoff });
+      if (filter === 'all' || handoff.group === filter) result.push({ ...publicTaskMeta(meta), objective: status.objective, deadlineAt: status.deadlineAt, status: status.status, workerCount: status.workerCount, phase: status.goal?.phase, ...handoff });
     }
     return result.sort((a,b) => Number(b.group === 'pending') - Number(a.group === 'pending') || b.createdAt-a.createdAt);
   }
@@ -517,15 +527,7 @@ export class LocalRuntime {
         return saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       if (thread?.openedBy === 'assistant') {
-        const active = this.active.get(thread.sourceTaskId), sourceInput = options.sourceInput;
-        if (!source?.threadTools || source.control !== 'active' || source.thread?.archivedAt || !active || !sourceInput || await this.goalState(active)) {
-          throw new TaskConflictError('Only an active local conversation can open a new thread by request.');
-        }
-        const input = await active.storage.submission(sourceInput, ctx);
-        if (input?.type !== 'input' || input.conversationId !== active.root.id || input.status !== 'placed' ||
-          input.requestId !== 'initial' && !input.requestId?.startsWith('user:')) {
-          throw new TaskConflictError('A thread must come from the original user input.');
-        }
+        await this.assertThreadInput(source, options.sourceInput);
       }
       const projectWorkspace = workspace === undefined || options.remote ? undefined : requestedWorkspace;
       const selectedModel = thread?.modelSelection;
@@ -605,33 +607,82 @@ export class LocalRuntime {
     return { id: task.id, thread: task.thread!, model: task.model, confirmationRequired: true };
   }
 
-  async editThread(id: string, input: Record<string, unknown>) {
+  private async assertThreadInput(source: TaskMeta | undefined, sourceInput: SubmissionId | undefined) {
+    const active = source ? this.active.get(source.id) : undefined;
+    if (!source?.threadTools || source.remotePolicy || source.control !== 'active' || source.thread?.archivedAt || !active || sourceInput === undefined || await this.goalState(active)) {
+      throw new TaskConflictError('Only an active local conversation can manage a thread by request.');
+    }
+    const input = await active.storage.submission(sourceInput, ctx);
+    if (input?.type !== 'input' || input.conversationId !== active.root.id || input.status !== 'placed' ||
+      input.requestId !== 'initial' && !input.requestId?.startsWith('user:')) {
+      throw new TaskConflictError('A thread action must come from the original user input.');
+    }
+  }
+
+  private async listThreads(sourceId: string, offset: number) {
+    return this.changes.run(async () => {
+      const source = await this.metadata(sourceId);
+      if (source.remotePolicy || !source.threadTools) throw new TaskConflictError('The local thread directory is unavailable.');
+      const rows = (await this.metadataList()).filter(target => relatedThread(source, target));
+      const view = (task: TaskMeta) => ({ id: task.id, title: (task.thread?.title ?? task.objective).slice(0, 80),
+        revision: task.thread?.revision ?? 0, archived: !!task.thread?.archivedAt });
+      const limit = 20, threads = [];
+      for (const target of rows.slice(offset, offset + limit)) {
+        const status = target.thread?.archivedAt ? 'archived' : (await this.taskState(await this.open(target, false), target)).status;
+        threads.push({ ...view(target), status, model: target.model });
+      }
+      return { current: view(source), threads, total: rows.length, nextOffset: offset + limit < rows.length ? offset + limit : null };
+    });
+  }
+
+  async editThread(id: string, input: Record<string, unknown>, caller?: ThreadInvocation & { sourceTaskId: string }) {
     if (!Number.isSafeInteger(input.revision) || Object.keys(input).some(key => !['revision', 'title', 'archived'].includes(key)) ||
       input.title === undefined && input.archived === undefined || input.archived !== undefined && typeof input.archived !== 'boolean') {
       throw new Error('Provide the current thread revision and a title or archive change.');
     }
     const title = input.title === undefined ? undefined : threadTitle(input.title);
     return this.changes.run(async () => {
-      const meta = await this.metadata(id);
+      const meta = await this.metadata(id).catch(error => {
+        if (caller && (error as NodeJS.ErrnoException).code === 'ENOENT') throw new TaskConflictError('Related local thread not found.');
+        throw error;
+      });
       if (meta.remotePolicy) throw new TaskConflictError('Thread organization is available for local tasks.');
+      let key: string | undefined, fingerprint: string | undefined;
+      if (caller) {
+        const source = caller.sourceTaskId === id ? meta : await this.metadata(caller.sourceTaskId);
+        await this.assertThreadInput(source, caller.input);
+        const closing = input.archived === true && title === undefined && relatedThread(source, meta);
+        const renaming = input.archived === undefined && title !== undefined && source.id === id;
+        if (!closing && !renaming) throw new TaskConflictError('This chat cannot edit that thread.');
+        key = `${source.id}:${caller.toolTaskId}`;
+        fingerprint = createHash('sha256').update(JSON.stringify([id, input.revision, title, input.archived])).digest('hex');
+        const receipt = meta.threadEditReceipts?.[key];
+        if (receipt) {
+          if (receipt.fingerprint !== fingerprint) throw new TaskConflictError('This thread request already has different content.');
+          return receipt.result;
+        }
+      }
       const previous: TaskThread = meta.thread ?? { revision: 0 };
       if (previous.revision !== input.revision) throw new TaskConflictError('The thread changed. Read its current revision before editing.');
       const archived = input.archived ?? Boolean(previous.archivedAt);
-      if (archived === Boolean(previous.archivedAt) && (title === undefined || title === previous.title)) return previous;
+      const changed = archived !== Boolean(previous.archivedAt) || title !== undefined && title !== previous.title;
+      if (!changed && !key) return previous;
       let active = this.active.get(id);
       if (archived && !previous.archivedAt) {
         active = await this.open(meta, false);
-        const { status, inspection } = await this.taskState(active, meta);
-        if (inspection.tasks.length || inspection.submissions.length ||
+        const { status, inspection, userQuestion, goal } = await this.taskState(active, meta);
+        const awaitingUser = caller && (userQuestion || goal?.question || ['awaiting_confirmation', 'clarifying', 'waiting_user'].includes(goal?.phase ?? ''));
+        if (awaitingUser || inspection.tasks.length || inspection.submissions.length ||
           !['answered', 'completed', 'cancelled', 'paused', 'budget_limited', 'failed', 'blocked', 'needs_attention'].includes(status)) {
           throw new TaskConflictError('Archive an idle or stopped thread after any work or pending question has settled.');
         }
       }
-      const next: TaskThread = { ...previous, revision: previous.revision + 1 };
+      const next: TaskThread = { ...previous, revision: previous.revision + Number(changed) };
       if (title !== undefined) next.title = title;
       if (archived) next.archivedAt = previous.archivedAt ?? Date.now();
       else delete next.archivedAt;
       meta.thread = next;
+      if (key && fingerprint) (meta.threadEditReceipts ??= {})[key] = { fingerprint, result: next };
       await atomicJson(this.metaFile(id), meta);
       if (active) { active.meta = meta; if (archived) active.enabled = false; }
       return next;
@@ -906,8 +957,13 @@ export class LocalRuntime {
           select: (id, tools) => this.proposeMcpProjectTools(meta.id, id, tools),
           catalog: () => this.mcpSettingsCatalog(meta.id),
         })] : []),
-        ...(!remote && meta.threadTools ? [threadTools(this.options.models, meta.model, (args, input) => this.startThread(meta.id, args, input),
-          () => this.threadReportInProgress(this.active.get(meta.id)!))] : []),
+        ...(!remote && meta.threadTools ? [threadTools(this.options.models, meta.model, {
+          open: (args, input) => this.startThread(meta.id, args, input),
+          reporting: () => this.threadReportInProgress(this.active.get(meta.id)!),
+          list: offset => this.listThreads(meta.id, offset),
+          rename: async (args, caller) => ({ id: meta.id, thread: await this.editThread(meta.id, args, { ...caller, sourceTaskId: meta.id }) }),
+          close: async (id, revision, caller) => ({ id, thread: await this.editThread(id, { revision, archived: true }, { ...caller, sourceTaskId: meta.id }) }),
+        })] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []), ...(rolePolicy ? [rolePolicy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
@@ -1670,7 +1726,7 @@ export class LocalRuntime {
       const assistantWork = Object.values(assistantState?.work ?? {}).map(work => ({ ...assistantWorkView(assistantState, work.id)!, usage: peerUsage.get(work.target)! }));
       const received = !meta.remotePolicy ? (await active.harness.snapshot(ThreadReports, ctx))?.received : undefined;
       const threadReports = received ? Object.values(plain(received)).sort((a, b) => b.completedAt - a.completedAt || a.taskId.localeCompare(b.taskId)) : [];
-      return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
+      return { ...publicTaskMeta(meta), objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
         workItemAnswerVersion: workItemAnswerVersion(meta, goal),
         remoteControls, remoteControlVersion: remotelyControlled ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
         activeTools, interruptibleChildTools, delegations, approvals, userQuestion, assistantWork, threadReports,

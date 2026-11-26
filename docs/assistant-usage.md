@@ -22,6 +22,8 @@
 
 需要第二种模型的意见时，可在标题前加 `--model provider/modelId`。例如 `/thread-report --model siliconflow/Qwen/Qwen2.5-7B-Instruct 独立复核 | 核对材料中的数值`。也可在普通聊天中请助手列出可用模型，再明确指定其中一个。回传会显示交付所用模型。 [模型选择与验收](superpowers/plans/2026-11-26-independent-thread-models.md)
 
+普通聊天也可以说「列出这条会话打开的工作」「把当前会话改名为验收记录」或「归档已完成的那项工作」。助手按目录里的原任务和修订处理。仍在运行、排队或等用户确认的工作会留在列表中。 [聊天内会话管理](superpowers/plans/2026-11-26-chat-thread-management.md)
+
 `/title 标题` 修改当前会话的显示名称。结清工作后用 `/archive` 归档，`/tasks archived` 查看列表，`/attach 任务ID` 阅读历史，`/unarchive` 恢复显示和继续输入。来源、原对话、交付和已耗额度随原任务保存。[会话管理契约](superpowers/plans/2026-11-26-local-threads.md)
 
 ## 工作区快照

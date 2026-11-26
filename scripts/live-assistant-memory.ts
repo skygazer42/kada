@@ -41,17 +41,18 @@ if (!original) {
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? template : undefined;
 const chatChoosesThreadModel = process.env.KADA_LIVE_CASES === 'T09-thread-models-chat';
-const threadModelTest = chatChoosesThreadModel || process.env.KADA_LIVE_CASES === 'T09-thread-models';
-const otherModel = proposalModel ?? (threadModelTest ? template : undefined);
+const chatManagesThreads = process.env.KADA_LIVE_CASES === 'T10-chat-thread-management';
+const threadFixture = chatManagesThreads || chatChoosesThreadModel || process.env.KADA_LIVE_CASES === 'T09-thread-models';
+const otherModel = proposalModel ?? (threadFixture ? template : undefined);
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['A02-chat-assistants','T08-thread-reports'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadModelTest || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const threadDispatches: string[] = [];
 const options = (input:any, selected: string, context: TranscriptContext) => {
   assert(requests < maxRequests,'Live request limit reached.');requests++;
   const request = {...input,maxTokens:Math.min(input?.maxTokens ?? 1536,1536),signal:AbortSignal.any([deadline,...(input?.signal ? [input.signal] : [])])};
-  if (!threadModelTest) return request;
+  if (!threadFixture) return request;
   threadDispatches.push(selected);
   if (selected !== template.id) return request;
   const stage = getCurrentTools(context.messages).some(tool => tool.name === 'task_submit') ? 'task_submit' : 'task_prepare';
@@ -77,7 +78,7 @@ await writeFile(join(beta,'AGENTS.md'),'日报回复语言 language 偏好：英
 const socket=createServer();await new Promise<void>(done=>socket.listen(0,'127.0.0.1',done));
 const port=(socket.address() as {port:number}).port;await new Promise<void>(done=>socket.close(()=>done()));
 const longLiveCases = ['A02-chat-assistants', 'A03-assistant-collaboration'];
-const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:process.env.KADA_LIVE_CASES === 'T08-thread-reports' ? 240_000 : 180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true,
+const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:chatManagesThreads || process.env.KADA_LIVE_CASES === 'T08-thread-reports' ? 240_000 : 180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true,
   workspaceSnapshots:process.env.KADA_LIVE_CASES === 'T04-workspace-snapshots'};
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
@@ -615,10 +616,10 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     evidence.workspaceSnapshots = { originalFile: filename, automaticBeforeTurn: true, editVerified: true, stoppedAfterWrite: edited.status !== 'completed', previewBoundRestore: true,
       daemonRestarted: true, undoRecoveredEditedBytes: true, restoreRequests: requests - beforeRestore, requests };
   });
-  if (threadModelTest) await check(chatChoosesThreadModel ? 'T09-thread-models-chat' : 'T09-thread-models', async () => {
+  if (threadFixture) await check(chatManagesThreads ? 'T10-chat-thread-management' : chatChoosesThreadModel ? 'T09-thread-models-chat' : 'T09-thread-models', async () => {
     assert.notEqual(modelId, template.id, 'Set the source model to DeepSeek for this two-model fixture.');
     const checks: Record<string, unknown> = { dispatches: threadDispatches, childToolsSpecifiedByFixture: true };
-    evidence.threadModels = checks;
+    evidence[chatManagesThreads ? 'threadManagement' : 'threadModels'] = checks;
     const terminal = new ChatSession(client, () => {}, alpha);
     await terminal.handle('这是合成验收的原会话。请只回复 SOURCE_READY_614。');
     const source = terminal.taskId!;
@@ -628,7 +629,8 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(ready.goal, undefined);
     assert.deepEqual([...new Set(threadDispatches)], [modelId]);
     const beforeChild = threadDispatches.length;
-    const task = '纯文本报告。先 task_prepare，outcome 为“核对合成数值”，deliverables 为 ["文本"]，inputs 和 assumptions 和 questions 为空数组，scope 为 ["合成验收"]，criteria 只有 {"text":"结果是 42","method":"inspect"}。确认后直接 task_submit，summary 为 "SECOND_OPINION_42"，artifacts 为空数组，criteria 为 [{"id":1,"status":"passed","evidence":"19+23=42"}]。';
+    const task = '纯文本报告。先 task_prepare，outcome 为“核对合成数值”，deliverables 为 ["文本"]，inputs 和 assumptions 和 questions 为空数组，scope 为 ["合成验收"]，criteria 只有 {"text":"结果是 42","method":"inspect"}。确认后直接 task_submit，summary 为 "SECOND_OPINION_42"，artifacts 为空数组，criteria 为 [{"id":1,"status":"passed","evidence":"19+23=42"}]。' +
+      (chatManagesThreads ? '准备时只用上述 inspect 标准，省略 verification 字段。整个任务只有文本交付。' : '');
     let child: string;
     if (chatChoosesThreadModel) {
       await terminal.handle('合成验收，请先使用 list_models 搜索 Qwen2.5-7B-Instruct，再用 start_thread 开一个名为“聊天选模型”的独立任务。将目录返回的精确 provider 和 modelId 填入 model_selection，并开启 report_back。新任务是' + task + '开好后简短回复。');
@@ -646,7 +648,7 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
       checks.chatCatalogAndStart = true;
       await terminal.attach(child);
     } else {
-      await terminal.handle(`/thread-report --model siliconflow/${template.id} 模型分流 | ${task}`);
+      await terminal.handle(`${chatManagesThreads ? '/thread' : '/thread-report'} --model siliconflow/${template.id} ${chatManagesThreads ? '已交付的合成工作' : '模型分流'} | ${task}`);
       child = terminal.taskId!;
     }
     tasks.add(child);
@@ -667,6 +669,35 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     checks.execution = delivered.status;
     assert.equal(delivered.status, 'completed');
     assert.match(delivered.goal?.candidate?.summary ?? '', /SECOND_OPINION_42/);
+    if (chatManagesThreads) {
+      await terminal.attach(source);
+      await terminal.handle(`请用 list_threads 查看关联工作，将当前聊天改名“验收记录”，并归档已完成的工作 ${child}。从目录复制修订号，使用 rename_thread 和 close_thread 保存，最后告诉我结果。`);
+      const managed = await until(() => server.runtime.status(source), state => ['answered','failed','budget_limited'].includes(state.status) && state.submission?.id !== ready.submission?.id, 245_000);
+      checks.sourceStatus = managed.status;
+      const tools = managed.messages.flatMap(message => message.role === 'toolResult' && !message.isError ? [message.toolName] : []);
+      checks.tools = tools;
+      assert.equal(managed.status, 'answered');
+      for (const name of ['list_threads', 'rename_thread', 'close_thread']) assert(tools.includes(name));
+      assert.equal(managed.thread?.title, '验收记录');
+      assert.equal(managed.goal, undefined);
+      const history = await server.runtime.status(child);
+      assert(history.thread?.archivedAt);
+      assert.equal(history.goal?.candidate?.id, delivered.goal?.candidate?.id);
+      assert.equal(history.budget.totalTokens, delivered.budget.totalTokens);
+      const callsBeforeRestart = requests;
+      await server.close(); server = await serve(config, serverOptions);
+      await terminal.attach(child);
+      await terminal.handle('/unarchive');
+      const restored = await server.runtime.status(child);
+      assert.equal(restored.thread?.archivedAt, undefined);
+      assert.equal(restored.submission?.id, delivered.submission?.id);
+      assert.equal(restored.goal?.candidate?.id, delivered.goal?.candidate?.id);
+      assert.equal(restored.budget.totalTokens, delivered.budget.totalTokens);
+      assert.equal((await server.runtime.status(source)).thread?.title, '验收记录');
+      assert.equal(requests, callsBeforeRestart);
+      Object.assign(checks, { archiveAndRestoreVerified: true, originalDeliveryAndUsage: true, sourceTitle: '验收记录' });
+      return;
+    }
     const returned = await until(() => server.runtime.status(source), state => state.status === 'answered' && state.submission?.requestId === 'thread-report:' + child, 105_000);
     const modelsAfterConfirm = threadDispatches.slice(beforeConfirm);
     assert.deepEqual([...new Set(modelsAfterConfirm)], [template.id, modelId]);

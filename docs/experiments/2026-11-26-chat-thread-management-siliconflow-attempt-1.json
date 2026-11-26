@@ -1,0 +1,61 @@
+{
+  "at": "2026-11-26T21:32:48.801Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "T10-chat-thread-management"
+  ],
+  "fullSuite": false,
+  "passed": false,
+  "maxRequests": 10,
+  "modelRequests": 10,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "T10-chat-thread-management": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    }
+  },
+  "evidence": {
+    "threadManagement": {
+      "dispatches": [
+        "deepseek-ai/DeepSeek-V3.2",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct"
+      ],
+      "childToolsSpecifiedByFixture": true,
+      "source": "993de557-b333-4755-9093-52c65d0bd4d7",
+      "child": "ea742154-8182-8727-8f9b-839694c5b303",
+      "preparation": "awaiting_confirmation",
+      "execution": "completed",
+      "sourceStatus": "failed",
+      "tools": []
+    }
+  },
+  "tasks": [
+    {
+      "id": "993de557-b333-4755-9093-52c65d0bd4d7",
+      "tokens": 9718,
+      "input": 9712,
+      "output": 6,
+      "cached": 0
+    },
+    {
+      "id": "ea742154-8182-8727-8f9b-839694c5b303",
+      "tokens": 48289,
+      "input": 24031,
+      "output": 834,
+      "cached": 23424
+    }
+  ],
+  "totalTaskTokens": 58007,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

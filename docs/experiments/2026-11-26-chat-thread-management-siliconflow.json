@@ -1,0 +1,60 @@
+{
+  "at": "2026-11-26T21:38:47.061Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "T10-chat-thread-management"
+  ],
+  "fullSuite": false,
+  "passed": true,
+  "maxRequests": 16,
+  "modelRequests": 4,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "T10-chat-thread-management": {
+      "passed": true
+    }
+  },
+  "evidence": {
+    "threadManagement": {
+      "source": "993de557-b333-4755-9093-52c65d0bd4d7",
+      "child": "ea742154-8182-8727-8f9b-839694c5b303",
+      "originalRunReused": true,
+      "previousRequests": 10,
+      "dispatches": [
+        "deepseek-ai/DeepSeek-V3.2",
+        "deepseek-ai/DeepSeek-V3.2",
+        "deepseek-ai/DeepSeek-V3.2",
+        "deepseek-ai/DeepSeek-V3.2"
+      ],
+      "sourceStatus": "answered",
+      "tools": [
+        "list_threads",
+        "rename_thread",
+        "close_thread"
+      ],
+      "archiveAndRestoreVerified": true,
+      "originalDeliveryAndUsage": true,
+      "sourceTitle": "验收记录"
+    }
+  },
+  "tasks": [
+    {
+      "id": "993de557-b333-4755-9093-52c65d0bd4d7",
+      "tokens": 51006,
+      "input": 10913,
+      "output": 541,
+      "cached": 39552
+    },
+    {
+      "id": "ea742154-8182-8727-8f9b-839694c5b303",
+      "tokens": 48289,
+      "input": 24031,
+      "output": 834,
+      "cached": 23424
+    }
+  ],
+  "totalTaskTokens": 99295,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}
