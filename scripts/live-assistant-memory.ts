@@ -41,7 +41,7 @@ if (!original) {
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? template : undefined;
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['A02-chat-assistants','T08-thread-reports'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -67,7 +67,7 @@ await writeFile(join(beta,'AGENTS.md'),'日报回复语言 language 偏好：英
 const socket=createServer();await new Promise<void>(done=>socket.listen(0,'127.0.0.1',done));
 const port=(socket.address() as {port:number}).port;await new Promise<void>(done=>socket.close(()=>done()));
 const longLiveCases = ['A02-chat-assistants', 'A03-assistant-collaboration'];
-const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true,
+const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:process.env.KADA_LIVE_CASES === 'T08-thread-reports' ? 240_000 : 180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true,
   workspaceSnapshots:process.env.KADA_LIVE_CASES === 'T04-workspace-snapshots'};
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
@@ -605,11 +605,13 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     evidence.workspaceSnapshots = { originalFile: filename, automaticBeforeTurn: true, editVerified: true, stoppedAfterWrite: edited.status !== 'completed', previewBoundRestore: true,
       daemonRestarted: true, undoRecoveredEditedBytes: true, restoreRequests: requests - beforeRestore, requests };
   });
-  if (selectedCases.includes('T03-local-threads')) await check('T03-local-threads', async () => {
+  const reportThread = selectedCases.includes('T08-thread-reports');
+  if (reportThread || selectedCases.includes('T03-local-threads')) await check(reportThread ? 'T08-thread-reports' : 'T03-local-threads', async () => {
     const filename = 'thread-evidence.txt', expected = 'THREAD_ARTIFACT_728';
     const checkpoints: Record<string, unknown> = {};
     evidence.localThreads = checkpoints;
-    const request = `请用 start_thread 另开一个题为“独立样本”的会话。将这份任务完整传入新会话：只创建 ${filename}，内容严格为 ${expected}。首先单独调用 task_prepare，交付项是该文件，使用一个 inspect 验收标准，并设置 budget 为 {"maxEstimatedCostUsd":1,"maxDurationMs":180000,"maxTotalTokens":90000}。确认后用 write 写文件，再用 read 核对内容，最后 task_submit 附上文件和标准 1 的自检。创建会话后请回复其 ID。`;
+    const request = `请用 start_thread 另开一个题为“独立样本”的会话。将这份任务完整传入新会话：只创建 ${filename}，内容严格为 ${expected}。首先单独调用 task_prepare，交付项是该文件，使用一个 inspect 验收标准，并设置 budget 为 {"maxEstimatedCostUsd":1,"maxDurationMs":180000,"maxTotalTokens":90000}。确认后用 write 写文件，再用 read 核对内容，最后 task_submit 附上文件和标准 1 的自检。创建会话后请回复其 ID。` +
+      (reportThread ? `开启 report_back，把验收结果回传并续答这一个原会话。要求独立任务在 task_submit 的 summary 写出核验后的 ${expected}。` : '');
     const events: string[] = [], terminal = new ChatSession(client, event => events.push(event.text), alpha);
     await terminal.handle(request);
     const source = terminal.taskId!;
@@ -626,11 +628,12 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     await terminal.poll();
     assert(events.some(text => text.includes('/attach ' + id)));
     checkpoints.terminalReceipt = true;
-    const waiting = await until(() => server.runtime.status(id), state => ['awaiting_confirmation', 'failed', 'budget_limited'].includes(state.status), 100_000);
+    const waiting = await until(() => server.runtime.status(id), state => ['awaiting_confirmation', 'failed', 'budget_limited'].includes(state.status), reportThread ? 240_000 : 100_000);
     assert.equal(waiting.status, 'awaiting_confirmation');
     assert.equal(waiting.thread?.sourceTaskId, source);
     assert.equal(waiting.thread?.title, '独立样本');
     assert.equal(waiting.thread?.openedBy, 'assistant');
+    assert.equal(Boolean(waiting.thread?.reportBack), reportThread);
     assert(!waiting.goal?.confirmation);
     checkpoints.tokenLimit = waiting.goal?.brief?.budget.maxTotalTokens;
     assert.equal(checkpoints.tokenLimit, 90_000);
@@ -642,6 +645,21 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(done.status, 'completed');
     assert.equal((await readFile(join(alpha, filename), 'utf8')).trim(), expected);
     assert((await server.runtime.artifacts(id)).some(file => file.name === filename && file.state === 'verified'));
+    if (reportThread) {
+      const returned = await until(() => server.runtime.status(source), state => state.status === 'answered' &&
+        state.submission?.requestId === 'thread-report:' + id && state.threadReports.length === 1, 160_000);
+      assert.equal(returned.goal, undefined);
+      const report = returned.threadReports[0]!;
+      assert.equal(report.candidateId, done.goal?.candidate?.id);
+      assert.equal(report.mode, 'resumed');
+      assert.match(report.summary, new RegExp(expected));
+      assert.match(returned.messages.map(conversationAnswer).filter(Boolean).at(-1) ?? '', /THREAD_ARTIFACT_728|thread-evidence\.txt/);
+      await terminal.attach(source);
+      assert(events.some(text => text.includes('独立工作回传') && text.includes('/attach ' + id)));
+      await terminal.attach(id);
+      checkpoints.returnedToOriginalConversation = true;
+      checkpoints.nativeReportSubmission = returned.submission.id;
+    }
     await terminal.handle('/title 已验收的独立样本');
     await terminal.handle('/archive');
     assert.equal((await server.runtime.list('archived'))[0]?.id, id);
@@ -654,6 +672,12 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(restored.thread?.title, '已验收的独立样本');
     assert.equal(restored.thread.archivedAt, undefined);
     assert.equal(restored.budget.totalTokens, done.budget.totalTokens);
+    if (reportThread) {
+      const returned = await server.runtime.status(source);
+      assert.equal(returned.threadReports.length, 1);
+      assert.equal(returned.submission?.id, checkpoints.nativeReportSubmission);
+      checkpoints.returnedReceiptSurvivedRestart = true;
+    }
     Object.assign(checkpoints, { directOwnerConfirmation: true, verifiedFile: filename,
       archivedAndRestored: true, originalSubmission: true, requests });
   });

@@ -92,12 +92,24 @@ test('the owner opens, names, archives and restores an independent task through 
   assert.equal(restored.budget.totalTokens, originalBudget);
   assert.equal(actions, 1);
   assert.equal((await server.runtime.status(parent)).status, 'answered');
+  assert.deepEqual((await server.runtime.status(parent)).threadReports, []);
+  await chat.attach(parent);
+  await chat.handle('/thread-report 带回报告 | 核对合成样本');
+  const reporting = chat.taskId!;
+  const pending = await until(() => server.runtime.status(reporting), status => status.status === 'awaiting_confirmation');
+  assert.equal(pending.thread?.reportBack, true);
+  await chat.poll();
+  await chat.handle('/confirm');
+  await until(() => server.runtime.status(parent), status => status.threadReports.some(report => report.taskId === reporting));
+  await chat.attach(parent);
+  await chat.poll();
+  assert.equal(events.filter(text => text.includes('独立工作回传') && text.includes(`/attach ${reporting}`)).length, 1);
 });
 
 test('the chat tool prepares one independent thread for its original Pi input', async t => {
   let prepared = 0;
   const parentAnswer = Promise.withResolvers<void>();
-  const input = { title: '阅读样本', message: '准备合成任务' };
+  const input = { title: '阅读样本', message: '准备合成任务', report_back: true };
   const f = await scriptedFixture(async context => {
     const latest = context.messages.findLast(message => message.role === 'user');
     if (latest?.content === input.message) {
@@ -121,7 +133,7 @@ test('the chat tool prepares one independent thread for its original Pi input', 
   const running = await until(() => f.runtime.status(parent.id), state => state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'start_thread').length === 2);
   const toolResults = running.messages.flatMap(message => message.role === 'toolResult' && message.toolName === 'start_thread' ? [message] : []);
   assert.equal(toolResults.length, 2);
-  assert(toolResults.every(message => !message.isError));
+  assert(toolResults.every(message => !message.isError), JSON.stringify(toolResults.map(message => message.content)));
   const project = (await f.runtime.list()).find(task => task.thread?.sourceTaskId === parent.id);
   assert(project);
   const child = await until(() => f.runtime.status(project.id), state => state.status === 'awaiting_confirmation');
@@ -138,13 +150,14 @@ test('the chat tool prepares one independent thread for its original Pi input', 
   parentAnswer.resolve();
   const answered = await until(() => f.runtime.status(parent.id), state => state.status === 'answered');
   assert.equal(child.thread?.openedBy, 'assistant');
+  assert.equal(child.thread?.reportBack, true);
   assert.deepEqual(child.model, parent.model);
   assert.equal(prepared, 1);
   assert.equal((await f.runtime.list()).length, 2);
   assert.equal(answered.goal, undefined);
   const remote = await f.runtime.create('Remote private check', f.workspace, [], { chat: true, remote: true });
   await until(() => f.runtime.status(remote.id), state => state.status === 'answered');
-  await assert.rejects(f.runtime.startThread(remote.id, { ...input, requestId: 'remote-new' }), /remote/i);
+  await assert.rejects(f.runtime.startThread(remote.id, { title: input.title, message: input.message, reportBack: true, requestId: 'remote-new' }), /remote/i);
 });
 
 test('SIGKILL after recording an assistant-opened thread preserves its identity and initial input', { timeout: recoveryTestTimeoutMs }, async () => {

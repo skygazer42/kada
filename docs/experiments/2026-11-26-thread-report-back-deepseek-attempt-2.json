@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-26T20:46:42.571Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "recoveryModelRequests": 6,
+  "estimatedCostUsd": null,
+  "source": "0d0c20ff-362c-43af-a73f-570d5b85f283",
+  "thread": "0c845d9c-f0c0-8946-a3e2-59b6c557137e",
+  "reusedOriginalSession": true,
+  "previousModelRequests": 5,
+  "renewedPreparationWindow": true,
+  "preparationStatus": "awaiting_confirmation",
+  "childStatus": "budget_limited",
+  "error": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'budget_limited'\n- 'completed'\n"
+}
