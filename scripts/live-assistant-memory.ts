@@ -123,6 +123,42 @@ async function chat(workspace:string,prompt:string,timeoutMs=90_000) {
   return {status,answer:status.messages.map(conversationAnswer).filter(text=>text!==undefined).at(-1) ?? '',memory:await server.runtime.taskMemory(task.id)};
 }
 try {
+  if (selectedCases.includes('T12-shared-threads')) await check('T12-shared-threads', async () => {
+    const checks: Record<string, unknown> = {};
+    evidence.sharedThreads = checks;
+    const task = await server.runtime.create('这是普通聊天的合成验收。实际调用 ask_user，问“选择哪组样本？”，选项为“第一组”和“第二组”。用户回答后请回复收到的选项并带上 ORIGINAL_SHARED_395。', alpha, [], { chat: true });
+    tasks.add(task.id);
+    checks.task = task.id;
+    const waiting = await until(() => server.runtime.status(task.id), state => state.status === 'waiting_user' && !!state.userQuestion, 115_000);
+    const originalQuestion = waiting.userQuestion!;
+    const device = { accountId: 'fixture-owner', deviceId: 'fixture-phone' };
+    const pairing = await client.request<{ token: string }>('/v1/remote/devices', 'POST', device);
+    const share = (action: string) => client.request('/v1/tasks/' + task.id + '/' + action, 'POST', device);
+    const remote = (path: string, answer?: unknown) => fetch(`http://127.0.0.1:${port}/remote/api/shared-threads${path}`, {
+      method: answer === undefined ? 'GET' : 'POST', headers: { Authorization: 'Bearer ' + pairing.token, 'Content-Type': 'application/json' },
+      ...(answer === undefined ? {} : { body: JSON.stringify(answer) }),
+    });
+    await share('share-thread');
+    const path = '/' + task.id;
+    const shown = await (await remote(path)).json();
+    assert.equal(shown.id, task.id);
+    assert.deepEqual(shown.question.options, originalQuestion.options);
+    const reply = { questionId: shown.question.id, requestId: 'mobile-original-reply', answer: shown.question.options[1] };
+    assert.equal((await remote(path + '/answers', reply)).status, 403);
+    await share('share-thread-replies');
+    assert.equal((await remote(path + '/answers', reply)).status, 200);
+    const answered = await until(() => server.runtime.status(task.id), state => state.status === 'answered', 115_000);
+    assert.match(answered.messages.map(conversationAnswer).filter(Boolean).at(-1) ?? '', /ORIGINAL_SHARED_395/);
+    assert.equal((await server.runtime.list()).length, 1);
+    const used = requests;
+    await server.close(); server = await serve(config, serverOptions);
+    assert.equal((await remote(path + '/answers', reply)).status, 200);
+    assert.equal((await server.runtime.status(task.id)).submission?.id, answered.submission?.id);
+    assert.equal(requests, used);
+    await share('unshare-thread');
+    assert.equal((await remote(path)).status, 404);
+    Object.assign(checks, { readOnlyByDefault: true, originalQuestion: true, answerReachedOriginal: true, replayAfterRestart: true, revokeVerified: true });
+  });
   await check('F01-F04-memory-scope-correction-forget',async()=>{
     const first=await chat(alpha,'请按日报 language 偏好用一句话问候我；调用 user_memory_search 选择 work 域查询“内部代号”，然后包括查到的代号。不要修改记忆。');
     assert.match(first.answer,/[\u4e00-\u9fff]/,'chinese_project_reply');assert.match(first.answer,/COMET_7391/,'project_code_injected');

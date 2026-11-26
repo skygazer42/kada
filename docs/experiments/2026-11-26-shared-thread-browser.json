@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "surface": "Local Chromium through agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "scrollWidth": 390,
+  "fixture": "Synthetic local daemon and paired device",
+  "checks": {
+    "ownerCliGrantedViewAndReplies": true,
+    "originalConversationAndNotesOpened": true,
+    "olderAndNewestMessagesNavigated": true,
+    "structuredAnswerReachedOriginalConversation": true,
+    "browserDownloadedVerifiedBytes": true,
+    "reloadRestoredSharedSelection": true,
+    "ownerCliRevokedShare": true,
+    "refreshClearedRevokedDirectoryAndDetails": true,
+    "unrelatedComposerDraftPreserved": true
+  }
+}

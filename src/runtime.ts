@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks, type SubmissionId } from "@earendil-works/pi-durable";
+import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type EntryRecord, type Extension, type GenerationHooks, type SubmissionId } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
@@ -11,7 +11,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import { modelRef, type Config, type ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
 import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildInputs, firstChildQuestion, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
-import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
+import { atomicJson, errorText, readJson, redactCredentials, SerialQueue } from "./util.js";
 import { modelCostKnown, validateModel } from "./models.js";
 import { acceptanceChecks, checkArtifacts, failedCheckFeedback, type AcceptanceCheck, type MechanicalReport } from "./checks.js";
 import { GoalDoc, Reviews, changeGoal, goalExtension, plain, readGoal, remoteProgressKind, remoteProgressLabel, reviewExtension, type GoalChange, type GoalState } from "./goal.js";
@@ -135,6 +135,16 @@ export interface TaskMeta {
   maxStalls?: number;
 }
 function publicTaskMeta({ threadEditReceipts: _receipts, ...meta }: TaskMeta) { return meta; }
+
+function transcriptMessages(entry: EntryRecord) {
+  if (!UserEntry.is(entry) && !AssistantEntry.is(entry)) return [];
+  return (entry.model ?? []).flatMap(message => {
+    if (message.role !== 'user' && message.role !== 'assistant') return [];
+    const text = message.role === 'user' ? typeof message.content === 'string' ? message.content
+      : message.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : conversationAnswer(message);
+    return text ? [{ sequence: Number(entry.id), role: message.role, text, timestamp: message.timestamp }] : [];
+  });
+}
 
 function relatedThread(source: TaskMeta, target: TaskMeta): boolean {
   if (target.id === source.id || target.remotePolicy || target.routineOccurrenceId || target.workItem || target.workspace !== source.workspace) return false;
@@ -760,11 +770,7 @@ export class LocalRuntime {
             const label = typeof event === "string" ? remoteProgressLabel(event) : undefined;
             if (typeof event === "string" && label && typeof timestamp === "number") progressEvents.push({ sequence: Number(entry.id), event, label, timestamp });
           }
-          if (!UserEntry.is(entry) && !AssistantEntry.is(entry)) continue;
-          for(const message of entry.model ?? []) {
-            const text=message.role==='user' ? typeof message.content==='string' ? message.content : message.content.filter(block=>block.type==='text').map(block=>block.text).join('\n') : conversationAnswer(message);
-            if (text && (message.role==='user' || message.role==='assistant')) messages.push({sequence:Number(entry.id),role:message.role,text,timestamp:message.timestamp});
-          }
+          messages.push(...transcriptMessages(entry));
         }
         cursor=page.next;
       } while(cursor);
@@ -778,6 +784,26 @@ export class LocalRuntime {
         return result;
       }, ctx) : new Map<number, string>();
       return { cursor: latest ?? null, messages, progressEvents, messageEntries };
+    });
+  }
+  async sharedThreadMessages(id: string, before?: EntryId) {
+    return this.changes.run(async () => {
+      const active = await this.open(await this.metadata(id), false);
+      const limit = 30, messages: ReturnType<typeof transcriptMessages> = [];
+      let cursor: Cursor | undefined;
+      do {
+        const page = await active.root.entries({ order: 'descending', maxEntryId: before }, 100, cursor, ctx);
+        for (const entry of page.items) {
+          if (entry.id === before) continue;
+          const readable = transcriptMessages(entry);
+          if (readable.length && messages.length >= limit) {
+            return { before: messages.at(-1)!.sequence, messages: messages.reverse() };
+          }
+          messages.push(...readable.map(message => ({ ...message, text: redactCredentials(message.text) })));
+        }
+        cursor = page.next;
+      } while (cursor);
+      return { before: null, messages: messages.reverse() };
     });
   }
   private async historyProject(callerId: string) {

@@ -53,7 +53,7 @@ const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }, workItems?: WorkItemsFixture) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }, workItems?: WorkItemsFixture, threads?: WorkItemsFixture) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -115,6 +115,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
           if (url === "/remote/api/push" && push) return push.request(init);
           if (url.startsWith("/remote/api/action-approvals") && approvals) return approvals.request(init, url);
           if (url.startsWith("/remote/api/work-items") && workItems) return workItems(url, deviceToken, init);
+          if (url.startsWith("/remote/api/shared-threads") && threads) return threads(url, deviceToken, init);
           if (url === "/remote/api/session") {
             await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
@@ -122,6 +123,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
             return Response.json({
               channel: "web", accountId, deviceId, pairingId,
               ...(approvals ? { actionApprovals: true } : {}), ...(workItems ? { workItems: true } : {}),
+              ...(threads ? { sharedThreads: true } : {}),
             });
           }
           if (url === "/remote/api/conversations") {
@@ -369,6 +371,57 @@ const workItemRow = { id: "release-notes", title: "Release notes", revision: 2, 
 function visibleText(node: Element): string {
   return [node.textContent, ...node.children.map(visibleText)].join(" ");
 }
+
+test("shared threads open and page the original history, reply and clear revoked access without replacing a draft", async () => {
+  let shared = true, answer: { questionId: string; requestId: string; answer: string } | undefined;
+  const path = '/remote/api/shared-threads', row = { id: 'original-local', title: 'Original local chat', status: 'waiting_user', archived: false };
+  const page = await harness(undefined, undefined, undefined, undefined, undefined, (url, _token, init) => {
+    if (url === path) return Response.json(shared ? [row] : []);
+    if (url.endsWith('/answers')) { answer = JSON.parse(String(init.body)); return Response.json({ received: true }); }
+    const older = url.includes('?before=2');
+    return Response.json({ ...row, notes: [{ id: 'note', message: 'Original shared note' }],
+      messages: [{ sequence: older ? 1 : 2, role: 'assistant', text: older ? 'Earlier original message' : 'Newest original message' }],
+      before: older ? null : 2, question: answer ? null : { id: '19', text: 'Choose a dataset', options: ['First', 'Second'] }, canReply: !answer, artifacts: [] });
+  }).open();
+  const find = (root: Element, label: string): Element | undefined => root.textContent === label ? root : root.children.map(child => find(child, label)).find(Boolean);
+  await page.type('Keep this separate draft');
+  assert.equal(page.field('shared-threads').hidden, false);
+  await page.field('shared-thread-list').children[0]!.children[0]!.trigger('click');
+  const detail = page.field('shared-thread-detail');
+  assert.match(visibleText(detail), /Original shared note/);
+  assert.match(visibleText(detail), /Newest original message/);
+  await page.field('refresh-conversations').trigger('click');
+  await find(detail, 'Older messages')!.trigger('click');
+  assert.match(visibleText(detail), /Earlier original message/);
+  await find(detail, 'Second')!.trigger('click');
+  await find(detail, 'Send answer')!.trigger('click');
+  assert.equal(answer?.questionId, '19');
+  assert.equal(answer?.answer, 'Second');
+  shared = false;
+  await page.field('refresh-conversations').trigger('click');
+  assert.equal(page.field('shared-threads').hidden, true);
+  assert.deepEqual(detail.children, []);
+  assert.equal(page.field('prompt').value, 'Keep this separate draft');
+});
+
+test('a late shared thread response cannot restore revoked history', async () => {
+  const requested = Promise.withResolvers<void>(), delayed = Promise.withResolvers<Response>();
+  const path = '/remote/api/shared-threads', row = { id: 'stale', title: 'Shared history', status: 'answered', archived: false };
+  let shared = true;
+  const page = await harness(undefined, undefined, undefined, undefined, undefined, url => {
+    if (url === path) return Response.json(shared ? [row] : []);
+    requested.resolve();
+    return delayed.promise;
+  }).open();
+  const opening = page.field('shared-thread-list').children[0]!.children[0]!.trigger('click');
+  await requested.promise;
+  shared = false;
+  await page.field('refresh-conversations').trigger('click');
+  delayed.resolve(Response.json({ ...row, messages: [{ text: 'Revoked history' }], notes: [], artifacts: [] }));
+  await opening;
+  assert.equal(page.field('shared-threads').hidden, true);
+  assert.deepEqual(page.field('shared-thread-detail').children, []);
+});
 
 function sharedRun(detail: Element): Element {
   const run = detail.children.find(node => node.tagName === 'ul')?.children[0];

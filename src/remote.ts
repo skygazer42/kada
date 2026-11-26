@@ -13,7 +13,7 @@ import { remoteManifest, remoteWorker } from "./remote-worker.js";
 import { RemotePush, RemotePushError, type PushEvent, type PushScope, type PushSender } from "./remote-push.js";
 import { taskGroup, taskView } from "./task-view.js";
 import { QuestionError } from './questions.js';
-import { readJson, SerialQueue } from "./util.js";
+import { readJson, redactCredentials, SerialQueue } from "./util.js";
 import { Workspace } from "./workspace.js";
 import { workItemOverdue, type WorkItem } from './work-items.js';
 
@@ -30,6 +30,7 @@ export interface RemoteDevice {
   sharedWorkItems?: string[];
   sharedWorkItemReplies?: string[];
   sharedWorkItemControls?: string[];
+  sharedThreads?: { taskId: string; replies?: true }[];
 }
 
 export interface RemoteOptions {
@@ -257,7 +258,7 @@ function matchesSnapshot(
     current.sha256 === saved.sha256 && current.entries === saved.entries;
 }
 
-function verifiedArtifacts(status: TaskStatus, conversation: Conversation) {
+function verifiedArtifacts(status: TaskStatus, basePath: string) {
   const view = taskView(status);
   const proof = status.goal?.mechanical;
   if (!view.delivery || !proof?.passed) return [];
@@ -275,7 +276,7 @@ function verifiedArtifacts(status: TaskStatus, conversation: Conversation) {
       kind: directory ? "directory" as const : "file" as const,
       bytes: snapshot.bytes,
       sha256: snapshot.sha256,
-      href: "/remote/api/conversations/" + conversation.conversationId + "/artifacts/" + index + "/" + binding,
+      href: basePath + "/artifacts/" + index + "/" + binding,
       snapshot,
     }];
   });
@@ -456,7 +457,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     const { messages, messageEntries, ...historyView } = history;
     const delivery = status && view?.delivery ? {
       ...view.delivery,
-      artifacts: verifiedArtifacts(status, conversation).map(({ snapshot: _snapshot, ...artifact }) => artifact),
+      artifacts: verifiedArtifacts(status, "/remote/api/conversations/" + conversation.conversationId).map(({ snapshot: _snapshot, ...artifact }) => artifact),
     } : null;
     return {
       channel: conversation.channel, accountId: conversation.accountId, deviceId: conversation.deviceId,
@@ -648,9 +649,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     sendFile(response, attachment, bytes);
   }
 
-  async function download(response: ServerResponse, conversation: Conversation, href: string, filename: string | null) {
-    const status = await taskStatus(conversation);
-    const artifact = status ? verifiedArtifacts(status, conversation).find((item) => item.href === href) : undefined;
+  async function download(response: ServerResponse, status: TaskStatus | undefined, basePath: string, href: string, filename: string | null) {
+    const artifact = status ? verifiedArtifacts(status, basePath).find((item) => item.href === href) : undefined;
     if (!status || !artifact) throw new HttpError(404, "Verified artifact not found.");
     const workspace = await Workspace.open(status.workspace);
     const tree = artifact.kind === "directory"
@@ -714,8 +714,69 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const { pairingId, tokenHash, ...scope } = await authenticate(request);
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
       const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(?:\/(answers|child-answers|control))?)?)?$/.exec(route);
+      const sharedThread = /^\/remote\/api\/shared-threads(?:\/([a-f0-9-]{36})(?:\/(answers|artifacts\/[0-9]+\/[a-f0-9]{64}))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
-        send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true } : {}) });
+        send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true } : {}) });
+      } else if (options.sharedDevices && sharedThread) {
+        const [, id, action] = sharedThread;
+        if (method !== (action === 'answers' ? 'POST' : 'GET')) throw new HttpError(405, 'This method is unavailable for shared threads.');
+        const input = action === 'answers' ? await json(request) : undefined;
+        const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
+          const grants = device.sharedThreads ?? [];
+          if (!id) {
+            const rows = [];
+            for (const grant of grants) {
+              const meta = await runtime.metadata(grant.taskId).catch(error => { if (!isMissing(error)) throw error; });
+              if (!meta || meta.remotePolicy) continue;
+              const overview = await runtime.taskOverview(meta.id);
+              rows.push({ id: meta.id, title: redactCredentials((meta.thread?.title ?? meta.objective).slice(0, 120)),
+                status: overview.status, archived: !!meta.thread?.archivedAt, createdAt: meta.createdAt });
+            }
+            return rows.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+          }
+          const grant = grants.find(item => item.taskId === id);
+          if (!grant) throw new HttpError(404, 'Shared thread not found.');
+          const meta = await runtime.metadata(id).catch(error => {
+            if (isMissing(error)) throw new HttpError(404, 'Shared thread not found.');
+            throw error;
+          });
+          if (meta.remotePolicy) throw new HttpError(404, 'Shared thread not found.');
+          if (input) {
+            if (!grant.replies) throw new HttpError(403, 'The host has not shared reply access to this thread.');
+            const { questionId, requestId, answer } = input;
+            if (typeof questionId !== 'string' || !/^\d{1,20}$/.test(questionId) || typeof requestId !== 'string' || !idPattern.test(requestId) ||
+              typeof answer !== 'string' || !answer.trim() || answer.length > 32000 || answer.includes('\0') ||
+              Object.keys(input).some(key => !['questionId', 'requestId', 'answer'].includes(key))) throw new HttpError(400, 'Provide the question, request ID and answer.');
+            await runtime.answerQuestion(id, questionId, digest(JSON.stringify(['shared-thread', pairingId, requestId])), answer);
+            return { questionId, requestId };
+          }
+          const status = await runtime.status(id), basePath = '/remote/api/shared-threads/' + id;
+          if (action?.startsWith('artifacts/')) {
+            await download(response, status, basePath, route, url.searchParams.get('file'));
+            return true;
+          }
+          const cursor = url.searchParams.get('before');
+          if (cursor !== null && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor)) || Number(cursor) < 1)) {
+            throw new HttpError(400, 'Invalid thread history cursor.');
+          }
+          const history = await runtime.sharedThreadMessages(id, cursor === null ? undefined : Number(cursor) as EntryId);
+          const question = status.userQuestion && !status.userQuestion.credential ? {
+            id: status.userQuestion.id, text: redactCredentials(status.userQuestion.text),
+            options: status.userQuestion.options.map(redactCredentials),
+          } : null;
+          const notes = status.threadPosts.map(post => ({ id: post.id, message: redactCredentials(post.message), at: post.at,
+            ...(grants.some(item => item.taskId === post.sourceTaskId) ? {
+              sourceTaskId: post.sourceTaskId, sourceTitle: redactCredentials(post.sourceTitle),
+            } : {}),
+          }));
+          return { id, title: redactCredentials((meta.thread?.title ?? meta.objective).slice(0, 120)), status: status.status,
+            archived: !!meta.thread?.archivedAt, ...history, notes, question, canReply: !!grant.replies && !!question && status.status === 'waiting_user' && !meta.thread?.archivedAt,
+            summary: status.status === 'completed' ? redactCredentials(status.goal?.candidate?.summary ?? '') : null,
+            artifacts: verifiedArtifacts(status, basePath).map(({ snapshot: _snapshot, ...artifact }) => artifact),
+          };
+        });
+        if (!result) throw new HttpError(401, 'Enter this device’s pairing token.');
+        if (result !== true) send(response, 200, result);
       } else if (options.sharedDevices && workItem) {
         const [, id, runId, action] = workItem;
         if (method !== (action ? "POST" : "GET")) throw new HttpError(405, "This method is unavailable for shared work items.");
@@ -854,7 +915,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               await downloadAttachment(response, row, message!, id!);
             }
             else if (method === "GET" && action?.startsWith("artifacts/")) {
-              await download(response, row, route, url.searchParams.get("file"));
+              await download(response, await taskStatus(row), "/remote/api/conversations/" + row.conversationId, route, url.searchParams.get("file"));
             } else if (method === "POST" && action === "control") {
               const { action: control, version } = await json(request);
               if ((control !== "pause" && control !== "continue" && control !== "cancel") || typeof version !== "string" || !shaPattern.test(version)) {

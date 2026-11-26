@@ -30,6 +30,28 @@ export class RemoteDevices {
     });
   }
 
+  async setSharedThread(accountId: string, deviceId: string, taskId: string, shared: boolean, replies: boolean) {
+    this.validate(accountId, deviceId);
+    return this.changes.run(async () => {
+      const devices = await this.credentials();
+      const device = devices.find(item => item.accountId === accountId && item.deviceId === deviceId);
+      if (!device) throw Object.assign(new Error('Device pairing not found.'), { status: 404 });
+      const threads = device.sharedThreads ?? [];
+      const grant = threads.find(item => item.taskId === taskId);
+      if (replies) {
+        if (shared && !grant) throw Object.assign(new Error('Share this thread for viewing before granting replies.'), { status: 409 });
+        if (!grant || Boolean(grant.replies) === shared) return { shared };
+        if (shared) grant.replies = true;
+        else delete grant.replies;
+      } else {
+        if (Boolean(grant) === shared) return { shared };
+        device.sharedThreads = shared ? [...threads, { taskId }] : threads.filter(item => item !== grant);
+      }
+      await atomicJson(this.path, devices);
+      return { shared };
+    });
+  }
+
   async setSharedWorkItem(accountId: string, deviceId: string, id: string, shared: boolean, access: 'view' | 'replies' | 'controls' = 'view') {
     this.validate(accountId, deviceId);
     return this.changes.run(async () => {

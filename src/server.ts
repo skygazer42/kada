@@ -261,6 +261,15 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       }
       const device = /^\/v1\/remote\/devices\/([^/]+)\/([^/]+)$/.exec(url.pathname);
       if (device && req.method === 'DELETE') return send(200,await devices.revoke(decodeURIComponent(device[1]!),decodeURIComponent(device[2]!)));
+      const threadShare = /^\/v1\/tasks\/([a-f0-9-]{36})\/(share-thread|unshare-thread|share-thread-replies|unshare-thread-replies)$/.exec(url.pathname);
+      if (threadShare && req.method === 'POST') {
+        const [, id, action] = threadShare;
+        const { accountId, deviceId } = await body(req);
+        if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide the paired account and device IDs.');
+        const shared = action!.startsWith('share-');
+        if (shared && (await runtime.metadata(id!)).remotePolicy) return send(409, { error: 'Share an original local thread from the host.' });
+        return send(200, await devices.setSharedThread(accountId, deviceId, id!, shared, action!.endsWith('-replies')));
+      }
       if (url.pathname === '/v1/notifications' && req.method === 'GET') return send(200,await runtime.notifications());
       const notification = /^\/v1\/notifications\/([a-f0-9]{64})\/read$/.exec(url.pathname);
       if (notification && req.method === 'POST') return send(200,await runtime.readNotification(notification[1]!));

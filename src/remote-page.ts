@@ -58,6 +58,7 @@ export const remotePage = String.raw`<!doctype html>
     #work-item-detail { margin-top: .8rem; overflow-wrap: anywhere; }
     #work-item-detail li + li { margin-top: .45rem; }
     #work-item-detail p { white-space: pre-wrap; }
+    #shared-thread-detail p { white-space: pre-wrap; overflow-wrap: anywhere; }
     #approval-list { display: grid; gap: .8rem; list-style: none; margin: 0; padding: 0; overflow-wrap: anywhere; }
     #approval-list li + li { border-top: 1px solid var(--line); padding-top: .8rem; }
     #approval-list pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow: auto; }
@@ -111,6 +112,11 @@ export const remotePage = String.raw`<!doctype html>
         <ul id="work-item-list"></ul>
         <div id="work-item-detail" hidden></div>
       </section>
+      <section id="shared-threads" class="panel task" hidden aria-labelledby="shared-threads-heading">
+        <h2 id="shared-threads-heading">Shared threads</h2>
+        <ul id="shared-thread-list"></ul>
+        <div id="shared-thread-detail" hidden></div>
+      </section>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
       <section id="child-questions" class="panel task" hidden aria-label="Child task questions"></section>
       <details id="task-history" class="panel task" hidden>
@@ -150,6 +156,9 @@ const approvalList = field("approval-list");
 const workItemsPanel = field("shared-work-items");
 const workItemList = field("work-item-list");
 const workItemDetail = field("work-item-detail");
+const sharedThreads = field("shared-threads");
+const sharedThreadList = field("shared-thread-list");
+const sharedThreadDetail = field("shared-thread-detail");
 const task = field("task");
 const childQuestions = field("child-questions");
 const taskHistory = field("task-history");
@@ -179,6 +188,13 @@ let selectedWorkItem = "";
 let selectedWorkItemRun = "";
 const workItemAnswerForms = new Map();
 const workItemControlRequests = new Set();
+let sharedThreadListVersion = 0;
+let sharedThreadVersion = 0;
+let sharedThreadListSnapshot = "";
+let sharedThreadSnapshot = "";
+let selectedSharedThread = "";
+let sharedThreadBefore = null;
+let sharedThreadAnswer;
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -347,7 +363,7 @@ function resetConversationView() {
 
 async function refreshList() {
   const version = ++listVersion;
-  const [rows] = await Promise.all([get("/conversations"), refreshApprovals(), refreshWorkItems()]);
+  const [rows] = await Promise.all([get("/conversations"), refreshApprovals(), refreshWorkItems(), refreshSharedThreads()]);
   if (version !== listVersion || !identity) return;
   conversations.replaceChildren();
   pendingTasks.replaceChildren();
@@ -412,6 +428,181 @@ function clearWorkItems() {
   workItemList.replaceChildren();
   workItemsPanel.hidden = true;
   selectWorkItem("");
+}
+
+function sharedThreadSelectionKey(device) { return "kada:shared-thread:" + device.pairingId; }
+function sharedThreadPath(id) { return "/shared-threads/" + encodeURIComponent(id); }
+
+function selectSharedThread(id) {
+  selectedSharedThread = id;
+  sharedThreadBefore = null;
+  sharedThreadAnswer = undefined;
+  sharedThreadSnapshot = "";
+  sharedThreadVersion++;
+  sharedThreadDetail.replaceChildren();
+  sharedThreadDetail.hidden = !id;
+  for (const row of sharedThreadList.children) {
+    const button = row.children[0];
+    button.setAttribute("aria-expanded", String(button.value === id));
+  }
+}
+
+function clearSharedThreads() {
+  sharedThreadListVersion++;
+  sharedThreadListSnapshot = "";
+  sharedThreadList.replaceChildren();
+  sharedThreads.hidden = true;
+  selectSharedThread("");
+}
+
+async function openSharedThread(id, device) {
+  if (device !== identity) return;
+  sessionStorage.setItem(sharedThreadSelectionKey(device), id);
+  selectSharedThread(id);
+  if (id) {
+    element("p", "Loading thread…", sharedThreadDetail).setAttribute("role", "status");
+    await refreshSharedThread(device);
+  }
+}
+
+async function refreshSharedThreads() {
+  const device = identity;
+  if (!device?.sharedThreads) return;
+  const version = ++sharedThreadListVersion;
+  const current = () => device === identity && version === sharedThreadListVersion;
+  let rows;
+  try { rows = await get("/shared-threads"); }
+  catch (error) {
+    if (!current()) return;
+    if (error instanceof RequestError && error.status === 401) clearSharedThreads();
+    throw error;
+  }
+  if (!current()) return;
+  const saved = sessionStorage.getItem(sharedThreadSelectionKey(device));
+  const id = rows.some(row => row.id === saved) ? saved : "";
+  if (!id && saved) sessionStorage.removeItem(sharedThreadSelectionKey(device));
+  if (id !== selectedSharedThread) selectSharedThread(id);
+  const snapshot = JSON.stringify(rows);
+  if (snapshot !== sharedThreadListSnapshot) {
+    sharedThreadListSnapshot = snapshot;
+    sharedThreadList.replaceChildren();
+    for (const row of rows) {
+      const item = element("li", "", sharedThreadList);
+      const label = row.archived ? "Archived" : taskStatusLabel(row.status);
+      const button = action(row.title + " · " + label, item, () => {
+        if (item.parentNode === sharedThreadList) return openSharedThread(selectedSharedThread === row.id ? "" : row.id, device);
+      });
+      button.value = row.id;
+      button.setAttribute("aria-controls", "shared-thread-detail");
+      button.setAttribute("aria-expanded", String(row.id === id));
+    }
+  }
+  sharedThreads.hidden = !rows.length;
+  if (id) await refreshSharedThread(device);
+}
+
+async function refreshSharedThread(device) {
+  const id = selectedSharedThread;
+  const before = sharedThreadBefore;
+  const version = ++sharedThreadVersion;
+  const current = () => device === identity && id === selectedSharedThread && version === sharedThreadVersion;
+  let view;
+  try { view = await get(sharedThreadPath(id) + (before ? "?before=" + before : "")); }
+  catch (error) {
+    if (!current()) return;
+    if (error instanceof RequestError && error.status === 401) clearSharedThreads();
+    if (error instanceof RequestError && error.status === 404) {
+      await openSharedThread("", device);
+      await refreshSharedThreads();
+      return;
+    }
+    throw error;
+  }
+  if (!current()) return;
+  const snapshot = JSON.stringify([before, view]);
+  if (snapshot === sharedThreadSnapshot) return;
+  sharedThreadSnapshot = snapshot;
+  sharedThreadDetail.replaceChildren();
+  const title = element("h3", view.title, sharedThreadDetail);
+  const shown = () => device === identity && id === selectedSharedThread && before === sharedThreadBefore && title.parentNode === sharedThreadDetail;
+  if (view.summary) element("p", view.summary, sharedThreadDetail);
+  for (const artifact of view.artifacts) {
+    const item = element("div", "", sharedThreadDetail);
+    action(artifact.name, item, () => {
+      if (shown()) return download(artifact, item);
+    });
+  }
+  if (view.notes.length) {
+    element("h4", "Notes", sharedThreadDetail);
+    for (const note of view.notes) {
+      const row = element("div", "", sharedThreadDetail);
+      if (note.sourceTaskId) action(note.sourceTitle || "Open sending thread", row, () => {
+        if (shown()) return openSharedThread(note.sourceTaskId, device);
+      });
+      element("p", note.message, row);
+    }
+  }
+  if (view.question) {
+    const panel = element("div", "", sharedThreadDetail);
+    element("p", view.question.text, panel);
+    if (view.canReply) {
+      const key = id + ":" + view.question.id;
+      if (sharedThreadAnswer?.key !== key) sharedThreadAnswer = { key, text: "", pending: null, busy: false };
+      const draft = sharedThreadAnswer;
+      const choices = element("div", "", panel);
+      choices.className = "controls";
+      const label = element("label", "Your answer", panel);
+      const input = element("textarea", "", label);
+      input.value = draft.text;
+      input.maxLength = 32000;
+      input.addEventListener("input", () => { draft.text = input.value; });
+      for (const option of view.question.options) action(option, choices, () => {
+        input.value = option;
+        draft.text = option;
+        input.focus();
+      });
+      const submit = action("Send answer", panel, async () => {
+        if (!shown() || draft.busy || !input.value.trim()) return;
+        const answer = input.value.trim();
+        if (draft.pending?.answer !== answer) draft.pending = { questionId: view.question.id, requestId: crypto.randomUUID(), answer };
+        draft.busy = true;
+        try {
+          await post(sharedThreadPath(id) + "/answers", draft.pending);
+          if (device === identity && selectedSharedThread === id) {
+            sharedThreadAnswer = undefined;
+            await refreshSharedThread(device);
+          }
+        } catch (error) {
+          if (device === identity && selectedSharedThread === id && error instanceof RequestError && [403, 404, 409].includes(error.status)) {
+            await refreshSharedThreads();
+          }
+          throw error;
+        } finally {
+          draft.busy = false;
+          draft.button.disabled = false;
+        }
+      });
+      draft.button = submit;
+      submit.disabled = draft.busy;
+    } else sharedThreadAnswer = undefined;
+  } else sharedThreadAnswer = undefined;
+  if (view.messages.length) {
+    element("h4", "Messages", sharedThreadDetail);
+    for (const message of view.messages) element("p", (message.role === "user" ? "You" : "Kada") + "\n" + message.text, sharedThreadDetail);
+  }
+  const page = element("div", "", sharedThreadDetail);
+  page.className = "controls";
+  const showPage = async cursor => {
+    if (!shown()) return;
+    sharedThreadBefore = cursor;
+    try { await refreshSharedThread(device); }
+    catch (error) {
+      if (device === identity && selectedSharedThread === id && sharedThreadBefore === cursor) sharedThreadBefore = before;
+      throw error;
+    }
+  };
+  if (view.before) action("Older messages", page, () => showPage(view.before));
+  if (before) action("Newest messages", page, () => showPage(null));
 }
 
 function workItemState(item) {
@@ -1261,6 +1452,7 @@ async function connect(value) {
   pendingWork.hidden = true;
   clearApprovals();
   clearWorkItems();
+  clearSharedThreads();
   resetConversationView();
   restoreComposer();
   if (pending) displayReceipt({ state: "unknown" });
@@ -1360,6 +1552,7 @@ signout.addEventListener("click", async () => {
   identity = null;
   clearApprovals();
   clearWorkItems();
+  clearSharedThreads();
   childAnswerForms.clear();
   questionAnswerForms.clear();
   try {
@@ -1506,13 +1699,14 @@ setInterval(async () => {
   if (!identity || polling || document.hidden || busy) return;
   const device = identity;
   polling = true;
-  try { await refresh(); }
+  try { await refresh(); if (selectedSharedThread) await refreshSharedThreads(); }
   catch (error) {
     if (device !== identity) return;
     if (error instanceof RequestError && error.status === 401) {
       identity = null;
       clearApprovals();
       clearWorkItems();
+      clearSharedThreads();
       childAnswerForms.clear();
       questionAnswerForms.clear();
       sessionStorage.removeItem("kada-device-token");
