@@ -1,0 +1,87 @@
+{
+  "at": "2026-11-26T07:18:29.693Z",
+  "piVersion": "1.4.0",
+  "passed": true,
+  "syntheticOnly": true,
+  "evidence": [
+    {
+      "mode": "model-visible-only",
+      "effects": 1,
+      "blocked": [],
+      "offered": [
+        [
+          "bridge"
+        ],
+        [
+          "bridge"
+        ]
+      ]
+    },
+    {
+      "mode": "enabled-tools-only",
+      "effects": 0,
+      "blocked": [],
+      "offered": [
+        [
+          "bridge"
+        ],
+        [
+          "bridge"
+        ]
+      ]
+    },
+    {
+      "mode": "loaded-adds-enabled-tool",
+      "effects": 1,
+      "blocked": [],
+      "offered": [
+        [
+          "load_hidden_write"
+        ],
+        [
+          "load_hidden_write",
+          "hidden_write"
+        ],
+        [
+          "load_hidden_write",
+          "hidden_write"
+        ]
+      ]
+    },
+    {
+      "mode": "gate-blocks-nested",
+      "effects": 0,
+      "blocked": [
+        "hidden_write"
+      ],
+      "offered": [
+        [
+          "bridge"
+        ],
+        [
+          "bridge"
+        ]
+      ]
+    },
+    {
+      "mode": "gate-blocks-loaded",
+      "effects": 0,
+      "blocked": [
+        "hidden_write"
+      ],
+      "offered": [
+        [
+          "load_hidden_write"
+        ],
+        [
+          "load_hidden_write",
+          "hidden_write"
+        ],
+        [
+          "load_hidden_write",
+          "hidden_write"
+        ]
+      ]
+    }
+  ]
+}
