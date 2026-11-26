@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
+import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks, type SubmissionId } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
@@ -53,6 +53,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
+import { threadTaskId, threadTitle, threadTools, type TaskThread, type ThreadOrigin } from './task-threads.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -87,6 +88,8 @@ export interface TaskMeta {
   historyRecall?: true;
   projectTaskCatalog?: true;
   projectCatalog?: true;
+  threadTools?: true;
+  thread?: TaskThread;
   structuredQuestions?: true;
   credentialProject?: string;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
@@ -306,9 +309,10 @@ export class LocalRuntime {
     return values.filter((meta):meta is TaskMeta=>meta!==undefined).sort((a, b) => b.createdAt - a.createdAt);
   }
   async list(filter = 'all') {
-    if (!['all','running','pending','delivered'].includes(filter)) throw new Error('Task filter must be all, running, pending or delivered.');
+    if (!['all','running','pending','delivered','archived'].includes(filter)) throw new Error('Task filter must be all, running, pending, delivered or archived.');
     const result = [];
     for (const meta of await this.metadataList()) {
+      if ((filter === 'archived') !== Boolean(meta.thread?.archivedAt)) continue;
       const status = await this.status(meta.id);
       const handoff = taskHandoff(status);
       if (filter === 'all' || handoff.group === filter) result.push({ ...meta, objective: status.objective, deadlineAt: status.deadlineAt, status: status.status, workerCount: status.workerCount, phase: status.goal?.phase, ...handoff });
@@ -352,6 +356,7 @@ export class LocalRuntime {
     const metadata=await this.metadataList();
     for(const meta of metadata) if(meta.control==='budget_limited' && meta.routineOccurrenceId) await this.routines.settleBudget(meta.routineOccurrenceId);
     for (const meta of metadata) {
+      if (meta.thread?.archivedAt) continue;
       if (meta.control === "active") {
         try {await this.open(meta,true);}
         catch(error) {meta.control='paused';meta.initializationError=errorText(error);await atomicJson(this.metaFile(meta.id),meta);}
@@ -365,10 +370,14 @@ export class LocalRuntime {
     }
     await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
+      const thread = options.openedThread;
+      const source = thread ? await this.metadata(thread.sourceTaskId) : undefined;
+      if (source?.remotePolicy) throw new TaskConflictError('A remote task cannot open a local thread.');
+      if (source) workspace = source.workspace;
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
       const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
       if (assistant && (options.remote || workspace === undefined)) throw new AssistantError(400, 'Select an assistant only for a new local task with its existing project workspace.');
@@ -396,23 +405,35 @@ export class LocalRuntime {
         ...(options.routineIssue ? { routineIssue: options.routineIssue } : {}),
         ...(options.routinePullRequest ? { routinePullRequest: options.routinePullRequest } : {}),
         ...(options.workItem ? { workItem: options.workItem } : {}), ...(assistant ? { assistant } : {}),
-        ...(collaboratorRefs ? { collaborators: collaboratorRefs } : {}) })).digest("hex");
+        ...(collaboratorRefs ? { collaborators: collaboratorRefs } : {}), ...(thread ? { thread } : {}) })).digest("hex");
       if (options.id) try {
         const saved = await this.metadata(id);
         if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
         await this.open(saved, saved.control === "active");
         return saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (thread?.openedBy === 'assistant') {
+        const active = this.active.get(thread.sourceTaskId), sourceInput = options.sourceInput;
+        if (!source?.threadTools || source.control !== 'active' || source.thread?.archivedAt || !active || !sourceInput || await this.goalState(active)) {
+          throw new TaskConflictError('Only an active local conversation can open a new thread by request.');
+        }
+        const input = await active.storage.submission(sourceInput, ctx);
+        if (input?.type !== 'input' || input.conversationId !== active.root.id || input.status !== 'placed' ||
+          input.requestId !== 'initial' && !input.requestId?.startsWith('user:')) {
+          throw new TaskConflictError('A thread must come from the original user input.');
+        }
+      }
       const projectWorkspace = workspace === undefined || options.remote ? undefined : requestedWorkspace;
-      const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : undefined;
+      const inherited = thread?.openedBy === 'assistant' ? source : undefined;
+      const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : inherited?.assistant;
       const projectModel = !role?.model || collaboratorRefs ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
-      const model = validateModel(this.options.models, role?.model ?? projectModel);
+      const model = validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
       const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(async ref => {
         const { id, revision, project, name, description, instructions, tools, model } = await this.assistants.select(requestedWorkspace, ref);
         return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? projectModel) };
       })) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
-      const files = await Workspace.open(requestedWorkspace);
+      const files = await Workspace.open(requestedWorkspace, { create: !thread });
       const workItemProject = options.chat && !options.remote ? await memoryProject(files.root) : undefined;
       const credentialProject = !options.remote ? workItemProject ?? await memoryProject(files.root) : undefined;
       if (options.chat && !options.remote && !workItemProject) throw new Error('The chat work item project is unavailable.');
@@ -420,6 +441,7 @@ export class LocalRuntime {
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       const mcpPins = options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root);
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
+        ...(thread ? { thread: { ...thread, revision: 1 } } : {}),
         ...(collaborators ? { collaborators } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
           instructions: role.instructions, tools: [...role.tools], model: { ...model } } } : {}),
@@ -444,7 +466,7 @@ export class LocalRuntime {
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject } } : {}),
-        ...(workItemProject ? { projectCatalog: true as const } : {}),
+        ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
         structuredQuestions: true,
@@ -458,6 +480,51 @@ export class LocalRuntime {
       if (options.signal?.aborted) { meta.control='cancelled';await atomicJson(this.metaFile(id),meta);options.signal.throwIfAborted(); }
       await this.open(meta, true);
       return meta;
+    });
+  }
+
+  async startThread(sourceTaskId: string, input: Record<string, unknown>, sourceInput?: SubmissionId) {
+    if (Object.keys(input).some(key => !['title', 'message', 'requestId'].includes(key))) throw new Error('Provide only a thread title, message and request ID.');
+    const title = threadTitle(input.title);
+    if (typeof input.message !== 'string' || input.message.includes('\0')) throw new Error('Provide the first thread message.');
+    const requestId = sourceInput === undefined ? input.requestId : String(sourceInput);
+    if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(requestId)) throw new Error('Provide an original thread request ID.');
+    const openedBy = sourceInput === undefined ? 'owner' : 'assistant';
+    const task = await this.create(input.message, undefined, [], { id: threadTaskId(sourceTaskId, openedBy, requestId), prepare: true,
+      openedThread: { sourceTaskId, title, openedBy }, sourceInput });
+    return { id: task.id, thread: task.thread!, confirmationRequired: true };
+  }
+
+  async editThread(id: string, input: Record<string, unknown>) {
+    if (!Number.isSafeInteger(input.revision) || Object.keys(input).some(key => !['revision', 'title', 'archived'].includes(key)) ||
+      input.title === undefined && input.archived === undefined || input.archived !== undefined && typeof input.archived !== 'boolean') {
+      throw new Error('Provide the current thread revision and a title or archive change.');
+    }
+    const title = input.title === undefined ? undefined : threadTitle(input.title);
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy) throw new TaskConflictError('Thread organization is available for local tasks.');
+      const previous: TaskThread = meta.thread ?? { revision: 0 };
+      if (previous.revision !== input.revision) throw new TaskConflictError('The thread changed. Read its current revision before editing.');
+      const archived = input.archived ?? Boolean(previous.archivedAt);
+      if (archived === Boolean(previous.archivedAt) && (title === undefined || title === previous.title)) return previous;
+      let active = this.active.get(id);
+      if (archived && !previous.archivedAt) {
+        active = await this.open(meta, false);
+        const { status, inspection } = await this.taskState(active, meta);
+        if (inspection.tasks.length || inspection.submissions.length ||
+          !['answered', 'completed', 'cancelled', 'paused', 'budget_limited', 'failed', 'blocked', 'needs_attention'].includes(status)) {
+          throw new TaskConflictError('Archive an idle or stopped thread after any work or pending question has settled.');
+        }
+      }
+      const next: TaskThread = { ...previous, revision: previous.revision + 1 };
+      if (title !== undefined) next.title = title;
+      if (archived) next.archivedAt = previous.archivedAt ?? Date.now();
+      else delete next.archivedAt;
+      meta.thread = next;
+      await atomicJson(this.metaFile(id), meta);
+      if (active) { active.meta = meta; if (archived) active.enabled = false; }
+      return next;
     });
   }
   async hasRequest(id: string, requestId: string, required: "admitted" | "placed" | "recoverable" = "admitted"): Promise<boolean> {
@@ -521,17 +588,18 @@ export class LocalRuntime {
     return project;
   }
   async projectTasks(callerId: string, filter = 'all', limit = 20, offset = 0, expectedProject?: string) {
-    if (!['all', 'running', 'pending', 'delivered'].includes(filter)) throw new Error('Invalid project task filter.');
+    if (!['all', 'running', 'pending', 'delivered', 'archived'].includes(filter)) throw new Error('Invalid project task filter.');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid project task page.');
     const caller = await this.metadata(callerId);
     const project = !caller.remotePolicy && caller.projectTaskCatalog ? await memoryProject(caller.workspace) : undefined;
     if (!project || expectedProject !== undefined && project !== expectedProject) throw new Error('Project task catalog is unavailable for this task.');
     const tasks = [];
     for (const meta of await this.metadataList()) {
-      if (meta.id === callerId || meta.remotePolicy || await memoryProject(meta.workspace) !== project) continue;
+      if (meta.id === callerId || meta.remotePolicy || (filter === 'archived') !== Boolean(meta.thread?.archivedAt) || await memoryProject(meta.workspace) !== project) continue;
       const status = await this.status(meta.id), handoff = taskHandoff(status);
       if (filter !== 'all' && handoff.group !== filter) continue;
       tasks.push({ id: meta.id, createdAt: meta.createdAt, status: status.status, group: handoff.group,
+        ...(meta.thread?.title ? { title: meta.thread.title } : {}), ...(meta.thread?.sourceTaskId ? { sourceTaskId: meta.thread.sourceTaskId } : {}),
         objective: status.objective.slice(0, 500), summary: handoff.summary.slice(0, 500),
         question: handoff.question?.slice(0, 1000) ?? null, step: handoff.step?.slice(0, 200) ?? null,
         truncated: status.objective.length > 500 || handoff.summary.length > 500 || (handoff.question?.length ?? 0) > 1000 || (handoff.step?.length ?? 0) > 200 });
@@ -555,7 +623,7 @@ export class LocalRuntime {
       switch (name) {
         case 'runs': {
           const runs = await this.projectTasks(callerId, 'all', limit, offset, project);
-          const items = runs.tasks.map(({ id, status, group, summary }) => ({ id, status, group, summary: summary.slice(0, 300) }));
+          const items = runs.tasks.map(({ id, status, group, summary, title, sourceTaskId }) => ({ id, status, group, title, sourceTaskId, summary: summary.slice(0, 300) }));
           result.runs = { items, total: runs.total, nextOffset: runs.nextOffset };
           break;
         }
@@ -709,6 +777,7 @@ export class LocalRuntime {
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
         ...(!remote && meta.projectCatalog ? [projectCatalogExtension((section, limit, offset) => this.projectCatalog(meta.id, section, limit, offset))] : []),
+        ...(!remote && meta.threadTools ? [threadTools((args, input) => this.startThread(meta.id, args, input))] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []), ...(rolePolicy ? [rolePolicy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
@@ -787,7 +856,7 @@ export class LocalRuntime {
         if(!meta.initializationError) await this.configureStage(active);
       } catch (error) { this.active.delete(meta.id);if(harness) await harness.close(ctx);else await storage.close(ctx);throw error; }
     }
-    if (run && meta.control === "active") {
+    if (run && meta.control === "active" && !meta.thread?.archivedAt) {
       const goal = await this.goalState(active);
       if (!goal && meta.structuredQuestions && (await active.harness.snapshot(Questions, active.root.id, ctx))?.outbox) {
         const budgetReason = await this.budgetReason(active);
@@ -1549,6 +1618,7 @@ export class LocalRuntime {
   async confirm(id: string, revision: number, digest: string): Promise<void> {
     await this.changes.run(async () => {
       const meta = await this.metadata(id);
+      if (meta.thread?.archivedAt) throw new TaskConflictError('Restore the archived thread before confirming.');
       if (meta.control !== "active") throw new Error(`Task is ${meta.control}; resume it before confirmation`);
       const active = await this.open(meta, false), goal = await this.goalState(active);
       if (!meta.preparation || !goal?.brief) throw new Error("No task brief is ready for confirmation");
@@ -1632,6 +1702,7 @@ export class LocalRuntime {
       if (!requestId.trim() || requestId.length > 200) throw new Error("requestId must contain 1 to 200 characters");
       const meta = await this.metadata(id);
       if (question && (question.workspace === undefined ? meta.remotePolicy : meta.remotePolicy !== 'workspace' || meta.workspace !== question.workspace)) throw new QuestionError(404, 'Question not found.');
+      if (meta.thread?.archivedAt) throw new TaskConflictError('Restore the archived thread before sending a message.');
       if (images?.length && meta.remotePolicy !== "workspace") throw new Error("Image references require a scoped remote submission.");
       if (meta.control !== "active") {
         if (answerVersion !== undefined || question) throw new TaskConflictError(`Task is ${meta.control}; the host must resume it first.`);
@@ -1737,7 +1808,7 @@ export class LocalRuntime {
       active.enabled = true;
   }
   private async remoteTaskControls(active: Active, meta: TaskMeta, status: string, goal?: GoalState): Promise<RemoteTaskControl[]> {
-    if (meta.initializationError) return [];
+    if (meta.initializationError || meta.thread?.archivedAt) return [];
     if (status === "paused" && meta.remotePaused) {
       return await this.budgetReason(active, goal) || Date.now() >= this.deadline(active, goal) ? ["cancel"] : ["continue", "cancel"];
     }
@@ -1797,6 +1868,7 @@ export class LocalRuntime {
   async resume(id: string): Promise<void> {
     await this.changes.run(async () => {
       const meta = await this.metadata(id);
+      if (meta.thread?.archivedAt) throw new TaskConflictError('Restore the archived thread before resuming.');
       if (meta.control === "cancelled") throw new Error("Cancelled tasks cannot be resumed");
       await this.closeTask(id);
       const active = await this.open(meta, false);

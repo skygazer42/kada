@@ -8,6 +8,7 @@ export function taskView(status: TaskStatus) {
   const message = status.interaction === "chat" ? [...status.messages].reverse().find(m => conversationAnswer(m) !== undefined) : undefined;
   return {
     id: status.id, objective: status.objective, workspace: status.workspace, status: status.status,
+    thread: status.thread ?? null,
     interaction: status.interaction,
     reply: message ? { timestamp: message.timestamp, text: conversationAnswer(message)! } : null,
     brief: goal?.brief ?? null, briefDigest: status.briefDigest,
@@ -47,7 +48,7 @@ export function taskGroup(status: TaskStatus['status']) {
 export function taskHandoff(status:TaskStatus) {
   const goal = status.goal;
   const child = status.status === "running" ? status.delegations.find(item => item.status === "waiting_input") : undefined;
-  const group = child ? "pending" : taskGroup(status.status);
+  const group = status.thread?.archivedAt ? 'archived' : child ? "pending" : taskGroup(status.status);
   const step = goal?.plan.find(step => step.status === 'running')?.title;
   const peerQuestion = status.status === 'waiting_assistant' ? status.assistantWork
     .find(work => !work.stop && !work.result && work.origin.revision === goal?.revision && work.origin.epoch === goal?.epoch &&

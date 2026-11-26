@@ -1,0 +1,38 @@
+{
+  "model": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+  "case": "T03-local-threads",
+  "runner": "scripts/live-assistant-memory.ts",
+  "attempts": [
+    {
+      "at": "2026-11-26T17:59:47.963Z",
+      "requests": 6,
+      "totalTokens": 34172,
+      "passed": false,
+      "reason": "The child wrote the expected file after confirmation. The brief proposed 10000 total tokens and the child exhausted that budget before formal submission."
+    },
+    {
+      "at": "2026-11-26T18:04:06.586Z",
+      "requests": 4,
+      "passed": false,
+      "reason": "The original thread receipt was committed and the new thread was awaiting confirmation with the requested budget. The runner timed out waiting for the parent model's later prose. Child usage was outside that attempt's final report."
+    },
+    {
+      "at": "2026-11-26T18:09:30.640Z",
+      "requests": 9,
+      "totalTokens": 68271,
+      "inputTokens": 21488,
+      "outputTokens": 1343,
+      "cachedTokens": 45440,
+      "childTokenLimit": 90000,
+      "passed": true,
+      "originalSourceRetained": true,
+      "terminalReceipt": true,
+      "fileAbsentBeforeConfirmation": true,
+      "fileVerifiedAfterConfirmation": true,
+      "archivedAndRestoredAfterDaemonRestart": true,
+      "originalSubmissionAndUsagePreserved": true
+    }
+  ],
+  "estimatedCostUsd": null,
+  "scope": "The owner terminal and the normal local API, with synthetic workspace data. The successful run used the persisted receipt displayed by the terminal."
+}

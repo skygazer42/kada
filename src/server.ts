@@ -63,7 +63,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','local-threads','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -277,6 +277,13 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
         return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined,
           assistant: input.assistant as AssistantRef | undefined, collaborators: input.collaborators as AssistantRef[] | undefined }));
+      }
+      const threadRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/(threads?)$/.exec(url.pathname);
+      if (threadRoute) {
+        const [, taskId, route] = threadRoute;
+        if (route === 'threads' && req.method === 'POST') return send(201, await runtime.startThread(taskId!, await body(req)));
+        if (route === 'thread' && req.method === 'PATCH') return send(200, await runtime.editThread(taskId!, await body(req)));
+        return send(405, { error: 'Method not allowed' });
       }
       const assistantWork = /^\/v1\/tasks\/([a-f0-9-]{36})\/assistant-work(?:\/(assign-(?:[a-f0-9-]{36}-)?\d+)(?:\/(stop|guide|questions\/(\d+)\/answer))?)?$/.exec(url.pathname);
       if (assistantWork) {

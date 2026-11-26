@@ -17,6 +17,7 @@ export type ChatEvent = { kind: "info" | "answer" | "error"; text: string };
 function answerKey(message: Message, text: string): string { return `${message.timestamp}:${text}`; }
 const HELP = `直接输入消息：普通问答直接回复，需要实际交付时再提出任务说明与预算。\n\n/new [消息]       新建对话，原任务继续在后台运行\n/confirm          确认刚展示的任务说明与预算\n/run 目标         已有明确授权，沿用配置预算直接执行\n/memory list      查看当前项目记忆与来源\n/memory edit ID 内容 纠正一条记忆\n/memory forget ID 遗忘一条记忆\n/memory used      查看当前会话使用的记忆版本\n/tasks            列出最近的对话与任务\n/attach 任务ID    接回已有对话或任务\n/status           查看状态、预算、核验范围和进度\n/pause            暂停当前对话或任务\n/resume           恢复；显式补充一份配置/已确认预算，不代替目标确认\n/cancel           取消当前对话或任务\n/help             显示帮助\n/quit             退出聊天，后台任务继续运行`;
 const ASSISTANT_WORK_HELP = '/assistant-work [工作ID] 查看同事工作或原结果\n/reply-assistant 工作ID 问题ID 答复\n/guide-assistant 工作ID 补充说明\n/stop-assistant 工作ID 停止已查看的工作';
+const THREAD_HELP = '/thread 标题 | 任务说明  从当前会话打开独立工作\n/title 标题  修改当前会话的标题\n/archive  归档当前会话\n/unarchive  将当前会话移回列表\n/tasks archived  查找已归档会话';
 
 /** Conversation selection and delivery are independent of terminal rendering. */
 export class ChatSession {
@@ -26,6 +27,7 @@ export class ChatSession {
   private shownBrief?: { revision: number; digest: string };
   private shownApprovals = new Map<string, string>();
   private shownAssistantWork = new Map<string, string>();
+  private pendingThread?: { source: string; title: string; message: string; requestId: string };
   constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef, private collaborators?: AssistantRef[]) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
   private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); this.shownAssistantWork.clear(); }
@@ -34,6 +36,9 @@ export class ChatSession {
     this.select(id);
     if (status.assistant) this.info(assistantText(status));
     this.info(`已接入${status.interaction === "chat" ? "对话" : "任务"} ${id}\n${status.interaction === "chat" ? "首条消息" : "目标"}：${status.objective}\n输出目录：${status.workspace}`);
+    if (status.thread?.title) this.info(`标题 · ${status.thread.title}`);
+    if (status.thread?.sourceTaskId) this.info(`原会话 · /attach ${status.thread.sourceTaskId}`);
+    if (status.thread?.archivedAt) this.info('会话已归档。输入 /unarchive 恢复后可继续。');
     if (!status.goal) {
       const answers = status.messages.map(m => ({ m, text: answer(m) })).filter(v => v.text !== undefined);
       for (const item of answers) this.printed.add(answerKey(item.m, item.text!));
@@ -52,6 +57,31 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (command === '/thread' || command === '/title' || command === '/archive' || command === '/unarchive') {
+        const source = this.taskId;
+        if (!source) throw new Error('先用 /attach 选择会话。');
+        if (!await this.client.healthy('local-threads')) throw new Error('请连接支持会话管理的当前版本后台。');
+        const path = `/v1/tasks/${source}`;
+        if (command === '/thread') {
+          const separator = argument?.indexOf('|') ?? -1;
+          if (!argument || separator < 1) throw new Error('用法：/thread 标题 | 任务说明');
+          const title = argument.slice(0, separator).trim(), message = argument.slice(separator + 1).trim();
+          const pending = this.pendingThread;
+          const requestId = pending?.source === source && pending.title === title && pending.message === message ? pending.requestId : randomUUID();
+          this.pendingThread = { source, title, message, requestId };
+          const task = await this.client.request<{ id: string }>(`${path}/threads`, 'POST', { title, message, requestId });
+          this.pendingThread = undefined;
+          this.info(`已打开独立工作 · /attach ${task.id}`);
+          await this.attach(task.id);
+        } else {
+          if (command === '/title' ? !argument : argument) throw new Error(command === '/title' ? '用法：/title 标题' : `用法：${command}`);
+          const status = await this.client.request<TaskStatus>(path);
+          const patch = command === '/title' ? { title: argument } : { archived: command === '/archive' };
+          await this.client.request(`${path}/thread`, 'PATCH', { revision: status.thread?.revision ?? 0, ...patch });
+          this.info(command === '/title' ? `标题 · ${argument}` : command === '/archive' ? '会话已归档。' : '会话已移回任务列表。');
+        }
+        return true;
+      }
       if (['/assistant-work', '/reply-assistant', '/guide-assistant', '/stop-assistant'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
         const path = `/v1/tasks/${this.taskId}/assistant-work`;
@@ -135,7 +165,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n'+THREAD_HELP+'\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
@@ -208,7 +238,7 @@ export class ChatSession {
         else for (const task of tasks) {
           const cost = task.budget.estimatedCostUsd === null ? "费用未知" : `$${task.budget.estimatedCostUsd.toFixed(4)}`;
           const limit = task.budget.costLimit === null ? "" : ` / $${task.budget.costLimit}`;
-          const lines = [`${task.id}  [${task.status}]  ${task.objective.slice(0, 100).replace(/\s+/g, " ")}`];
+          const lines = [`${task.id}  [${task.thread?.archivedAt ? 'archived' : task.status}]  ${task.thread?.title ?? task.objective.slice(0, 100).replace(/\s+/g, " ")}`];
           if (task.summary) lines.push(`  ${task.summary}`);
           if (task.step && task.step !== task.summary) lines.push(`  当前步骤 ${task.step}`);
           lines.push(`  用量 ${task.budget.totalTokens} token · ${cost}${limit}`);
@@ -304,6 +334,19 @@ export class ChatSession {
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     if (this.taskId !== id) return;
     for (const message of status.goal ? [] : status.messages) {
+      if (message.role === 'toolResult' && message.toolName === 'start_thread' && !message.isError) {
+        const block = message.content.find(item => item.type === 'text');
+        if (block?.type !== 'text') continue;
+        let receipt: { id?: string; thread?: TaskMeta['thread'] };
+        try { receipt = JSON.parse(block.text); } catch { continue; }
+        if (typeof receipt?.id !== 'string' || !/^[a-f0-9-]{36}$/.test(receipt.id) || receipt.thread?.sourceTaskId !== id) continue;
+        const key = `thread:${receipt.id}`;
+        if (!this.printed.has(key)) {
+          this.printed.add(key);
+          this.info(`${receipt.thread.title ?? '独立工作'} · /attach ${receipt.id}`);
+        }
+        continue;
+      }
       const text = answer(message);
       if (!text) continue;
       const key = answerKey(message, text);

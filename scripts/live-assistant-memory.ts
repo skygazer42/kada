@@ -39,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -466,6 +466,58 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(calls.filter(message=>message.toolName==='work_item_update' && !message.isError).length,2);
     assert(!calls.some(message=>/reminder_(?:create|update)|task_prepare/.test(message.toolName)),'planning_no_execution_or_reminder');
     evidence.workItemPlanning={itemId:item.id,chatId:created.id,dateOnlySaved:true,timedDeadlineSaved:true,deadlineCleared:true,originalIdKept:true,restartNoModel:true,goalCreated:false,runs:0,requests};
+  });
+  if (selectedCases.includes('T03-local-threads')) await check('T03-local-threads', async () => {
+    const filename = 'thread-evidence.txt', expected = 'THREAD_ARTIFACT_728';
+    const checkpoints: Record<string, unknown> = {};
+    evidence.localThreads = checkpoints;
+    const request = `请用 start_thread 另开一个题为“独立样本”的会话。将这份任务完整传入新会话：只创建 ${filename}，内容严格为 ${expected}。首先单独调用 task_prepare，交付项是该文件，使用一个 inspect 验收标准，并设置 budget 为 {"maxEstimatedCostUsd":1,"maxDurationMs":180000,"maxTotalTokens":90000}。确认后用 write 写文件，再用 read 核对内容，最后 task_submit 附上文件和标准 1 的自检。创建会话后请回复其 ID。`;
+    const events: string[] = [], terminal = new ChatSession(client, event => events.push(event.text), alpha);
+    await terminal.handle(request);
+    const source = terminal.taskId!;
+    tasks.add(source);
+    const original = await until(() => server.runtime.status(source), status =>
+      status.messages.some(message => message.role === 'toolResult' && message.toolName === 'start_thread' && !message.isError), 100_000);
+    const opened = original.messages.find(message => message.role === 'toolResult' && message.toolName === 'start_thread' && !message.isError);
+    assert(opened?.role === 'toolResult');
+    const receipt = JSON.parse(opened.content.map(block => block.type === 'text' ? block.text : '').join(''));
+    const id: string = receipt.id;
+    Object.assign(checkpoints, { source, thread: id });
+    tasks.add(id);
+    assert.equal(original.goal, undefined);
+    await terminal.poll();
+    assert(events.some(text => text.includes('/attach ' + id)));
+    checkpoints.terminalReceipt = true;
+    const waiting = await until(() => server.runtime.status(id), state => ['awaiting_confirmation', 'failed', 'budget_limited'].includes(state.status), 100_000);
+    assert.equal(waiting.status, 'awaiting_confirmation');
+    assert.equal(waiting.thread?.sourceTaskId, source);
+    assert.equal(waiting.thread?.title, '独立样本');
+    assert.equal(waiting.thread?.openedBy, 'assistant');
+    assert(!waiting.goal?.confirmation);
+    checkpoints.tokenLimit = waiting.goal?.brief?.budget.maxTotalTokens;
+    assert.equal(checkpoints.tokenLimit, 90_000);
+    await assert.rejects(readFile(join(alpha, filename)), { code: 'ENOENT' });
+    await terminal.attach(id);
+    await terminal.handle('/confirm');
+    const done = await until(() => server.runtime.status(id), state => ['completed', 'failed', 'needs_attention', 'budget_limited'].includes(state.status), 120_000);
+    checkpoints.finalExecution = done.status;
+    assert.equal(done.status, 'completed');
+    assert.equal((await readFile(join(alpha, filename), 'utf8')).trim(), expected);
+    assert((await server.runtime.artifacts(id)).some(file => file.name === filename && file.state === 'verified'));
+    await terminal.handle('/title 已验收的独立样本');
+    await terminal.handle('/archive');
+    assert.equal((await server.runtime.list('archived'))[0]?.id, id);
+    await server.close(); server = await serve(config, serverOptions);
+    const restoredTerminal = new ChatSession(client, () => {}, alpha);
+    await restoredTerminal.attach(id);
+    await restoredTerminal.handle('/unarchive');
+    const restored = await server.runtime.status(id);
+    assert.equal(restored.submission?.id, done.submission?.id);
+    assert.equal(restored.thread?.title, '已验收的独立样本');
+    assert.equal(restored.thread.archivedAt, undefined);
+    assert.equal(restored.budget.totalTokens, done.budget.totalTokens);
+    Object.assign(checkpoints, { directOwnerConfirmation: true, verifiedFile: filename,
+      archivedAndRestored: true, originalSubmission: true, requests });
   });
   if (selectedCases.includes('T02-project-catalog')) await check('T02-project-catalog', async () => {
     const source = await chat(alpha, '这是数据整理原会话，代号为 CATALOG_RUN。只回复已记下，不保存待办。');
