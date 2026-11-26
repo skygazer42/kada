@@ -37,6 +37,7 @@ import { claudeProject, memoryProject } from './memory-sources.js';
 import { imageInput, inputImageExtension, type InputImage } from './input-images.js';
 import { approvalExtension, approvalViews, approvalReport, decideApproval, requestApproval, stopObsoleteApprovals, ApprovalError } from './approvals.js';
 import type { GithubIssue, GithubPullRequest } from './github-routine-events.js';
+import { modelAccountRefusal, type AccountRefusal } from './routine-account-backoff.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -996,12 +997,26 @@ export class LocalRuntime {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
-      const { status, goal } = await this.taskState(active, meta);
+      const { status, goal, submission } = await this.taskState(active, meta);
+      let modelRefusal: { code: AccountRefusal; at: number; submissionId: number } | undefined;
+      if (meta.routineOccurrenceId && status === 'failed' && submission?.status === 'unanswered' && submission.reason === 'model_error') {
+        let cursor: Cursor | undefined;
+        search: do {
+          const page = await active.root.entries({ order: 'descending', minEntryId: submission.entry }, 200, cursor, ctx);
+          for (const entry of page.items) if (AssistantEntry.is(entry)) for (const message of entry.model ?? []) if (message.role === 'assistant') {
+            const code = modelAccountRefusal(message);
+            if (code && message.errorMessage === submission.detail) modelRefusal = { code, at: message.timestamp, submissionId: submission.id };
+            break search;
+          }
+          cursor = page.next;
+        } while (cursor);
+      }
       const childQuestion = status === "running" && goal?.phase === "working"
         ? await firstChildQuestion(active.harness, active.root.id, goal, ctx) : undefined;
       return {
         status, createdAt: meta.createdAt, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null, childQuestion,
         summary: status === "completed" ? goal?.candidate?.summary ?? null : null,
+        ...(modelRefusal ? { modelRefusal } : {}),
       };
     });
   }

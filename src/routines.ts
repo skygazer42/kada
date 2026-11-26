@@ -11,6 +11,7 @@ import { latestRoutineTime, nextRoutineTime, normalizeRoutineSchedule, routineTi
 import type { LocalRuntime } from "./runtime.js";
 import { normalizeMcpPrecheck, type McpPrecheck, type McpTools } from "./mcp-tools.js";
 import { githubIssueTarget, githubPullRequestEvents, githubPullRequestTarget, type GithubIssue, type GithubPullRequest } from "./github-routine-events.js";
+import type { AccountRefusal } from './routine-account-backoff.js';
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -37,6 +38,7 @@ export type RoutineInput = {
   budget?: RoutineBudget;
   precheck?: { command: string[] } | { mcp: McpPrecheck };
   activity?: { withinMinutes: number; minIntervalMinutes: number };
+  accountBackoff?: true;
   event?: RoutineEvent;
 };
 
@@ -66,6 +68,7 @@ type PrecheckResult =
   | { status: "changed" | "unchanged" | "pending"; sha256: string }
   | { status: "failed" | "interrupted"; detail: string };
 type ActivityResult = { status: "allowed" | "inactive" | "cooldown" | "failed"; checkedAt: number; lastUserAt?: number; lastStartedAt?: number };
+type AccountCooldown = { failures: number; until: number; code: AccountRefusal };
 
 type TaskOverview = Omit<Awaited<ReturnType<LocalRuntime["taskOverview"]>>, "createdAt"> & { createdAt?: number };
 type TaskState = TaskOverview["status"];
@@ -79,6 +82,7 @@ type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt" | "trigger" | "event
   precheck?: PrecheckResult;
   activity?: ActivityResult;
   startedAt?: number;
+  accountCooldown?: AccountCooldown;
   blockedBy?: StartedOccurrence & { status: TaskState };
   eventFingerprint?: string;
 };
@@ -161,6 +165,7 @@ export type Routine = RoutineDefinition & {
   nextRunAt?: string;
   nextTiming?: RoutineTiming;
   lastOccurrence?: Receipt;
+  accountCooldown?: AccountCooldown;
 };
 
 type TimerId = Parameters<Harness["abortTask"]>[0];
@@ -173,6 +178,7 @@ type StoredRoutine = Routine & {
   lastPrecheckScheduledAt?: string;
   lastStarted?: StartedOccurrence;
   lastStartedAt?: number;
+  lastAccountResult?: string;
   firstSlotAfterResume?: string;
 };
 
@@ -211,7 +217,7 @@ function snapshot<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
-function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
+function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt, lastAccountResult: _accountResult, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
@@ -284,7 +290,9 @@ function definition(input: RoutineInput): RoutineDefinition {
     ![activity.withinMinutes, activity.minIntervalMinutes].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 43_200))) {
     throw new RoutineError(400, "An activity gate requires a recurring project task and minute limits from 1 to 43,200.");
   }
-  const overlapPolicy = input.overlapPolicy ?? (activity ? "skip" : undefined);
+  if (input.accountBackoff !== undefined && (input.accountBackoff !== true || input.action !== 'task' || !input.workspace ||
+    input.event !== undefined || ['once', 'event'].includes(schedule.kind))) throw new RoutineError(400, 'Account backoff requires a recurring project task and the value true.');
+  const overlapPolicy = input.overlapPolicy ?? (activity || input.accountBackoff ? "skip" : undefined);
   if (overlapPolicy !== undefined && (overlapPolicy !== "skip" || input.action !== "task" || schedule.kind === "once")) {
     throw new RoutineError(400, "The skip overlap policy requires a recurring task.");
   }
@@ -321,6 +329,7 @@ function definition(input: RoutineInput): RoutineDefinition {
     budgetPolicy,
     ...(overlapPolicy ? { overlapPolicy } : {}),
     ...(activity ? { activity: { withinMinutes: activity.withinMinutes, minIntervalMinutes: activity.minIntervalMinutes } } : {}),
+    ...(input.accountBackoff ? { accountBackoff: true as const } : {}),
     notifyOnChange: input.notifyOnChange ?? false,
     ...(input.event === undefined ? {} : { event: eventRule(input.event) }),
     ...(precheck ? { precheck } : {}),
@@ -459,7 +468,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         let activity: ActivityResult | undefined;
         let newClaim = false;
         let previousTaskId: string | undefined;
-        let checked: { taskId: string; status?: TaskState; createdAt?: number; failed?: true } | undefined;
+        let checked: { taskId: string; status?: TaskState; createdAt?: number; modelRefusal?: { code: AccountRefusal; at: number; submissionId: number }; failed?: true } | undefined;
         let activityWorkspace: string | undefined;
         let activitySample: { workspace: string; lastUserAt?: number; failed?: true } | undefined;
         const claimDue = () => runtime.commit(async (tx) => {
@@ -501,6 +510,18 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
                 rule.lastStartedAt = Math.max(rule.lastStartedAt ?? 0, checked.createdAt);
                 rules[key] = rule;
               }
+              if (rule.accountBackoff && rule.lastStarted.occurrenceId.startsWith(rule.id + '/' + rule.revision + '/')) {
+                if (checked.status === 'completed') delete rule.accountCooldown;
+                const refusal = checked.status === 'failed' ? checked.modelRefusal : undefined;
+                const resultKey = refusal ? checked.taskId + ':' + refusal.submissionId : undefined;
+                if (refusal && resultKey !== rule.lastAccountResult) {
+                  const failures = (rule.accountCooldown?.failures ?? 0) + 1;
+                  rule.accountCooldown = { failures, code: refusal.code,
+                    until: refusal.at + Math.min(5 * 60_000 * 2 ** Math.min(failures - 1, 9), 86_400_000) };
+                  rule.lastAccountResult = resultKey;
+                }
+                rules[key] = rule;
+              }
               const status = checked.status;
               if (status && !["completed", "answered", "cancelled", "failed", "budget_limited"].includes(status)) {
                 blockedBy = { ...rule.lastStarted, status };
@@ -515,6 +536,13 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             };
             await recordOccurrence(tx, runtime.conversationId, rule, skipped, now);
             return finish(rules, rule, skipped, now);
+          }
+          if (rule.accountBackoff && !manual && rule.accountCooldown && now < rule.accountCooldown.until) {
+            const receipt: Receipt = { id: due.id, scheduledAt: due.scheduledAt, status: 'skipped',
+              accountCooldown: rule.accountCooldown, detail: 'The model account was refused. Waiting before the next automatic run.',
+              ...(due.timing ? { timing: due.timing } : {}) };
+            await recordOccurrence(tx, runtime.conversationId, rule, receipt, now);
+            return finish(rules, rule, receipt, now);
           }
           if (rule.activity && !manual) {
             const cooling = rule.lastStartedAt !== undefined && now < rule.lastStartedAt + rule.activity.minIntervalMinutes * 60_000;
@@ -544,7 +572,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             previousTaskId = undefined;
             try {
               const overview = await awaitWithContext(options.taskOverview(taskId), ctx);
-              checked = { taskId, status: overview?.status, createdAt: overview?.createdAt };
+              checked = { taskId, status: overview?.status, createdAt: overview?.createdAt, modelRefusal: overview?.modelRefusal };
             }
             catch { if (runtime.signal.aborted) return; checked = { taskId, failed: true }; }
           } else if (activityWorkspace) {
@@ -846,7 +874,9 @@ export class LocalRoutines {
         ...details, id, revision, status: "scheduled",
         ...(previous.lastOccurrence ? { lastOccurrence: previous.lastOccurrence } : {}),
         ...(previous.lastStartedAt === undefined ? {} : { lastStartedAt: previous.lastStartedAt }),
-        ...(details.activity && (priorClaim || previous.lastStarted) ? {
+        ...(previous.accountCooldown ? { accountCooldown: previous.accountCooldown } : {}),
+        ...(previous.lastAccountResult ? { lastAccountResult: previous.lastAccountResult } : {}),
+        ...((details.activity || details.accountBackoff) && (priorClaim || previous.lastStarted) ? {
           lastStarted: priorClaim ? { occurrenceId: priorClaim.id, taskId: priorClaim.taskId } : previous.lastStarted,
         } : {}),
       };

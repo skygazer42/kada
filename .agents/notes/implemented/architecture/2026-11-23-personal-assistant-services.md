@@ -58,7 +58,11 @@ HTTP MCP 的账户登录采用 SDK `OAuthClientProvider` 薄适配。OAuth 定�
 
 PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、reopened、synchronize、closed 和 ready_for_review，机器投影固定仓库、编号、head/base SHA、draft/merged。原发生项和 task metadata 的 routinePullRequest 保留该次提交，创建摘要包含投影，不能让原任务在恢复时换绑新提交。正文哈希继续去重；标题、正文、URL 和分支名不作为指令或本机路径。顶层与 PR 编号冲突或状态/SHA 无效时明确拒绝。 [Rakazo PR 字段投影](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L93) · [机器字段提示](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/messaging/inbound-delivery.prompt.ts#L43)
 
+循环任务的 `accountBackoff` 只补跨发生项的账户拒绝间隔。Pi 保持单次调用的临时重试和持久失败；taskOverview 只从最终 model_error 对应的原生 AssistantEntry 读取明确标识，检查范围不越过原提交。规则复用现有上次任务查询，在预检和活动检查前保存拒绝次数、通用分类与截止时间。截止时间来自 Pi 消息的请求开始时间戳，原任务/提交 ID 防止重启和重复检查叠加。同修订已完成任务清除间隔；编辑保留已确认的间隔，但不能接受旧修订的迟到失败。手动运行绕过间隔，原预检、预算、防重叠不变。 [Rakazo 跨次账户降频](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L37) · [倍增与恢复](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L60)
+
 ## Alternatives considered
+
+额外模型探测能立即发现账户修复，但会添加付费请求和第二套失败状态。当前从原任务读取已经发生的结果，手动执行及原日程提供明确的检查机会。解析所有供应商自然语言重置时间能缩短等待，却没有统一的 Pi 持久机器字段契约；只用可核对的拒绝标识和固定上限，未知错误不猜测。默认开启会改变已有用户的自动规则，因此显式 opt-in。
 
 通用透传全部 GitHub 事件更快扩大事件数量，但会把用户编写的文本和不明确的字段契约交给原任务。PR 延续现有 Issue 的小型投影，明确保存完成该任务所需的提交身份。复用 Issue 元数据字段会更短，却无法区分 PR 的 head/base SHA；增加一个可选字段保留旧 Issue 和历史任务行为。外部内容仍由现有工具按已保存目标获取。
 
@@ -121,6 +125,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+账户降频的拒绝状态仅在下次自动或手动受理检查时投影，因此规则列表不会在请求刚失败时立即刷新。Pi 原错误仍完整保留，规则只展示通用分类和时间，不复制供应商正文。真实 SIGKILL 验证在首次失败及其下一次检查之间中断，恢复仍由原时间计算间隔且不新增请求；临时 429 由原 Pi 重试成功。未识别供应商报错与实际费用收益仍待验证。
 
 PR 的本地签名 HTTP 与原 Pi 任务回归覆盖提交更新、合并过滤、响应丢失、重启、追加消息、暂停、规则修订竞态及不可信字段排除。入口继续默认关闭，需用户选择仓库和配置现有 HTTPS 代理后才能验收外部投递；没有真实 GitHub 端到端效果或成本结论。该功能不会发出评论或修改仓库。
 
