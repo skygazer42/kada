@@ -60,7 +60,9 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 循环任务的 `accountBackoff` 只补跨发生项的账户拒绝间隔。Pi 保持单次调用的临时重试和持久失败；taskOverview 只从最终 model_error 对应的原生 AssistantEntry 读取明确标识，检查范围不越过原提交。规则复用现有上次任务查询，在预检和活动检查前保存拒绝次数、通用分类与截止时间。截止时间来自 Pi 消息的请求开始时间戳，原任务/提交 ID 防止重启和重复检查叠加。同修订已完成任务清除间隔；编辑保留已确认的间隔，但不能接受旧修订的迟到失败。手动运行绕过间隔，原预检、预算、防重叠不变。 [Rakazo 跨次账户降频](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L37) · [倍增与恢复](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L60)
 
-本机新聊天以可选元数据 chatReminders 固定通知工具能力，历史和远程任务不因升级得到它。工具只包装原 LocalRoutines 的 notify/once，项目身份复用 memoryProject；不把调用者提供的工作区或 action 透传。创建 ID 由原聊天和 Pi 工具 taskId 派生，重放即使已到期也返回同一规则。取消参数固定原修订，先读项目范围，再由原取消事务比较修订；否则规则在检查后被编辑成执行型任务时，原取消会跨过工具范围。 [OpenMausBot 原触发器工具](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L596) · [Pots 固定请求 ID](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/gateway/timers.ts#L429)
+本机聊天以可选元数据 chatReminders 固定通知工具能力，历史和远程任务不因升级得到它。原 true 只包装 notify/once，新 managed 扩展 once/daily/weekly 和修改，项目身份复用 memoryProject；不把调用者提供的工作区或 action 透传，混合事件规则也不在提醒范围。创建 ID 由原聊天和 Pi 工具 taskId 派生，重放即使已到期也返回同一规则。取消参数固定原修订，先读项目范围，再由原取消事务比较修订；否则规则在检查后被编辑成执行型任务时，原取消会跨过工具范围。 [OpenMausBot 原触发器工具](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L596) · [Pots 固定请求 ID](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/gateway/timers.ts#L429)
+
+通知修改把首次查得的原工作区、验收和补跑政策固定到原 Pi 工具任务，原 update 事务核对期望修订并追加请求摘要及结果。相同请求重放沿原快照返回回执，不再用当前规则重组请求，否则后续改项目或政策会使原请求变成冲突或覆盖新安排。无回执时依靠原修订拒绝迟到修改。聊天编辑暂停规则保留暂停，不把时间编辑解释为恢复运行；原暂停接口只支持周期规则，因此暂停周期改为单次须先明确恢复。回执是当次结果，当前提醒仍需重新查询；原 CLI/API 未指定请求的修改行为保留。 [Rakazo 修改归属和竞态](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/schedule-tools.ts#L1030)
 
 项目历史工具以新任务的 historyRecall 标记固定能力，远程和旧任务不自动获得。来源范围复用 memoryProject，按 Pi 原提交身份筛选 initial/user 输入及最终助手正文；自动规则首次输入、监督、子任务回传和工具正文不能成为用户讨论。返回 taskId 与原 entryId，回读仍核对项目与提交归属。关闭的来源直接读取原 Pi Storage，不创建 Harness 或运行时；打开的来源复用已有 storage。分页保留压缩前原消息，片段与原文输出有界。 [OpenMausBot 历史工具](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L568) · [原文归属](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/index.ts#L13390)
 
@@ -72,7 +74,7 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 另建 FTS 或向量索引能改善大规模检索和排序，但当前 Pi 已保存完整可分页历史；先从原存储做有限结果的字面查询，避免索引同步和恢复。复用整个旧任务 open 更短，却会装载工具、配置并让检索影响运行时；只取 Pi Storage，必要的已有格式迁移仍交给 Pi。直接把所有上下文条目当历史更全面，却会混入监督和工具结果，所以以原用户提交与回答身份作范围。
 
-只要求用户使用 `/remind` 无须增加模型工具，却不能完成普通中文对话里的提醒要求。把所有例行任务接口暴露给聊天能覆盖更多功能，但同时带来未来执行和预算权限；本次只给通知型单次提醒三个薄工具。另建提醒存储更方便做专用页面，却会重复原 Pi 定时与通知恢复，因此复用既有规则和 inbox。
+只要求用户使用 `/remind` 无须增加模型工具，却不能完成普通中文对话里的提醒要求。把所有例行任务接口暴露给聊天能覆盖更多功能，但同时带来未来执行和预算权限；当前只给通知型日程薄工具，新 managed 聊天才扩展周期和修改。另建提醒存储更方便做专用页面，却会重复原 Pi 定时与通知恢复，因此复用既有规则和 inbox。只在工具进程内记修改成功可少一次持久写入，却无法处理规则已提交但工具尚未回执的中断，原规则事务和原工具输入快照各自承担必要的恢复边界。
 
 额外模型探测能立即发现账户修复，但会添加付费请求和第二套失败状态。当前从原任务读取已经发生的结果，手动执行及原日程提供明确的检查机会。解析所有供应商自然语言重置时间能缩短等待，却没有统一的 Pi 持久机器字段契约；只用可核对的拒绝标识和固定上限，未知错误不猜测。默认开启会改变已有用户的自动规则，因此显式 opt-in。
 
@@ -137,6 +139,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+周期提醒的确定性回归验证每周通知、改为每日、保留原政策及无效输入拒绝。实际 SIGKILL 覆盖更新未提交、已提交后被再次编辑和已提交后被取消，回放保持原结果且不覆盖当前规则。DeepSeek V3.2 用 9 次请求完成中文创建、重启后修改和取消，原提醒 ID 保留，无 Goal；52,054 总 token 包含缓存，金额未知。当前不提供通知型 Cron/间隔、执行型任务或跨设备聊天管理，不据此声称全场景时间理解和成本改善。
 
 原 stdio MCP 和 Pi 回归覆盖初始隐藏、真实加载/调用、原生压缩与重启保留、20 个工具及旧任务直出、审批和撤权、未启用工具排除、主会话及同步/后台子任务范围。DeepSeek V3.2 以 3 次请求完成 21 工具中的指定调用，重启保留，无新增模型网关或目录状态。真实金额和质量收益未比较，Pi 当前工具检索分词对中文不作保证，仍可用工具名或英文元数据。
 

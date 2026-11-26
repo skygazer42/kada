@@ -67,7 +67,7 @@ export interface TaskMeta {
   preparation?: boolean;
   /** Absent on historical/explicit tasks. A chat creates GoalDoc only on task_prepare. */
   entrypoint?: "chat";
-  chatReminders?: true;
+  chatReminders?: true | 'managed';
   historyRecall?: true;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
   chatBudget?: { costLimit: number; tokenLimit: number | null };
@@ -386,7 +386,7 @@ export class LocalRuntime {
         ...(this.config.discovery === true && !this.options.legacyResources && !options.remote ? { discovery: true, userMemory: true as const, memoryTracking: true as const } : {}),
         ...(options.prepare || options.chat ? { preparation: true } : {}),
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
-        ...(options.chat && !options.remote ? { chatReminders: true as const } : {}),
+        ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
@@ -560,7 +560,7 @@ export class LocalRuntime {
           tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
-      const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now)] : []), ...(memory ? [memory] : []),
+      const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now, meta.chatReminders === 'managed')] : []), ...(memory ? [memory] : []),
         ...(history ? [history] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
@@ -612,7 +612,7 @@ export class LocalRuntime {
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: meta.entrypoint === "chat" ? chatExtensions : meta.preparation ? preparationExtensions : extensions,
-          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote && meta.chatReminders === true, !remote && meta.historyRecall === true) : this.instructions(meta, !!meta.preparation) } });
+          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
         this.active.set(meta.id, active);
@@ -737,7 +737,7 @@ export class LocalRuntime {
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
-        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy && active.meta.chatReminders === true, !active.meta.remotePolicy && active.meta.historyRecall === true) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
+        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
     const preparing = !!active.meta.preparation && !state?.confirmation;

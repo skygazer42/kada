@@ -105,6 +105,20 @@ export type RoutineHistoryRecord = RoutineOccurrenceRecord & {
   taskSummary?: string;
 };
 const occurrenceEntryKind='local.routine.occurrence';
+type RoutineUpdate = { expectedRevision: number; requestId: string };
+type UpdateReceipt = { routineId: string; requestId: string; fingerprint: string; result: Routine };
+
+async function updateReceipt(tx: Tx, conversationId: ConversationId, routineId: string, requestId: string) {
+  let cursor: Cursor | undefined;
+  do {
+    const page = await tx.scanEntries({ conversationId, order: 'descending' }, 200, cursor);
+    for (const entry of page.items) if (entry.kind === 'local.routine.update') {
+      const value = entry.data as UpdateReceipt;
+      if (value.routineId === routineId && value.requestId === requestId) return value;
+    }
+    cursor = page.next;
+  } while (cursor);
+}
 
 async function recordOccurrence(tx:Tx,conversationId:ConversationId,rule:StoredRoutine,receipt:Receipt,recordedAt:number) {
   const data:RoutineOccurrenceRecord={...receipt,routineId:rule.id,revision:rule.revision,action:rule.action,objective:rule.objective,
@@ -854,24 +868,43 @@ export class LocalRoutines {
     return records;
   }
 
-  async update(id: string, input: RoutineInput): Promise<Routine> {
+  async update(id: string, input: RoutineInput, request?: RoutineUpdate): Promise<Routine> {
     const key = keyFor(inputId(id));
     if (input?.id !== undefined && input.id !== id) throw new RoutineError(400, "A routine update cannot change its ID.");
+    if (request !== undefined && (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1 ||
+      typeof request.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(request.requestId))) throw new RoutineError(400, 'Provide an expected revision and valid update request ID.');
     const details = definition(input);
+    const fingerprint = request ? createHash('sha256').update(JSON.stringify([request.expectedRevision, details])).digest('hex') : undefined;
     await this.validatePrecheck(details);
     const { harness, conversationId, timer } = await this.open();
     const result = await harness.commit(async (tx) => {
       const { rules } = await tx.doc(routinesDoc);
       const previous = snapshot(rules[key]);
+      if (request) {
+        const receipt = await updateReceipt(tx, conversationId, id, request.requestId);
+        if (receipt) {
+          if (receipt.fingerprint !== fingerprint) throw new RoutineError(409, 'This update request already has different content.');
+          return { routine: receipt.result };
+        }
+      }
       if (!previous) throw new RoutineError(404, "Routine not found.");
+      if (request && previous.revision !== request.expectedRevision) throw new RoutineError(409, 'The reminder changed. Read the current reminder before editing it.');
       if (previous.status === "cancelled") throw new RoutineError(409, "This routine was cancelled.");
+      const keepPaused = request !== undefined && previous.status === 'paused';
+      if (keepPaused && details.schedule.kind === 'once') throw new RoutineError(409, 'Resume the paused reminder before changing it to a single reminder.');
+      const receipt = async (routine: Routine) => {
+        if (request) await tx.appendEntry(conversationId, { kind: 'local.routine.update', data: {
+          routineId: id, requestId: request.requestId, fingerprint: fingerprint!, result: routine,
+        } });
+        return routine;
+      };
       if (previous.status === "scheduled" && JSON.stringify(definition(previous)) === JSON.stringify(details)) {
-        return { routine: toRoutine(previous) };
+        return { routine: await receipt(toRoutine(previous)) };
       }
       const revision = previous.revision + 1;
       const priorClaim = previous.claim ?? previous.manual?.claim;
       const next: StoredRoutine = {
-        ...details, id, revision, status: "scheduled",
+        ...details, id, revision, status: keepPaused ? 'paused' : 'scheduled',
         ...(previous.lastOccurrence ? { lastOccurrence: previous.lastOccurrence } : {}),
         ...(previous.lastStartedAt === undefined ? {} : { lastStartedAt: previous.lastStartedAt }),
         ...(previous.accountCooldown ? { accountCooldown: previous.accountCooldown } : {}),
@@ -882,14 +915,16 @@ export class LocalRoutines {
       };
       if (details.schedule.kind !== "event") {
         const firstAt = firstTime(details.schedule, this.now());
-        next.nextRunAt = new Date(firstAt).toISOString();
-        next.timerId = await tx.createTask(timer, { routineId: id, revision, firstAt }, {
-          ownership: { kind: "conversation" }, conversationId,
-        });
+        if (!keepPaused) {
+          next.nextRunAt = new Date(firstAt).toISOString();
+          next.timerId = await tx.createTask(timer, { routineId: id, revision, firstAt }, {
+            ownership: { kind: "conversation" }, conversationId,
+          });
+        }
       }
       await interruptManual(tx, conversationId, previous, this.now());
       rules[key] = next;
-      return { routine: toRoutine(next), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
+      return { routine: await receipt(toRoutine(next)), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
     }, context);
     if (result.manualTimer) await harness.abortTask(result.manualTimer, context);
     if (result.previousTimer) await harness.abortTask(result.previousTimer, context);

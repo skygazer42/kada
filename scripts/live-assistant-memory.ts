@@ -38,7 +38,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['F11-chat-reminder','H01-project-history','D01-mcp-discovery'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'F11-chat-reminder-management' ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -64,7 +64,7 @@ const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow'
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
   beforeTool(call) {
-    const allowed = ['reminders_info','reminder_create','reminder_cancel'].includes(call.name) ||
+    const allowed = ['reminders_info','reminder_create','reminder_update','reminder_cancel'].includes(call.name) ||
       (call.name === 'read' && call.arguments.path === 'reports/inventory.txt') ||
       (call.name === 'write' && call.arguments.path === 'routine-summary.json') || call.name === 'task_submit';
     if (!allowed) return {block:'Use read on reports/inventory.txt, write routine-summary.json, then task_submit.'};
@@ -252,6 +252,27 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.match(answer,/SQLite/i,'history_answer');
     assert.equal(recalled.goal,undefined);
     evidence.projectHistory={sourceTaskId:source.id,recalledTaskId:recalled.id,entryId:original.entryId,sourceRead:true,answerVerified:true,goalCreated:false,requests};
+  });
+  await check('F11-chat-reminder-management',async()=>{
+    const {status:created}=await chat(alpha,'请每周二纽约时间下午 5 点提醒我检查合成周报，只保存通知提醒。');
+    const reminder=(await server.runtime.routines.list()).find(rule=>rule.action==='notify' && rule.schedule.kind==='weekly');
+    assert(reminder && reminder.schedule.kind==='weekly','managed_weekly_saved');
+    assert.equal(reminder.schedule.weekday,2);assert.equal(reminder.schedule.time,'17:00');assert.equal(reminder.schedule.timeZone,'America/New_York');
+    assert.equal(created.goal,undefined);
+    const beforeRestart=requests;
+    await server.close();server=await serve(config,serverOptions);assert.equal(requests,beforeRestart);
+    await server.runtime.followUp(created.id,'把刚才的提醒改成每天纽约时间下午 6 点，内容改为“检查更新后的合成报告”。','manage-reminder');
+    const updated=await until(()=>server.runtime.status(created.id),status=>status.status==='answered' && status.submission?.requestId==='user:manage-reminder',90_000);
+    assert.equal(updated.goal,undefined);
+    assert(updated.messages.some(message=>message.role==='toolResult' && message.toolName==='reminder_update' && !message.isError),'managed_update_succeeded');
+    const edited=(await server.runtime.routines.list()).find(rule=>rule.id===reminder.id)!;
+    assert.deepEqual(edited.schedule,{kind:'daily',time:'18:00',timeZone:'America/New_York'});assert.equal(edited.revision,2);
+    assert.match(edited.objective,/检查更新后的合成报告/);
+    assert.equal((await server.runtime.routines.list()).length,1,'managed_update_keeps_identity');
+    await server.runtime.followUp(created.id,'取消这条每天的提醒。','cancel-managed-reminder');
+    const cancelled=await until(()=>server.runtime.status(created.id),status=>status.status==='answered' && status.submission?.requestId==='user:cancel-managed-reminder',90_000);
+    assert.equal(cancelled.goal,undefined);assert.equal((await server.runtime.routines.list()).find(rule=>rule.id===reminder.id)?.status,'cancelled');
+    evidence.reminderManagement={routineId:reminder.id,weeklyCreated:true,dailyUpdated:true,originalIdKept:true,cancelled:true,goalCreated:false,requests};
   });
   await check('F11-chat-reminder',async()=>{
     const due = Date.parse('2026-12-01T22:00:00Z');
