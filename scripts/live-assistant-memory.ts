@@ -38,7 +38,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['F11-chat-reminder','H01-project-history'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['F11-chat-reminder','H01-project-history','D01-mcp-discovery'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -206,6 +206,36 @@ try {
     assert.equal(new Set(history.messages.map((message:{sequence:number})=>message.sequence)).size,history.messages.length);
     assert.equal(requests-before,1,'reconnect must not generate a second response');
     evidence.disconnect = {taskId:status.id,requestId:recovered.requestId,clientClosedDuringRequest:true,modelRequests:requests-before,assistantReplies:1};
+  });
+  await check('D01-mcp-discovery',async()=>{
+    const effects=join(directory,'mcp-discovery-calls.txt');
+    const catalog=Array.from({length:21},(_,index)=>({name:'record_'+index,description:'Read synthetic record '+index,
+      inputSchema:{type:'object',properties:{},additionalProperties:false}}));
+    const fixture=`const fs=require('node:fs');const input=require('node:readline').createInterface({input:process.stdin});
+input.on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;let result;
+if(r.method==='initialize')result={protocolVersion:r.params.protocolVersion,serverInfo:{name:'discovery-live',version:'1'},capabilities:{tools:{}}};
+if(r.method==='tools/list')result={tools:${JSON.stringify(catalog)}};
+if(r.method==='tools/call'){fs.appendFileSync(process.argv[1],r.params.name+'\\n');result={content:[{type:'text',text:r.params.name==='record_20'?'DISCOVERY_729':'Wrong record'}]};}
+console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
+    await server.runtime.mcp.configure({id:'records',transport:'stdio',command:process.execPath,args:['-e',fixture,effects]});
+    const tested=await server.runtime.mcp.test('records');
+    await server.runtime.mcp.enable('records',catalog.map(tool=>tool.name),tested.revision);
+    const task=await server.runtime.create('使用已连接 MCP 的 record_20 工具读取合成记录。先用 tool_search 搜索 record_20，然后调用找到的 MCP 工具，不要读取文件或使用 bash。最后用 task_submit 提交工具返回的代号，artifacts 为空。',alpha);tasks.add(task.id);
+    const done=await until(()=>server.runtime.status(task.id),status=>['completed','failed','budget_limited','waiting_user','needs_attention'].includes(status.status),120_000);
+    assert.equal(done.status,'completed','discovery_task_completed');
+    assert.equal(done.mcpDiscovery,'deferred');
+    const initial=done.messages.find(message=>message.role==='system' && message.toolsAdded?.some(tool=>tool.name==='tool_search'));
+    assert(initial?.role==='system');
+    assert(!initial.toolsAdded?.some(tool=>tool.name.startsWith('mcp_records_')),'discovery_initial_schema_hidden');
+    assert(done.messages.some(message=>message.role==='toolResult' && message.toolName==='tool_search' && !message.isError),'discovery_search_succeeded');
+    assert.match(done.goal?.candidate?.summary ?? '',/DISCOVERY_729/,'discovery_returned_marker');
+    assert.equal(await readFile(effects,'utf8'),'record_20\n','discovery_one_selected_call');
+    const beforeRestart=requests;
+    await server.close();server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'discovery_reopen_no_model');
+    const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
+    assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
+    evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
   });
   await check('H01-project-history',async()=>{
     const {status:source} = await chat(alpha,'项目回顾：NEBULA_842 的数据库选择是 SQLite。只回复“已记下这次讨论”，不要调用记忆工具。');

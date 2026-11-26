@@ -64,7 +64,11 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 项目历史工具以新任务的 historyRecall 标记固定能力，远程和旧任务不自动获得。来源范围复用 memoryProject，按 Pi 原提交身份筛选 initial/user 输入及最终助手正文；自动规则首次输入、监督、子任务回传和工具正文不能成为用户讨论。返回 taskId 与原 entryId，回读仍核对项目与提交归属。关闭的来源直接读取原 Pi Storage，不创建 Harness 或运行时；打开的来源复用已有 storage。分页保留压缩前原消息，片段与原文输出有界。 [OpenMausBot 历史工具](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L568) · [原文归属](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/index.ts#L13390)
 
+大型 MCP 清单沿用 Pi 原生 deferred/tool_search。新任务总固定工具数大于 20 时保存 mcpDiscovery，工具注册只增加 deferred，具体执行仍走原 MCP 和审批路径。执行阶段配置从 Pi 当前 agent 投影已加载 MCP 工具并保留到原 modelTools，不另存目录或加载状态。只在执行扩展选择 tool-search；主会话从 enabled tools 移除 delegation_ask，防止目录把原本不可见的后台待答工具加载给主助手。同步子任务使用原范围，后台子任务仍保留文件工具与自己的待答入口。 [Rakazo 超过 20 个工具切换目录](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-connector.ts#L440) · [Pi 原生加载与持久化](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/src/tool-search/tool-search.ts)
+
 ## Alternatives considered
+
+自建搜索、加载、执行代理可定制排序及中文分词，但 Pi 已提供工具检索和原生加载状态；增加代理会再做参数与权限入口。一次发送所有 schema 接法最短，但大型清单把无关工具结构带到每次请求；按已有参考的 20 个工具阈值为新任务选择延迟注册，旧任务保留原快照行为。只隐藏 modelTools 中的 delegation_ask 不足以限制搜索，因为 Pi 从 enabled deferred 清单检索，所以在主会话的 tools 范围排除它。
 
 另建 FTS 或向量索引能改善大规模检索和排序，但当前 Pi 已保存完整可分页历史；先从原存储做有限结果的字面查询，避免索引同步和恢复。复用整个旧任务 open 更短，却会装载工具、配置并让检索影响运行时；只取 Pi Storage，必要的已有格式迁移仍交给 Pi。直接把所有上下文条目当历史更全面，却会混入监督和工具结果，所以以原用户提交与回答身份作范围。
 
@@ -133,6 +137,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+原 stdio MCP 和 Pi 回归覆盖初始隐藏、真实加载/调用、原生压缩与重启保留、20 个工具及旧任务直出、审批和撤权、未启用工具排除、主会话及同步/后台子任务范围。DeepSeek V3.2 以 3 次请求完成 21 工具中的指定调用，重启保留，无新增模型网关或目录状态。真实金额和质量收益未比较，Pi 当前工具检索分词对中文不作保证，仍可用工具名或英文元数据。
 
 历史检索的模型输入只包含命中片段和按需原文，不把旧讨论提升为指令。原 Pi 提交跨 200 条分页、原生压缩、重置及重启后的身份均有回归；关闭来源不再被检索装载成 active 任务。DeepSeek V3.2 用 4 次请求找回原讨论并读原文，实际金额未知。当前为同项目其他本机对话的字面查询，尚未验证大规模历史性能、语义搜索或跨设备历史共享。
 

@@ -415,7 +415,7 @@ export class McpTools {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
-  async tools(pins?: McpPin[], approval?: (pin: McpPin, name: string, args: Record<string, unknown>, api: ToolExecutionApi, context: Context) => Promise<ToolExecutionResult>) {
+  async tools(pins?: McpPin[], approval?: (pin: McpPin, name: string, args: Record<string, unknown>, api: ToolExecutionApi, context: Context) => Promise<ToolExecutionResult>, deferred = false) {
     const connections = await this.read();
     const selected = pins ?? connections.filter(connection => connection.enabled).map(pinOf);
     return selected.flatMap(pin => {
@@ -427,6 +427,7 @@ export class McpTools {
           name: toolName(pin.id, name),
           description: tool?.description ?? `Use the ${name} tool from ${pin.id}.`,
           parameters: Type.Unsafe<Record<string, unknown>>(tool?.inputSchema ?? { type: 'object' }),
+          ...(deferred ? { deferred: true as const } : {}),
           replay: pin.approvalTools?.includes(name) ? 'safe' : 'unsafe',
           executionMode: 'sequential',
           execute: async (args, api, context) => {

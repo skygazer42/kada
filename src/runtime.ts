@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { Harness, LiveDoc, UserEntry, AssistantEntry, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
 import type { Models } from "@earendil-works/pi-ai";
 import type { Config, ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
@@ -90,6 +91,7 @@ export interface TaskMeta {
   remotePolicy?:'workspace';
   initialImages?: InputImage[];
   mcpPins?: McpPin[];
+  mcpDiscovery?: 'deferred';
   routineOccurrenceId?: string;
   routineIssue?: GithubIssue;
   routinePullRequest?: GithubPullRequest;
@@ -364,8 +366,10 @@ export class LocalRuntime {
       const files = await Workspace.open(requestedWorkspace);
       const selection=options.remote ? [] : options.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
+      const mcpPins = options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root);
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
-        mcpPins: options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root),
+        mcpPins,
+        ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
         ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
         ...(options.remote ? {remotePolicy:'workspace' as const} : {}),
         ...(options.images?.length ? { initialImages: structuredClone(options.images) } : {}),
@@ -573,7 +577,8 @@ export class LocalRuntime {
       } }) : undefined;
       const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
       const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp).extension : undefined;
-      if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined)}));
+      if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
+      if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
       const coordinatorOnly = [goal, verification, ...(history ? [history] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
@@ -745,9 +750,15 @@ export class LocalRuntime {
       const offers = await active.methods.select([state.objective, ...state.userMessages].join("\n"), active.workspace).catch(error => { notice = errorText(error); return []; });
       state = await this.updateGoal(active, goal => { goal.learning = { offers, loaded: [], rejected: [], ...(notice ? { notice } : {}) }; });
     }
+    const hideScript = !preparing && active.meta.resourcePolicy === 'pi-skills' && !active.meta.remotePolicy && !state?.skills?.pins.length;
+    const deferredMcp = !preparing && active.meta.mcpDiscovery === 'deferred';
+    const executionTools = active.executionExtensions.flatMap(extension => extension.tools ?? []);
+    const ask = deferredMcp ? executionTools.find(tool => tool.name === 'delegation_ask') : undefined;
+    const offered = deferredMcp ? new Set((await active.root.agent(ctx)).tools.map(tool => tool.name)) : undefined;
+    const loaded = offered ? executionTools.filter(tool => tool.name.startsWith('mcp_') && tool.deferred && offered.has(tool.name)) : [];
     await active.root.configure({ extensions: preparing ? active.preparationExtensions : active.executionExtensions,
-      modelTools: !preparing && active.meta.resourcePolicy === "pi-skills" && !active.meta.remotePolicy && !state?.skills?.pins.length
-        ? { remove: [runSkillScript] } : null,
+      ...(ask ? { tools: { remove: [ask] } } : {}),
+      modelTools: deferredMcp ? { ...(hideScript ? { remove: [runSkillScript] } : {}), add: loaded } : hideScript ? { remove: [runSkillScript] } : null,
       instructions: this.instructions(active.meta, preparing) + (!active.meta.remotePolicy && active.meta.historyRecall ? '\n' + historyInstructions : '') + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
         (!preparing && active.meta.resourcePolicy === "pi-skills" ? skillInstructions(state?.skills, !!active.skills) : "") +
         (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
