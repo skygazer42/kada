@@ -1,5 +1,6 @@
 {
   "baseCommit": "cdb13465076b3ccc8c6ddaec33a984a1e6da00f5",
+  "implementationCommit": "d30e071a13d0cfb6b040ad6676f4c5a9f3ad7d61",
   "scope": "Internal original-work selective stop, fixed input/output file copies and source-private extension exclusion; Runtime and owner product entries not enabled",
   "references": {
     "pi": "4a080252f06caf63a525d7873c5d94d3c23887e0",
@@ -49,6 +50,20 @@
     "failedAttemptCause": "The isolated live runner supplied its workspace subdirectory instead of the actual project root. Directory and assignment correctly rejected it. Runner now uses assistantProject; product admission was not weakened.",
     "money": null,
     "note": "Zero provider cost fields are unconfigured metadata, not evidence of free usage. All attempts count; synthetic local files only, no Runtime product entry or complete goal delivery."
+  },
+  "checks": {
+    "productionTypesAndBuild": "passed",
+    "strictPublicTestTypes": "passed",
+    "noteTreeFormatAndArchive": "passed",
+    "commitReadiness": "passed; 445 candidates",
+    "credentialScan": {
+      "tool": "TruffleHog 3.100.1 via the autoreview helper immutable-commit preflight",
+      "commit": "d30e071a13d0cfb6b040ad6676f4c5a9f3ad7d61",
+      "status": "clean",
+      "durationSeconds": 15.6,
+      "scope": "Exact added, changed and removed content of the implementation commit; no model code-review verdict"
+    },
+    "independentCodeReview": "unavailable: task payload omission and Codex CLI authentication 401; not a passing verdict"
   },
   "limitations": [
     "Fixed files are ordinary workspace files with original hash binding and no overwrite; not an OS immutable-file or sandbox guarantee",
