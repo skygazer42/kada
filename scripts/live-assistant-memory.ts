@@ -39,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -466,6 +466,30 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(calls.filter(message=>message.toolName==='work_item_update' && !message.isError).length,2);
     assert(!calls.some(message=>/reminder_(?:create|update)|task_prepare/.test(message.toolName)),'planning_no_execution_or_reminder');
     evidence.workItemPlanning={itemId:item.id,chatId:created.id,dateOnlySaved:true,timedDeadlineSaved:true,deadlineCleared:true,originalIdKept:true,restartNoModel:true,goalCreated:false,runs:0,requests};
+  });
+  if (selectedCases.includes('T02-project-catalog')) await check('T02-project-catalog', async () => {
+    const source = await chat(alpha, '这是数据整理原会话，代号为 CATALOG_RUN。只回复已记下，不保存待办。');
+    const work = await server.runtime.workItems.create({ workspace: alpha, title: 'CATALOG_TODO 校对样本', objective: '校对合成文件。' });
+    const schedule = { kind: 'once' as const, at: new Date(routineClock.now() + 86_400_000).toISOString() };
+    const rule = await server.runtime.routines.create({ id: 'catalog-rule', action: 'notify', workspace: alpha, objective: 'CATALOG_RULE 核对日历', schedule });
+    await server.runtime.routines.create({ id: 'another-rule', action: 'notify', workspace: beta, objective: 'OTHER_PROJECT_RULE', schedule });
+    const sampleSkill = join(alpha, '.agents', 'skills', 'catalog-sample');
+    await mkdir(sampleSkill, { recursive: true });
+    await writeFile(join(sampleSkill, 'SKILL.md'), '---\nname: catalog-sample\ndescription: 检查合成样本\n---\n\n仅供验收。');
+    const answer = await chat(alpha, '帮我看当前项目的工作总览。用空对象 {} 调用 project_catalog，读取运行、待办、规则和可用 Skills 的首页，再简要列出四类结果。只查询。');
+    const lookup = answer.status.messages.find(message => message.role === 'toolResult' && message.toolName === 'project_catalog' && !message.isError);
+    assert(lookup?.role === 'toolResult');
+    const payload = lookup.content.map(block => block.type === 'text' ? block.text : '').join('');
+    const result = JSON.parse(payload);
+    assert(result.runs.items.some((item: { id: string }) => item.id === source.status.id));
+    assert(result.work_items.items.some((item: { id: string }) => item.id === work.id));
+    assert.deepEqual(result.routines.items.map((item: { id: string }) => item.id), [rule.id]);
+    assert(result.skills.items.some((item: { name: string }) => item.name === 'catalog-sample'));
+    assert.doesNotMatch(payload, /OTHER_PROJECT_RULE/);
+    assert.match(answer.answer, /CATALOG_TODO|校对样本/);
+    assert.equal((await server.runtime.workItems.get(work.id)).revision, work.revision);
+    assert.equal((await server.runtime.status(source.status.id)).status, 'answered');
+    evidence.projectCatalog = { originalRun: true, originalWorkItem: true, originalRule: true, skill: 'catalog-sample', otherProjectExcluded: true, goalCreated: false, requests };
   });
   await check('T01-project-tasks',async()=>{
     const source=await server.runtime.create('合成验收任务 ORBIT_542：用户尚未决定导出 CSV 还是 XLSX，不能自行选择。只调用 task_blocked，reason 说明缺少格式，question 提问 CSV 还是 XLSX，然后等待。不要执行命令、写文件或委派。',alpha);tasks.add(source.id);

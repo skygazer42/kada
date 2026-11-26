@@ -1,0 +1,31 @@
+{
+  "model": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+  "case": "T02-project-catalog",
+  "runner": "scripts/live-assistant-memory.ts",
+  "attempts": [
+    {
+      "at": "2026-11-26T17:39:47.346Z",
+      "requests": 3,
+      "totalTokens": 16801,
+      "passed": false,
+      "reason": "The model requested the runs section. That lookup completed. The next model generation was pending at the runner timeout."
+    },
+    {
+      "at": "2026-11-26T17:41:33.573Z",
+      "requests": 3,
+      "totalTokens": 26316,
+      "inputTokens": 17383,
+      "outputTokens": 613,
+      "cachedTokens": 8320,
+      "passed": true,
+      "originalRun": true,
+      "originalWorkItem": true,
+      "originalRule": true,
+      "originalSkill": true,
+      "otherProjectExcluded": true,
+      "goalCreated": false
+    }
+  ],
+  "estimatedCostUsd": null,
+  "scope": "Ordinary local chat with synthetic project data. The second attempt clarified the empty-object overview call in the tool schema and the fixture prompt."
+}

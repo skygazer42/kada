@@ -41,7 +41,7 @@ import type { GithubIssue, GithubPullRequest } from './github-routine-events.js'
 import { modelAccountRefusal, type AccountRefusal } from './routine-account-backoff.js';
 import { reminderExtension } from './reminders.js';
 import { historyExtension, historyInstructions, historyMatch, historyQuery, type HistoryMessage } from './history.js';
-import { projectTasksExtension } from './project-tasks.js';
+import { projectCatalogExtension, projectCatalogSections, projectTasksExtension, type ProjectCatalogSection } from './project-tasks.js';
 import { chatWorkItemsExtension } from './chat-work-items.js';
 import { Questions, QuestionError, currentQuestion, questionExtension, recordQuestionAnswer } from './questions.js';
 import { ApplicationCredentials, CredentialError, type CredentialNetwork } from './application-credentials.js';
@@ -86,6 +86,7 @@ export interface TaskMeta {
   chatAssistants?: { project: string };
   historyRecall?: true;
   projectTaskCatalog?: true;
+  projectCatalog?: true;
   structuredQuestions?: true;
   credentialProject?: string;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
@@ -443,6 +444,7 @@ export class LocalRuntime {
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject } } : {}),
+        ...(workItemProject ? { projectCatalog: true as const } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
         structuredQuestions: true,
@@ -518,12 +520,12 @@ export class LocalRuntime {
     if (!project) throw new Error('Project history is unavailable for this task.');
     return project;
   }
-  async projectTasks(callerId: string, filter = 'all', limit = 20, offset = 0) {
+  async projectTasks(callerId: string, filter = 'all', limit = 20, offset = 0, expectedProject?: string) {
     if (!['all', 'running', 'pending', 'delivered'].includes(filter)) throw new Error('Invalid project task filter.');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid project task page.');
     const caller = await this.metadata(callerId);
     const project = !caller.remotePolicy && caller.projectTaskCatalog ? await memoryProject(caller.workspace) : undefined;
-    if (!project) throw new Error('Project task catalog is unavailable for this task.');
+    if (!project || expectedProject !== undefined && project !== expectedProject) throw new Error('Project task catalog is unavailable for this task.');
     const tasks = [];
     for (const meta of await this.metadataList()) {
       if (meta.id === callerId || meta.remotePolicy || await memoryProject(meta.workspace) !== project) continue;
@@ -537,6 +539,55 @@ export class LocalRuntime {
     tasks.sort((a, b) => Number(b.group === 'pending') - Number(a.group === 'pending') || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
     return { tasks: tasks.slice(offset, offset + limit), total: tasks.length, nextOffset: offset + limit < tasks.length ? offset + limit : null };
   }
+
+  async projectCatalog(callerId: string, section?: ProjectCatalogSection, limit = 5, offset = 0) {
+    if (section !== undefined && !projectCatalogSections.includes(section)) throw new Error('Invalid project catalog section.');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20 || !Number.isSafeInteger(offset) || offset < 0 || !section && offset !== 0) {
+      throw new Error('Invalid project catalog page. Select one section to use an offset.');
+    }
+    const caller = await this.metadata(callerId);
+    const project = caller.projectCatalog && !caller.remotePolicy ? caller.chatWorkItems?.project : undefined;
+    if (!project || await memoryProject(caller.workspace) !== project) throw new Error('Project catalog is unavailable for this task.');
+    const page = <T extends { id: string }>(items: T[]) => ({ items: items.slice(offset, offset + limit), total: items.length,
+      nextOffset: offset + limit < items.length ? offset + limit : null });
+    const result: Partial<Record<ProjectCatalogSection, ReturnType<typeof page>>> = {};
+    for (const name of section ? [section] : projectCatalogSections) {
+      switch (name) {
+        case 'runs': {
+          const runs = await this.projectTasks(callerId, 'all', limit, offset, project);
+          const items = runs.tasks.map(({ id, status, group, summary }) => ({ id, status, group, summary: summary.slice(0, 300) }));
+          result.runs = { items, total: runs.total, nextOffset: runs.nextOffset };
+          break;
+        }
+        case 'work_items': {
+          const items = (await this.workItems.list(caller.workspace, project)).filter(item => !item.archived && item.status !== 'done');
+          items.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+          result.work_items = page(items.map(({ id, revision, title, status, priority, dueDate, dueAt, timeZone }) =>
+            ({ id, revision, title: title.slice(0, 300), status, priority, dueDate, dueAt, timeZone })));
+          break;
+        }
+        case 'routines': {
+          const items = [];
+          for (const rule of await this.routines.list()) {
+            if (!rule.workspace || !['scheduled', 'paused'].includes(rule.status) || await memoryProject(rule.workspace) !== project) continue;
+            items.push({ id: rule.id, revision: rule.revision, objective: rule.objective.slice(0, 300), status: rule.status,
+              action: rule.action, kind: rule.schedule.kind, nextRunAt: rule.nextRunAt ?? null });
+          }
+          result.routines = page(items.sort((a, b) => a.id.localeCompare(b.id)));
+          break;
+        }
+        case 'skills': {
+          const skills = (await this.skillCatalog(project)).filter(skill => skill.enabled && !skill.issue);
+          skills.sort((a, b) => Number(b.source === 'project') - Number(a.source === 'project') || a.name.localeCompare(b.name));
+          result.skills = page(skills.map(({ name, description, source, currentVersion }) =>
+            ({ id: name, name, description: description.slice(0, 300), source, version: currentVersion ?? null })));
+          break;
+        }
+      }
+    }
+    return result;
+  }
+
   private async *historyMessages(meta: TaskMeta): AsyncGenerator<HistoryMessage> {
     const existing = this.active.get(meta.id)?.storage, path = join(this.directory(meta.id), 'session.sqlite');
     if (!existing) await access(path);
@@ -657,6 +708,7 @@ export class LocalRuntime {
         })] : []),
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
+        ...(!remote && meta.projectCatalog ? [projectCatalogExtension((section, limit, offset) => this.projectCatalog(meta.id, section, limit, offset))] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []), ...(rolePolicy ? [rolePolicy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];

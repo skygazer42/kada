@@ -39,4 +39,14 @@
 
 DeepSeek V3.2 经硅基流动用 4 次请求、20,844 总 token 查询原任务 ID 和 CSV/XLSX 待答；daemon 重启未发新模型请求、原任务仍 waiting_user、查询无 Goal、其他项目排除。[实测证据](../../experiments/2026-11-25-project-tasks-deepseek.json)。金额未知，未声称完成率或成本改善。
 
+## 综合目录
+
+Rakazo 的 `taskCatalogFromTool` 分别从清单、日程和 Skill 的原存储读取投影。Kada 的新本机普通聊天增加 `project_catalog`，返回当前项目的原运行、未完成待办、活动规则和可用 Skills。默认返回各类首页，也可指定一类继续分页。条目保留原 ID 或 Skill 版本、简要状态和下一页位置。[Rakazo 聚合调用](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22)
+
+查询使用聊天创建时保存的项目范围。运行复用 `project_tasks` 的待处理排序和隔离，待办复用 `WorkItems.list`，规则只给出运行状态、类型和下次触发时间，Skills 复用当前项目可见目录并显示版本。用户从原入口管理这些条目，每次读取按当前保存状态取页。[运行查询](../../../src/project-tasks.ts) · [待办](../../../src/work-items.ts) · [规则](../../../src/routines.ts) · [Skills](../../../src/skills.ts)
+
+验收使用普通聊天发出实际 Pi 工具调用。数据包含同项目和其他项目、远程任务、归档待办、无项目规则及带预检参数的规则。核对原 ID、下一页、原任务状态、无新增 Goal 或模型请求，以及旧聊天、远程和确认后的工具范围。[目录回归](../../../test/project-catalog.test.ts)
+
+DeepSeek V3.2 的最终验收以 3 次请求读到四类原记录，排除另一项目，完成中文答复，查询前后的待办修订一致。首轮模型选择了运行一类，后续生成在测试时限内仍未返回。工具说明和复测提示补充了空参数组合查询方式，两次结果均保留。[硅基流动验收](../../experiments/2026-11-26-project-catalog-deepseek.json)
+
 类型、构建、提交候选、diff 空白及三项笔记校验通过。独立审查命令为 `python <autoreview>/scripts/autoreview --mode local --no-tools --no-web-search --output <临时目录文件>`；因缺少 TruffleHog 在调用 reviewer 前退出，没有独立审查结论。此次没有新增运行时依赖或自动安装审查工具。
