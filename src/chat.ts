@@ -70,7 +70,7 @@ export class ChatSession {
             const { id, state } = proposal;
             const details = 'tools' in proposal
               ? `当前项目工具 ${proposal.previous === null ? '继承全局选择' : proposal.previous.map(item => `${item.id}/${item.tool}`).join('、') || '空名单'}\n建议 ${proposal.tools === null ? '继承全局选择 · ' : ''}${proposal.effective.map(item => `${item.id}/${item.tool}`).join('、') || '空名单'}`
-              : `${proposal.connectionId}\n${proposal.endpoint}`;
+              : `${proposal.connectionId} · ${proposal.transport}\n${proposal.endpoint}`;
             return `${id} · ${state} · ${details}` + (state === 'pending' ? `\n/apply-mcp ${id} · /decline-mcp ${id}` : '');
           }).join('\n\n') : '当前会话没有 MCP 设置建议。');
         } else {

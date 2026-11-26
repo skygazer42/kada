@@ -6,16 +6,17 @@ import type { Context } from '@earendil-works/chord/context';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { CallToolResult, Tool as ServerTool } from '@modelcontextprotocol/sdk/types.js';
 import { memoryProject } from './memory-sources.js';
 import { atomicJson, readJson, redactCredentials, SerialQueue } from './util.js';
 import { McpOAuth, McpAuthError, loopback, oauthUrl, normalizeOAuth, type McpAuthSession, type McpOAuthSetting } from './mcp-oauth.js';
 
-export type McpDefinition = { id: string } & (
-  | { transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
-  | { transport: 'http'; url: string; headers?: Record<string, string>; oauth?: McpOAuthSetting }
-);
+export type McpRemoteTransport = 'http' | 'sse';
+type McpUrlDefinition = { id: string; transport: McpRemoteTransport; url: string; headers?: Record<string, string>; oauth?: McpOAuthSetting };
+export type McpDefinition = { id: string; transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string> } | McpUrlDefinition;
+export type McpConnectionProposalInput = { connectionId: string; endpoint: string; transport?: McpRemoteTransport };
 export type McpPin = { id: string; revision: string; tools: string[]; discovery?: FoundTool[]; approvalTools?: string[] };
 export type ProjectMcpTool = { id: string; tool: string };
 export type McpPrecheck = { id: string; revision: string; tool: string; arguments: JsonObject };
@@ -31,10 +32,10 @@ export type McpConnection = Omit<SavedConnection, 'definition' | 'test'> & {
   oauth?: { credentialsSaved: boolean; authorizationPending: boolean };
   test?: Omit<McpTest, 'tools'> & { message?: string; tools?: Array<Pick<FoundTool, 'name' | 'description' | 'readOnly'>> };
 };
-export type McpConnectionProposal = { id: string; sourceTaskId: string; connectionId: string; endpoint: string;
+export type McpConnectionProposal = { id: string; sourceTaskId: string; connectionId: string; endpoint: string; transport: McpRemoteTransport;
   state: 'pending' | 'registered' | 'declined'; createdAt: string; settledAt?: string; connectionRevision?: string };
 export type McpProposalDecision = 'apply' | 'decline';
-type StoredMcpProposal = McpConnectionProposal & { project: string };
+type StoredMcpProposal = Omit<McpConnectionProposal, 'transport'> & { project: string; transport?: McpRemoteTransport };
 type McpConfiguration = { connections: SavedConnection[]; proposals?: StoredMcpProposal[] };
 export type McpProjectToolProposal = { id: string; sourceTaskId: string; tools: ProjectMcpTool[] | null; previous: ProjectMcpTool[] | null;
   effective: ProjectMcpTool[]; state: 'pending' | 'applied' | 'declined'; createdAt: string; settledAt?: string };
@@ -46,7 +47,7 @@ export class McpProposalError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-function mcpProposalView({ project: _project, ...view }: StoredMcpProposal): McpConnectionProposal { return view; }
+function mcpProposalView({ project: _project, transport = 'http', ...view }: StoredMcpProposal): McpConnectionProposal { return { ...view, transport }; }
 function toolProposalView({ project: _project, baseline: _baseline, ...view }: StoredToolProposal): McpProjectToolProposal { return view; }
 
 function selectProjectTools(connections: SavedConnection[], tools: ProjectMcpTool[]): ProjectMcpTool[] {
@@ -124,7 +125,7 @@ function normalize(def: McpDefinition): McpDefinition {
     if (def.args !== undefined && (!Array.isArray(def.args) || def.args.some(arg => typeof arg !== 'string'))) throw new Error('MCP command arguments must be strings.');
     return { id: def.id, transport: def.transport, command: def.command, args: def.args ?? [], env: envRefs(def.env, envPattern) };
   }
-  if (def.transport === 'http') {
+  if (def.transport === 'http' || def.transport === 'sse') {
     let url: URL;
     try {
       url = new URL(def.url);
@@ -214,7 +215,7 @@ export class McpTools {
 
   private async summary(connection: SavedConnection): Promise<McpConnection> {
     const result = status(connection);
-    if (connection.definition.transport === 'http' && connection.definition.oauth) {
+    if (connection.definition.transport !== 'stdio' && connection.definition.oauth) {
       result.oauth = await this.oauth.status(connection.definition.id, this.binding(connection.definition));
     }
     return result;
@@ -269,7 +270,7 @@ export class McpTools {
       ? old
       : { definition: normalized, revision: randomUUID(), enabled: false, allowedTools: [] }, async (next, old) => {
         if (JSON.stringify(old?.definition) !== JSON.stringify(next.definition) &&
-          (next.definition.transport === 'http' && next.definition.oauth || old?.definition.transport === 'http' && old.definition.oauth)) await this.oauth.clear(normalized.id);
+          (next.definition.transport !== 'stdio' && next.definition.oauth || old?.definition && old.definition.transport !== 'stdio' && old.definition.oauth)) await this.oauth.clear(normalized.id);
       });
   }
 
@@ -279,22 +280,26 @@ export class McpTools {
     return project;
   }
 
-  async proposeConnection(workspace: string, sourceTaskId: string, id: string, input: { connectionId: string; endpoint: string }) {
-    if (!/^[1-9]\d{0,19}$/.test(id) || typeof input.endpoint !== 'string' || !input.endpoint.trim() || input.endpoint.length > 2048) {
+  async proposeConnection(workspace: string, sourceTaskId: string, id: string, input: McpConnectionProposalInput) {
+    const transport = input.transport ?? 'http';
+    if (!/^[1-9]\d{0,19}$/.test(id) || typeof input.endpoint !== 'string' || !input.endpoint.trim() || input.endpoint.length > 2048 ||
+      (transport !== 'http' && transport !== 'sse')) {
       throw new McpProposalError(400, 'Provide an original proposal ID and an HTTP endpoint.');
     }
     if (redactCredentials(input.endpoint) !== input.endpoint) throw new McpProposalError(400, 'Provide a credential-free MCP endpoint.');
-    const normalized = normalize({ id: input.connectionId, transport: 'http', url: input.endpoint }) as Extract<McpDefinition, { transport: 'http' }>;
+    const normalized = normalize({ id: input.connectionId, transport, url: input.endpoint }) as McpUrlDefinition;
     const project = await this.proposalProject(workspace);
     return this.changes.run(async () => {
       const data = await this.readConfiguration();
       const prior = data.proposals?.find(item => item.project === project && item.sourceTaskId === sourceTaskId && item.id === id);
       if (prior) {
-        if (prior.connectionId !== normalized.id || prior.endpoint !== normalized.url) throw new McpProposalError(409, 'The MCP proposal already has different content.');
+        if (prior.connectionId !== normalized.id || prior.endpoint !== normalized.url || (prior.transport ?? 'http') !== transport) {
+          throw new McpProposalError(409, 'The MCP proposal already has different content.');
+        }
         return mcpProposalView(prior);
       }
       if (data.connections.some(connection => connection.definition.id === normalized.id)) throw new McpProposalError(409, 'That MCP connection already exists.');
-      const proposal: StoredMcpProposal = { id, sourceTaskId, project, connectionId: normalized.id, endpoint: normalized.url,
+      const proposal: StoredMcpProposal = { id, sourceTaskId, project, connectionId: normalized.id, endpoint: normalized.url, transport,
         state: 'pending', createdAt: new Date().toISOString() };
       await this.writeConfiguration({ ...data, proposals: [...(data.proposals ?? []), proposal] });
       return mcpProposalView(proposal);
@@ -318,7 +323,7 @@ export class McpTools {
       if (proposal.state !== 'pending') throw new McpProposalError(409, 'The MCP proposal already has a different decision.');
       if (decision === 'apply') {
         if (data.connections.some(connection => connection.definition.id === proposal.connectionId)) throw new McpProposalError(409, 'That MCP connection already exists.');
-        const definition = normalize({ id: proposal.connectionId, url: proposal.endpoint, transport: 'http' });
+        const definition = normalize({ id: proposal.connectionId, url: proposal.endpoint, transport: proposal.transport ?? 'http' });
         const revision = randomUUID();
         data.connections.push({ definition, revision, enabled: false, allowedTools: [] });
         proposal.connectionRevision = revision;
@@ -335,11 +340,11 @@ export class McpTools {
     let definition: McpDefinition | undefined;
     const changed = await this.update(id, old => {
       const saved = this.require(old);
-      if (saved.definition.transport !== 'http' || !saved.definition.oauth) throw new McpAuthError(400, 'Enable OAuth for this HTTP MCP connection first.');
+      if (saved.definition.transport === 'stdio' || !saved.definition.oauth) throw new McpAuthError(400, 'Enable OAuth for this HTTP MCP connection first.');
       definition = saved.definition;
       return { ...saved, revision: randomUUID(), enabled: false, allowedTools: [], test: undefined };
     }, async next => {
-      const definition = next.definition as Extract<McpDefinition, { transport: 'http' }>;
+      const definition = next.definition as McpUrlDefinition;
       session = await this.oauth.begin(id, this.binding(definition), redirectUrl, definition.url, definition.oauth);
     });
     const attempt = session!;
@@ -360,7 +365,7 @@ export class McpTools {
     const match = /^([a-z0-9][a-z0-9-]{0,31})\.[A-Za-z0-9_-]{43}$/.exec(state);
     if (!match) throw new McpAuthError(400, 'Invalid MCP authorization callback.');
     const id = match[1]!, saved = this.require((await this.read()).find(connection => connection.definition.id === id));
-    if (saved.definition.transport !== 'http' || !saved.definition.oauth) throw new McpAuthError(400, 'This MCP authorization is no longer configured.');
+    if (saved.definition.transport === 'stdio' || !saved.definition.oauth) throw new McpAuthError(400, 'This MCP authorization is no longer configured.');
     const binding = this.binding(saved.definition);
     if (denied) {
       await this.oauth.cancel(id, binding, state);
@@ -652,7 +657,7 @@ export class McpTools {
     const signals = [controller.signal, AbortSignal.timeout(timeout), ...(parentSignal ? [parentSignal] : [])];
     const signal = AbortSignal.any(signals);
     signal.throwIfAborted();
-    const authenticated = definition.transport === 'http' && definition.oauth;
+    const authenticated = definition.transport !== 'stdio' && definition.oauth;
     const work = async () => {
       signal.throwIfAborted();
       const settings = resolveEnv(definition.transport === 'stdio' ? definition.env : definition.headers);
@@ -664,13 +669,16 @@ export class McpTools {
         return headerValue ? [value, headerValue] : [value];
       }));
       const network: typeof fetch = async (input, init) => {
-        oauthUrl(input instanceof Request ? input.url : String(input), definition.transport === 'http' && loopback(new URL(definition.url)));
+        if (session) oauthUrl(input instanceof Request ? input.url : String(input), definition.transport !== 'stdio' && loopback(new URL(definition.url)));
         return fetch(input, { ...init, redirect: init?.redirect ?? 'manual', signal: AbortSignal.any([signal, ...(init?.signal ? [init.signal] : [])]) });
       };
+      const httpOptions = { requestInit: { headers: authenticated ? undefined : settings, redirect: 'error' as const },
+        ...(session ? { authProvider: session.provider, fetch: network } : {}) };
       const transport = definition.transport === 'stdio'
         ? new StdioClientTransport({ command: definition.command, args: definition.args, env: settings, stderr: 'ignore' })
-        : new StreamableHTTPClientTransport(new URL(definition.url), { requestInit: { headers: authenticated ? undefined : settings, redirect: 'error' },
-          ...(session ? { authProvider: session.provider, fetch: network } : {}) });
+        : definition.transport === 'sse'
+          ? new SSEClientTransport(new URL(definition.url), { ...httpOptions, fetch: network })
+          : new StreamableHTTPClientTransport(new URL(definition.url), httpOptions);
       const client = new Client({ name: 'kada', version: '1' });
       let closing: Promise<void> | undefined;
       const close = () => closing ??= oauth?.code !== undefined ? transport.close() : client.close();
@@ -678,7 +686,10 @@ export class McpTools {
       signal.addEventListener('abort', closeOnAbort, { once: true });
       try {
         signal.throwIfAborted();
-        if (oauth?.code !== undefined) await (transport as StreamableHTTPClientTransport).finishAuth(oauth.code);
+        if (oauth?.code !== undefined) {
+          if (!('finishAuth' in transport)) throw new McpAuthError(400, 'OAuth requires an HTTP MCP connection.');
+          await transport.finishAuth(oauth.code);
+        }
         else await client.connect(transport, { signal });
         signal.throwIfAborted();
         const result = await action(client, signal, credentials);

@@ -28,7 +28,7 @@ import { LocalDiscovery, localContextInstructions, type DiscoveryOptions, type L
 import { conversationAnswer, conversationInstructions } from "./conversation.js";
 import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ModelProposalError, ProviderSettings, type ModelProposalDecision } from "./provider-settings.js";
-import { McpProposalError, McpTools, type McpPin, type McpProposalDecision, type ProjectMcpTool } from "./mcp-tools.js";
+import { McpProposalError, McpTools, type McpConnectionProposalInput, type McpPin, type McpProposalDecision, type ProjectMcpTool } from "./mcp-tools.js";
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
@@ -373,7 +373,7 @@ export class LocalRuntime {
     }
     return workspace;
   }
-  private async proposeMcpConnection(id: string, proposalId: string, input: { connectionId: string; endpoint: string }) {
+  private async proposeMcpConnection(id: string, proposalId: string, input: McpConnectionProposalInput) {
     return this.changes.run(async () => this.mcp.proposeConnection(await this.activeMcpProposalWorkspace(id), id, proposalId, input));
   }
   private async proposeMcpProjectTools(id: string, proposalId: string, tools: ProjectMcpTool[] | null) {

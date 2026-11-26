@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +27,10 @@ test('an approved MCP proposal registers once without contacting the service or 
   const proposed = await first.proposeConnection(project, 'source', '31', { connectionId: 'new-service', endpoint: url });
   assert.equal(proposed.state, 'pending');
   assert.deepEqual((await first.list()).map(connection => connection.id), ['existing']);
+  const config = join(data, 'mcp-connections.json');
+  const previousFormat = JSON.parse(await readFile(config, 'utf8'));
+  delete previousFormat.proposals[0].transport;
+  await writeFile(config, JSON.stringify(previousFormat));
   const mcp = new McpTools(data);
   assert.deepEqual(await mcp.connectionProposals(project, 'source'), [proposed]);
   await assert.rejects(mcp.decideConnectionProposal(other, 'source', '31', 'apply'), /not found/i);
@@ -36,6 +40,7 @@ test('an approved MCP proposal registers once without contacting the service or 
   assert.deepEqual(registered[0], registered[1]);
   assert.equal(registered[0].state, 'registered');
   const connection = (await mcp.list()).find(value => value.id === 'new-service');
+  assert.equal(connection?.transport, 'http');
   assert.equal(connection?.enabled, false);
   assert.equal(connection?.test, undefined);
   const newer = await mcp.configure({ id: 'new-service', transport: 'http', url: url + '/later' });

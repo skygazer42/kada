@@ -5,14 +5,18 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { Server as SdkServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { serve } from '../src/server.js';
 import { scriptedFixture } from './helpers.js';
 
-async function oauthServer(t: TestContext, registered?: { method: 'none' | 'client_secret_basic' | 'client_secret_post'; secret?: string }) {
+async function oauthServer(t: TestContext, registered?: { method: 'none' | 'client_secret_basic' | 'client_secret_post'; secret?: string }, legacy = false) {
   let origin = '', currentAccess = '', currentRefresh = '', refreshes = 0, exchanges = 0, echo: false | 'access' | 'client' = false, loseResponse = false;
   const clientSecret = 'synthetic-client-secret-' + randomUUID();
   let registrations = 0, tokenRequests = 0;
   const codes = new Map<string, { challenge: string; redirect: string }>();
+  const streams = new Map<string, SSEServerTransport>();
   const server = createServer(async (req, res) => {
     const url = new URL(req.url!, origin);
     const send = (status: number, body: object) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -58,10 +62,25 @@ async function oauthServer(t: TestContext, registered?: { method: 'none' | 'clie
       if (loseResponse && input.get('grant_type') === 'authorization_code') { loseResponse = false; req.socket.destroy(); return; }
       return send(200, { access_token: currentAccess, refresh_token: currentRefresh, token_type: 'Bearer', expires_in: 3600, scope: 'read' });
     }
-    if (url.pathname === '/mcp') {
+    if (url.pathname === '/mcp' || legacy && url.pathname === '/mcp/messages') {
       if (!currentAccess || req.headers.authorization !== 'Bearer ' + currentAccess) {
         res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`);
         return send(401, { error: 'authorization_required' });
+      }
+      if (legacy) {
+        if (url.pathname === '/mcp' && req.method === 'GET') {
+          const transport = new SSEServerTransport('/mcp/messages', res);
+          const sdk = new SdkServer({ name: 'legacy-oauth-fixture', version: '1' }, { capabilities: { tools: {} } });
+          sdk.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'read', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }] }));
+          sdk.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: 'text', text: 'Connected through SSE.' }] }));
+          streams.set(transport.sessionId, transport);
+          res.once('close', () => { streams.delete(transport.sessionId); });
+          await sdk.connect(transport);
+          return;
+        }
+        const stream = streams.get(url.searchParams.get('sessionId') ?? '');
+        if (url.pathname === '/mcp/messages' && req.method === 'POST' && stream) { await stream.handlePostMessage(req, res); return; }
+        return send(405, {});
       }
       if (req.method !== 'POST') return send(405, {});
       const input = JSON.parse(await body());
@@ -83,6 +102,28 @@ async function oauthServer(t: TestContext, registered?: { method: 'none' | 'clie
     registrations: () => registrations, tokenRequests: () => tokenRequests,
     secrets: () => [currentAccess, currentRefresh, clientSecret] };
 }
+
+test('legacy SSE OAuth uses the same owner sign-in and refresh flow after reopening', async t => {
+  const authority = await oauthServer(t, undefined, true), f = await app(t);
+  assert.equal((await f.request('/v1/settings/mcp', 'POST', { id: 'legacy-inbox', transport: 'sse', url: authority.origin + '/mcp', oauth: true })).status, 201);
+  const begun = await f.request('/v1/settings/mcp/legacy-inbox/login', 'POST', {});
+  assert.equal(begun.status, 200, await begun.clone().text());
+  const { authorizationUrl } = await begun.json();
+  await f.restart();
+  const callback = (await fetch(authorizationUrl, { redirect: 'manual' })).headers.get('location')!;
+  const approved = await fetch(callback);
+  assert.equal(approved.status, 200, await approved.clone().text());
+  assert.equal(authority.exchanges(), 1);
+  const checked = await (await f.request('/v1/settings/mcp/legacy-inbox/test', 'POST', {})).json();
+  assert.equal(checked.test?.status, 'ok');
+  assert.equal((await f.request('/v1/settings/mcp/legacy-inbox/enable', 'POST', { revision: checked.revision, tools: ['read'] })).status, 200);
+  await f.restart();
+  const [pin] = await f.runtime().mcp.pins();
+  assert(pin);
+  authority.expire();
+  assert.deepEqual((await f.runtime().mcp.executeApproved(pin, 'read', {})).output, [{ type: 'text', text: 'Connected through SSE.' }]);
+  assert.equal(authority.refreshes(), 1);
+});
 
 async function app(t: TestContext) {
   const fixture = await scriptedFixture(() => fauxAssistantMessage('No model needed.'));
@@ -178,8 +219,9 @@ test('a late completed OAuth exchange cannot disable a newer authorized and enab
   const callback = await authorize();
   const arrived = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
   const manager = f.runtime().mcp, original = manager['connect'].bind(manager);
+  const testManager = manager as unknown as { connect: (...args: Parameters<typeof original>) => Promise<unknown> };
   let held = false;
-  const paused = t.mock.method(manager, 'connect', async (...args: Parameters<typeof original>) => {
+  const paused = t.mock.method(testManager, 'connect', async (...args: Parameters<typeof original>) => {
     const result = await original(...args);
     if (args[4]?.code && !held) { held = true; arrived.resolve(); await release.promise; }
     return result;

@@ -1,9 +1,9 @@
 import { Type } from '@earendil-works/pi-ai';
 import { defineExtension, defineTool, ROOT_CONVERSATION_ID } from '@earendil-works/pi-durable';
-import type { McpConnectionProposal, McpProjectToolProposal, ProjectMcpTool } from './mcp-tools.js';
+import type { McpConnectionProposal, McpConnectionProposalInput, McpProjectToolProposal, ProjectMcpTool } from './mcp-tools.js';
 
 export function chatMcpProposals(options: {
-  propose: (id: string, input: { connectionId: string; endpoint: string }) => Promise<McpConnectionProposal>;
+  propose: (id: string, input: McpConnectionProposalInput) => Promise<McpConnectionProposal>;
   select: (id: string, tools: ProjectMcpTool[] | null) => Promise<McpProjectToolProposal>;
   catalog: () => Promise<unknown>;
 }) {
@@ -11,9 +11,9 @@ export function chatMcpProposals(options: {
   const connectionId = Type.String({ pattern: '^[a-z0-9][a-z0-9-]{0,31}$' });
   return defineExtension({ name: 'local_mcp_proposals', tools: [defineTool({
     name: 'propose_mcp_connection',
-    description: 'Propose registering an HTTP MCP connection when the user asks and provides the exact endpoint. The owner decides on registration and then uses the MCP settings to test and select tools. Use a credential-free endpoint.',
+    description: 'Propose registering an MCP connection when the user asks and provides the exact endpoint. Use http for Streamable HTTP or sse when the user specifies a legacy SSE server. The owner reviews the proposed endpoint and uses MCP settings to test and select tools.',
     parameters: Type.Object({ connectionId,
-      endpoint: Type.String({ minLength: 1, maxLength: 2048 }) }, { additionalProperties: false }),
+      endpoint: Type.String({ minLength: 1, maxLength: 2048 }), transport: Type.Optional(Type.Union([Type.Literal('http'), Type.Literal('sse')])) }, { additionalProperties: false }),
     replay: 'safe', executionMode: 'sequential',
     execute: async (input, api) => {
       if (api.conversationId !== ROOT_CONVERSATION_ID) throw new Error('Only the local main conversation can propose a connection.');
