@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BACKGROUND_CONTEXT as ctx } from '@earendil-works/chord/context';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type FauxResponseStep, type ToolResultMessage } from '@earendil-works/pi-ai';
-import { configure, createRegistry, defineExtension, defineTool, Harness, UserEntry, type Conversation, type Extension, type JsonObject } from '@earendil-works/pi-durable';
+import { configure, createRegistry, defineExtension, defineTool, Harness, section, UserEntry, type Conversation, type Extension, type JsonObject } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { Assistants } from '../src/assistants.js';
-import { AssistantPeers } from '../src/assistant-peer-state.js';
-import { assistantPeersExtension, type AssistantPeerControl } from '../src/assistant-peers.js';
+import { AssistantPeers, assistantWorkView } from '../src/assistant-peer-state.js';
+import { assistantPeersExtension, stopAssistantWork, type AssistantPeerControl } from '../src/assistant-peers.js';
 import { GoalDoc, goalExtension } from '../src/goal.js';
 import { Workspace } from '../src/workspace.js';
 import { localEnvironment, localExecution } from '../src/execution.js';
@@ -44,7 +44,9 @@ async function fixture(t: test.TestContext, respond: FauxResponseStep, extras: E
   await open();
   await current!.harness.commit(async tx => Object.assign(await tx.doc(GoalDoc), { initialized: true, objective: 'PRIVATE_SOURCE_GOAL_529', phase: 'working' }), ctx);
   t.after(async () => { await current?.harness.close(ctx); await rm(directory, { recursive: true, force: true, maxRetries: 5 }); });
-  return { roles, workspace, provider, models, reports, get harness() { return current!.harness; }, get root() { return current!.root; },
+  return { roles, workspace, provider, models, reports, withControl: <T>(action: (control: AssistantPeerControl) => Promise<T>) => queue.run(() => {
+    assert(current); return action({ root: current.root.id, project: path, enabled, requiresConfirmation: false, deadlineAt: Date.now() + 60_000 });
+  }), get harness() { return current!.harness; }, get root() { return current!.root; },
     enabled: (next: boolean) => { enabled = next; }, reopen: async () => { await current!.harness.close(ctx); await open(); } };
 }
 
@@ -356,4 +358,229 @@ test('the execution directory pages actual project metadata without leaking role
   await (await f.root.submit({ type: 'input', content: 'Select a directory role.' }, ctx)).wait(ctx);
   const state = (await f.harness.snapshot(AssistantPeers, ctx))!; assert.equal(Object.keys(state.work).length, 1);
   for (const work of Object.values(state.work)) assert.equal((await f.harness.waitForTask(work.taskId, ctx)).state.outcome.status, 'completed');
+});
+
+test('stopping an original running work preserves the same peer queued work and keeps the user stop after restart', async t => {
+  const entered = Promise.withResolvers<void>(); let roleId = '', effects = 0, aborted = false;
+  const hold = defineTool({ name: 'hold', description: 'Hold one original work until stopped.', parameters: Type.Object({}), replay: 'safe', execute: async (_args, _api, context) => {
+    const signal = context.abortSignal; assert(signal); entered.resolve();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => { aborted = true; resolve(); }, { once: true }));
+    return { output: [] };
+  } });
+  const f = await fixture(t, context => {
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) {
+      if (last === 'STOP_FIRST') return call('hold', {});
+      assert.equal(last, 'KEEP_SECOND'); effects++; return fauxAssistantMessage('SECOND_WORK_SURVIVED_714');
+    }
+    const latest = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (latest.role === 'user' && ['STOP_FIRST', 'KEEP_SECOND', 'RETRY_STOPPED'].includes(String(last))) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: String(last) });
+    return fauxAssistantMessage('Original state retained.');
+  }, [defineExtension({ name: 'peer_stop_probe', tools: [hold] })]);
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Stopped worker', instructions: 'Keep work identities.', tools: ['hold'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'STOP_FIRST' }, ctx)).wait(ctx); await entered.promise;
+  await (await f.root.submit({ type: 'input', content: 'KEEP_SECOND' }, ctx)).wait(ctx);
+  const initial = (await f.harness.snapshot(AssistantPeers, ctx))!, first = Object.values(initial.work)[0]!, second = Object.values(initial.work)[1]!;
+  const shown = assistantWorkView(initial, first.id)!;
+  const stop = await stopAssistantWork(f.harness, first.id, shown.controlVersion, 'owner-stop-first', f.withControl, ctx);
+  assert.equal(stop.stop?.confirmed, true); assert.equal(aborted, true);
+  assert.equal((await f.harness.waitForTask(second.taskId, ctx)).state.outcome.status, 'completed'); await f.root.waitForIdle(ctx);
+  assert.equal(effects, 1);
+  const reports = (await f.root.context(ctx)).messages.filter(message => message.role === 'user' && String(message.content).startsWith('ASSISTANT_REPORT '));
+  assert.equal(reports.length, 1); assert(String(reports[0]!.content).includes(second.id));
+  await f.reopen();
+  const replay = await stopAssistantWork(f.harness, first.id, shown.controlVersion, 'owner-stop-first', f.withControl, ctx); assert.equal(replay.stop?.confirmed, true);
+  await (await f.root.submit({ type: 'input', content: 'RETRY_STOPPED' }, ctx)).wait(ctx);
+  assert.equal(Object.keys((await f.harness.snapshot(AssistantPeers, ctx))!.work).length, 2); assert.equal(effects, 1);
+});
+
+test('stopping only a queued assignment never interrupts the peer current work or invokes the queued model', async t => {
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(); let roleId = '', forbidden = 0;
+  const hold = defineTool({ name: 'hold', description: 'Keep the first work running.', parameters: Type.Object({}), replay: 'safe', execute: async () => {
+    entered.resolve(); await release.promise; return { output: [] };
+  } });
+  t.after(() => release.resolve());
+  const f = await fixture(t, context => {
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) {
+      if (last === 'CANCEL_QUEUED') { forbidden++; return fauxAssistantMessage('Queued work must not run.'); }
+      return context.messages.some(message => message.role === 'toolResult' && message.toolName === 'hold') ? fauxAssistantMessage('FIRST_WORK_RETAINED_817') : call('hold', {});
+    }
+    const latest = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (latest.role === 'user' && ['KEEP_FIRST', 'CANCEL_QUEUED'].includes(String(last))) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: String(last) });
+    return fauxAssistantMessage('Original state retained.');
+  }, [defineExtension({ name: 'peer_stop_queued', tools: [hold] })]);
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Queued stop', instructions: 'Keep original work.', tools: ['hold'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'KEEP_FIRST' }, ctx)).wait(ctx); await entered.promise;
+  await (await f.root.submit({ type: 'input', content: 'CANCEL_QUEUED' }, ctx)).wait(ctx);
+  const initial = (await f.harness.snapshot(AssistantPeers, ctx))!, first = Object.values(initial.work)[0]!, second = Object.values(initial.work)[1]!;
+  const shown = assistantWorkView(initial, second.id)!;
+  const stopped = await stopAssistantWork(f.harness, second.id, shown.controlVersion, 'stop-queued-only', f.withControl, ctx);
+  assert.equal(stopped.stop?.confirmed, true); assert.equal(forbidden, 0);
+  assert.equal((await f.harness.getTask(first.taskId, ctx))!.state.status, 'running');
+  release.resolve(); assert.equal((await f.harness.waitForTask(first.taskId, ctx)).state.outcome.status, 'completed'); await f.root.waitForIdle(ctx);
+  assert.equal(forbidden, 0);
+  const reports = (await f.root.context(ctx)).messages.filter(message => message.role === 'user' && String(message.content).startsWith('ASSISTANT_REPORT '));
+  assert.equal(reports.length, 1); assert(String(reports[0]!.content).includes(first.id));
+});
+
+test('stopping a nested original assignment confirms its subtree and leaves a separate peer working', async t => {
+  let parentId = '', childId = '', otherId = '', ended = 0;
+  const entered = Promise.withResolvers<void>(), releaseOther = Promise.withResolvers<void>();
+  const hold = defineTool({ name: 'hold', description: 'Hold the nested worker until stop.', parameters: Type.Object({}), replay: 'safe', execute: async (_args, _api, context) => {
+    entered.resolve(); const signal = context.abortSignal; assert(signal);
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => { ended++; resolve(); }, { once: true })); return { output: [] };
+  } });
+  const other = defineTool({ name: 'other_hold', description: 'Keep another peer independent.', parameters: Type.Object({}), replay: 'safe', execute: async () => {
+    await releaseOther.promise; return { output: [] };
+  } });
+  t.after(() => releaseOther.resolve());
+  const f = await fixture(t, context => {
+    const system = JSON.stringify(context.messages.filter(message => message.role === 'system'));
+    const results = context.messages.filter(message => message.role === 'toolResult');
+    if (system.includes('STOP_NESTED_CHILD_318')) return call('hold', {});
+    if (system.includes('KEEP_OTHER_PEER_714')) return results.some(result => result.toolName === 'other_hold') ? fauxAssistantMessage('INDEPENDENT_PEER_RESULT_862') : call('other_hold', {});
+    if (system.includes('STOP_NESTED_PARENT_529')) return results.some(result => result.toolName === 'assistant_assign') ? fauxAssistantMessage('Waiting for nested evidence.') :
+      call('assistant_assign', { assistant: { id: childId, revision: 1 }, instructions: 'Wait for stop.' });
+    const last = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (last.role === 'user' && last.content === 'PARENT') return call('assistant_assign', { assistant: { id: parentId, revision: 1 }, instructions: 'Coordinate original nested work.' });
+    if (last.role === 'user' && last.content === 'OTHER') return call('assistant_assign', { assistant: { id: otherId, revision: 1 }, instructions: 'Keep independent work.' });
+    return fauxAssistantMessage('Original root retained.');
+  }, [defineExtension({ name: 'peer_stop_nested', tools: [hold, other] })]);
+  parentId = (await f.roles.create({ workspace: f.workspace.root, name: 'Stop nested parent', instructions: 'STOP_NESTED_PARENT_529', tools: ['assistant_assign', 'hold'] })).id;
+  childId = (await f.roles.create({ workspace: f.workspace.root, name: 'Stop nested child', instructions: 'STOP_NESTED_CHILD_318', tools: ['hold'] })).id;
+  otherId = (await f.roles.create({ workspace: f.workspace.root, name: 'Keep other', instructions: 'KEEP_OTHER_PEER_714', tools: ['other_hold'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'PARENT' }, ctx)).wait(ctx); await entered.promise;
+  await (await f.root.submit({ type: 'input', content: 'OTHER' }, ctx)).wait(ctx);
+  const initial = (await f.harness.snapshot(AssistantPeers, ctx))!, parent = Object.values(initial.work).find(work => work.assistant.id === parentId)!;
+  const separate = Object.values(initial.work).find(work => work.assistant.id === otherId)!;
+  const stopped = await stopAssistantWork(f.harness, parent.id, assistantWorkView(initial, parent.id)!.controlVersion, 'stop-nested-subtree', f.withControl, ctx);
+  assert.equal(stopped.stop?.confirmed, true); assert.equal(ended, 1);
+  const state = (await f.harness.snapshot(AssistantPeers, ctx))!; assert(Object.values(state.work).filter(work => work.assistant.id !== otherId).every(work => work.stop?.confirmed));
+  releaseOther.resolve(); assert.equal((await f.harness.waitForTask(separate.taskId, ctx)).state.outcome.status, 'completed'); await f.root.waitForIdle(ctx);
+  const reports = (await f.root.context(ctx)).messages.filter(message => message.role === 'user' && String(message.content).startsWith('ASSISTANT_REPORT '));
+  assert.equal(reports.length, 1); assert(String(reports[0]!.content).includes(separate.id));
+});
+
+test('a stop confirms while the source is disabled without waking its queued sibling until the original host permits work', async t => {
+  const entered = Promise.withResolvers<void>(); let roleId = '', calls = 0;
+  const hold = defineTool({ name: 'hold', description: 'Hold original work until stop.', parameters: Type.Object({}), replay: 'safe', execute: async (_args, _api, context) => {
+    const signal = context.abortSignal; assert(signal); entered.resolve();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })); return { output: [] };
+  } });
+  const f = await fixture(t, context => {
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) {
+      if (last === 'FIRST') return call('hold', {});
+      calls++; return fauxAssistantMessage('QUEUED_AFTER_HOST_RESUME_714');
+    }
+    const latest = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (latest.role === 'user' && ['FIRST', 'SECOND'].includes(String(last))) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: String(last) });
+    return fauxAssistantMessage('Original state retained.');
+  }, [defineExtension({ name: 'peer_disabled_stop', tools: [hold] })]);
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Disabled source stop', instructions: 'Keep original work.', tools: ['hold'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'FIRST' }, ctx)).wait(ctx); await entered.promise;
+  await (await f.root.submit({ type: 'input', content: 'SECOND' }, ctx)).wait(ctx);
+  await until(() => f.harness.inspect(ctx), state => state.submissions.filter(input => input.conversationId !== f.root.id).length === 2);
+  const initial = (await f.harness.snapshot(AssistantPeers, ctx))!, first = Object.values(initial.work)[0]!, second = Object.values(initial.work)[1]!;
+  const shown = assistantWorkView(initial, first.id)!; f.enabled(false);
+  const stop = await stopAssistantWork(f.harness, first.id, shown.controlVersion, 'stop-without-resuming', f.withControl, ctx); assert.equal(stop.stop?.confirmed, true);
+  const pending = await f.harness.commit(tx => tx.submissionByRequest(second.target, second.messageRequestId), ctx);
+  assert.equal(pending?.status, 'queued'); assert.equal(calls, 0);
+  f.enabled(true); await stopAssistantWork(f.harness, first.id, shown.controlVersion, 'stop-without-resuming', f.withControl, ctx);
+  await f.harness.waitForTask(second.taskId, ctx); await f.root.waitForIdle(ctx); assert.equal(calls, 1);
+});
+
+test('a dispatched peer receives fixed binary and empty inputs in its original work copies and rework keeps old bytes', async t => {
+  let roleId = '', workId = '', rounds = 0;
+  const f = await fixture(t, context => {
+    if (!hasTool(context, 'task_submit')) {
+      const latest = context.messages.filter(message => message.role === 'user').at(-1)?.content; assert.equal(typeof latest, 'string');
+      const lines = String(latest).split('ASSISTANT_INPUT_FILES '); assert.equal(lines.length, 2);
+      const files = JSON.parse(lines[1]!); assert.equal(files.length, 2); assert(files.every((file: { path: string }) => file.path.includes('assistant-work')));
+      rounds++; return fauxAssistantMessage('INPUT_HASHES_PINNED_817');
+    }
+    const last = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (last.role === 'user' && last.content === 'FIRST_FILES') return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: 'Inspect the fixed inputs.', files: ['original.bin', 'empty.txt'] });
+    if (last.role === 'user' && last.content === 'REWORK_FILES') return call('assistant_rework', { id: workId, instructions: 'Recheck the original input bytes.' });
+    return fauxAssistantMessage('Original file receipts retained.');
+  });
+  await writeFile(join(f.workspace.root, 'original.bin'), Buffer.from([0, 255, 128])); await writeFile(join(f.workspace.root, 'empty.txt'), '');
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Input worker', instructions: 'Use the fixed input copies.', tools: ['read'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'FIRST_FILES' }, ctx)).wait(ctx);
+  const first = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!; workId = first.id;
+  await f.harness.waitForTask(first.taskId, ctx); await f.root.waitForIdle(ctx); assert.equal(first.files.length, 2);
+  assert.deepEqual(await readFile(first.files[0]!.path), Buffer.from([0, 255, 128])); assert.equal((await readFile(first.files[1]!.path)).length, 0);
+  await writeFile(join(f.workspace.root, 'original.bin'), 'Later version'); await f.reopen();
+  await (await f.root.submit({ type: 'input', content: 'REWORK_FILES' }, ctx)).wait(ctx);
+  const revised = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work).at(-1)!;
+  await f.harness.waitForTask(revised.taskId, ctx); await f.root.waitForIdle(ctx); assert.equal(rounds, 2);
+  assert.equal(revised.reworkOf, first.id); assert.notEqual(revised.files[0]!.path, first.files[0]!.path);
+  assert.deepEqual(await readFile(revised.files[0]!.path), Buffer.from([0, 255, 128])); assert.equal(revised.files[0]!.sha256, first.files[0]!.sha256);
+});
+
+test('peer file attachments return fixed copies with their original result and never grant the source another tool', async t => {
+  let roleId = '', outputs: { path: string; sha256: string; bytes: number }[] = [];
+  const f = await fixture(t, context => {
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult');
+    if (!hasTool(context, 'task_submit')) {
+      if (!results.some(result => result.toolName === 'assistant_attach')) return call('assistant_attach', { files: ['peer-output.bin', 'peer-empty.txt'] });
+      const attached = value(results.find(result => result.toolName === 'assistant_attach')!); outputs = attached.files;
+      assert.equal(outputs.length, 2); return fauxAssistantMessage('ORIGINAL_RETURNED_FILES_928');
+    }
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (typeof last === 'string' && last.startsWith('ASSISTANT_REPORT ')) {
+      const report = JSON.parse(last.slice('ASSISTANT_REPORT '.length)); assert.equal(report.outputs.length, 2);
+      assert.equal(report.outputs[0].sha256, outputs[0]!.sha256); return fauxAssistantMessage('Original file results read.');
+    }
+    if (!results.some(result => result.toolName === 'assistant_assign')) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: 'Return the original binary evidence.' });
+    return fauxAssistantMessage('Original result pending.');
+  });
+  await writeFile(join(f.workspace.root, 'peer-output.bin'), Buffer.from([0, 255, 17])); await writeFile(join(f.workspace.root, 'peer-empty.txt'), '');
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'File return worker', instructions: 'Attach actual result files.', tools: ['assistant_attach'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'Return actual original files.' }, ctx)).wait(ctx);
+  const work = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!;
+  assert.equal((await f.harness.waitForTask(work.taskId, ctx)).state.outcome.status, 'completed'); await f.root.waitForIdle(ctx);
+  assert.equal(outputs.length, 2); assert.deepEqual(await readFile(outputs[0]!.path), Buffer.from([0, 255, 17])); assert.equal((await readFile(outputs[1]!.path)).length, 0);
+  await writeFile(join(f.workspace.root, 'peer-output.bin'), 'Later peer edit');
+  assert.deepEqual(await readFile(outputs[0]!.path), Buffer.from([0, 255, 17]));
+  assert.equal(assistantWorkView(await f.harness.snapshot(AssistantPeers, ctx), work.id)!.outputs.length, 2);
+});
+
+test('rework refuses a modified original input copy instead of accepting it as the old evidence', async t => {
+  let roleId = '', workId = '', rounds = 0;
+  const f = await fixture(t, context => {
+    if (!hasTool(context, 'task_submit')) { rounds++; return fauxAssistantMessage('Original evidence seen.'); }
+    const latest = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (latest.role === 'user' && latest.content === 'FIRST') return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: 'Inspect original.', files: ['seed.txt'] });
+    if (latest.role === 'user' && latest.content === 'REWORK') return call('assistant_rework', { id: workId, instructions: 'Recheck original.' });
+    if (latest.role === 'toolResult' && latest.toolName === 'assistant_rework') assert.equal(latest.isError, true);
+    return fauxAssistantMessage('Original receipt retained.');
+  });
+  await writeFile(join(f.workspace.root, 'seed.txt'), 'Original seed');
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Changed copy', instructions: 'Keep fixed evidence.', tools: ['read'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'FIRST' }, ctx)).wait(ctx);
+  const first = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!; workId = first.id;
+  await f.harness.waitForTask(first.taskId, ctx); await f.root.waitForIdle(ctx);
+  await writeFile(first.files[0]!.path, 'Modified fixed input');
+  await (await f.root.submit({ type: 'input', content: 'REWORK' }, ctx)).wait(ctx);
+  assert.equal(rounds, 1); assert.equal(Object.keys((await f.harness.snapshot(AssistantPeers, ctx))!.work).length, 1);
+});
+
+test('recipient prompts exclude source-private memory and preparation sections even if the host supplied those extensions', async t => {
+  let roleId = '', peerCalls = 0;
+  const extras = ['local_user_memory', 'local_preparation', 'local_verification', 'local_learning'].map(name => defineExtension({ name,
+    sections: [section(name + '_source_private', () => 'PRIVATE_SOURCE_SECTION_918')] }));
+  const f = await fixture(t, context => {
+    const text = JSON.stringify(context.messages);
+    if (!hasTool(context, 'task_submit')) { peerCalls++; assert(!text.includes('PRIVATE_SOURCE_SECTION_918')); return fauxAssistantMessage('Only original assignment context.'); }
+    assert(text.includes('PRIVATE_SOURCE_SECTION_918'));
+    if (!context.messages.some(message => message.role === 'toolResult' && message.toolName === 'assistant_assign')) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: 'Read only assigned context.' });
+    return fauxAssistantMessage('Original privacy retained.');
+  }, extras);
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Private context recipient', instructions: 'Keep assigned context.', tools: ['read'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'Keep source context private.' }, ctx)).wait(ctx);
+  const work = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!;
+  await f.harness.waitForTask(work.taskId, ctx); await f.root.waitForIdle(ctx); assert.equal(peerCalls, 1);
+  assert.equal((await f.harness.snapshot(AssistantPeers, ctx))!.work[work.id]!.result?.status, 'done');
 });

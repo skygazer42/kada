@@ -1,0 +1,40 @@
+{
+  "model": {
+    "provider": "siliconflow",
+    "modelId": "deepseek-ai/DeepSeek-V3.2"
+  },
+  "directory": "E:\\kada\\.harness\\peer-live-bbLt6H",
+  "requests": 24,
+  "checks": [
+    {
+      "stage": "first",
+      "conversationId": 20,
+      "files": 1,
+      "outputs": 1,
+      "requests": 9
+    },
+    {
+      "stage": "reopen-and-second",
+      "conversationId": 20,
+      "requests": 17
+    },
+    {
+      "stage": "rework",
+      "originalWork": "assign-17",
+      "originalRevision": 1,
+      "requests": 24
+    }
+  ],
+  "passed": true,
+  "failure": null,
+  "usage": {
+    "totalTokens": 108219,
+    "cachedTokens": 83200,
+    "cacheWriteTokens": 0,
+    "inputTokens": 22444,
+    "outputTokens": 2575,
+    "estimatedCostUsd": 0
+  },
+  "money": null,
+  "scope": "Internal extension live test; Runtime product entry, questions and lifecycle still pending. Synthetic files only."
+}

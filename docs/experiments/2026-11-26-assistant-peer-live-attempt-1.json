@@ -1,0 +1,21 @@
+{
+  "model": {
+    "provider": "siliconflow",
+    "modelId": "deepseek-ai/DeepSeek-V3.2"
+  },
+  "directory": "E:\\kada\\.harness\\peer-live-FJRBsH",
+  "requests": 8,
+  "checks": [],
+  "passed": false,
+  "failure": "The expression evaluated to a falsy value:\n\n  assert(first)\n",
+  "usage": {
+    "totalTokens": 31458,
+    "cachedTokens": 25600,
+    "cacheWriteTokens": 0,
+    "inputTokens": 4896,
+    "outputTokens": 962,
+    "estimatedCostUsd": 0
+  },
+  "money": null,
+  "scope": "Internal extension live test; Runtime product entry, questions and lifecycle still pending. Synthetic files only."
+}

@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { defineDoc, LiveDoc, type ConversationId, type ConversationRecord, type EntryId, type SubmissionId, type TaskId, type Tx } from '@earendil-works/pi-durable';
 import type { AssistantPin, AssistantRef } from './assistants.js';
 import type { FileSnapshot } from './workspace.js';
+export type AssistantWorkFile = FileSnapshot & { sourcePath?: string };
 
 export type AssistantPeerEpoch = { revision: number; epoch: number };
 type PeerPin = Omit<AssistantPin, 'model'> & { model: { provider: string; modelId: string } };
@@ -13,8 +14,9 @@ export type AssistantSeat = {
 export type AssistantWorkResult = { status: 'done'; submission: SubmissionId; answer: EntryId } | { status: 'unanswered'; submission: SubmissionId; reason: string };
 export type AssistantWork = {
   id: string; fingerprint: string; root: ConversationId; source: ConversationId; target: ConversationId; taskId: TaskId;
-  origin: AssistantPeerEpoch; parentId?: string; reworkOf?: string; lineage: string[]; depth: number; assistant: AssistantRef; brief: string; files: FileSnapshot[];
+  origin: AssistantPeerEpoch; parentId?: string; reworkOf?: string; lineage: string[]; depth: number; assistant: AssistantRef; brief: string; files: AssistantWorkFile[];
   inputRequests: string[]; messageRequestId: string; reportRequestId: string; createdAt: number;
+  outputs?: AssistantWorkFile[]; outputRequests?: Record<string, AssistantWorkFile[]>;
   result?: AssistantWorkResult; stop?: { requestId: string; at: number; confirmed: boolean; ancestor?: string };
 };
 export type AssistantPeerState = { seats: Record<string, AssistantSeat>; work: Record<string, AssistantWork>; stopped: Record<string, true> };
@@ -26,7 +28,7 @@ export type AssistantAdmission = {
   goal: AssistantPeerEpoch & { initialized: boolean; phase: string; confirmation?: unknown };
 };
 export type AssistantWorkIntent = {
-  requestId: string; assistant: AssistantPin; instructions: string; tools: string[]; files: FileSnapshot[];
+  requestId: string; assistant: AssistantPin; instructions: string; tools: string[]; files: AssistantWorkFile[];
   mode: 'standing' | 'new' | ConversationId; reworkOf?: string;
 };
 type NativeWork = { conversation: ConversationRecord; anchor: TaskId; taskId: TaskId };
@@ -43,7 +45,8 @@ function validate(intent: AssistantWorkIntent) {
     typeof intent.instructions !== 'string' || !intent.instructions.trim() || intent.instructions.length > 32_000 || intent.instructions.includes('\0') ||
     !modeValid || intent.reworkOf !== undefined && (typeof intent.reworkOf !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,119}$/.test(intent.reworkOf)) ||
     !Array.isArray(intent.tools) || new Set(intent.tools).size !== intent.tools.length || intent.tools.some(tool => typeof tool !== 'string' || !intent.assistant.tools.includes(tool)) ||
-    !Array.isArray(intent.files) || intent.files.length > 5 || intent.files.some(file => !isAbsolute(file.path) || !Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(file.sha256))) {
+    !Array.isArray(intent.files) || intent.files.length > 5 || intent.files.some(file => !isAbsolute(file.path) || file.sourcePath !== undefined && !isAbsolute(file.sourcePath) ||
+      !Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(file.sha256))) {
     throw new AssistantPeerError(400, 'Provide an original assistant request, explicit tool intersection and up to five bounded file snapshots.');
   }
 }
@@ -154,7 +157,7 @@ export function assistantWorkView(state: AssistantPeerState | undefined, id: str
   if (!seat) throw new AssistantPeerError(409, 'The original assistant conversation record is missing.');
   return { id: work.id, source: work.source, conversationId: work.target, conversationKind: seat.kind, nativeTaskId: work.taskId, origin: copy(work.origin), parentId: work.parentId ?? null, reworkOf: work.reworkOf ?? null, depth: work.depth,
     assistant: { ...work.assistant, name: seat.pin.name }, brief: work.brief.slice(0, 1000), truncated: work.brief.length > 1000,
-    files: copy(work.files), result: work.result ? copy(work.result) : null, stop: work.stop ? copy(work.stop) : null, controlVersion: controlVersion(work) };
+    files: copy(work.files), outputs: copy(work.outputs ?? []), result: work.result ? copy(work.result) : null, stop: work.stop ? copy(work.stop) : null, controlVersion: controlVersion(work) };
 }
 
 export async function requestAssistantStop(tx: Tx, root: ConversationId, id: string, version: string, requestId: string, at: number): Promise<AssistantWork> {

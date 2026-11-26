@@ -88,3 +88,17 @@ Runtime当前没有安装派活扩展或启用该Goal选项，未开放模型/AP
 后续精确停止已补原生探针：以 LiveDoc 的当前 generation taskId 取消原轮，随后被动空 model write 沿原 Pi final boundary 唤醒保留的 queued followUp。断言第一份输入 unanswered、第二份 done、第二份只运行一次，且无额外用户输入；该探针与公开类型通过，不等于业务停止 API 已完成。
 
 派活阶段整仓回归结束：582 项中 578 通过、0 失败、4 项可选 Office 跳过；另加的选择性停止原生探针单独 1/1 通过。类型/构建、严格公开类型及笔记/提交检查通过。只读审查子代理仍未收到正文；CLI helper 的 Windows 本地快照因访问时间变化拒绝，未有独立审查结论。[本阶段证据](../../experiments/2026-11-26-assistant-peer-dispatch.json)。Task2 与完整产品仍保持 in progress。
+
+## 单工作停止的内部接法
+
+`stopAssistantWork` 先在原控制锁及 Pi 事务保存用户停止，再按原 `parentId` 子树从叶子处理：撤回确切 queued 输入、取消对应 LiveDoc generation、等待原生任务终止后确认业务停止。每次重新检查当前输入归属，防止读取 queued 后已变 placed 或 generation 已换轮时误认成功；不使用会撤回其他工作的 `Conversation.abort()`。
+
+停止确认后用原 Pi 空 model 的被动 write 推进保留输入的 final boundary，请求 ID 固定。停止确认与被动边界之间强杀后，原回执重试仍会补齐边界；主来源 disabled、Goal/epoch 变化、未确认或时限到限时不唤醒。停止决定、旧文件及旧历史保留，不能称已撤销外部动作。
+
+四项集成已通过：停止运行中工作保留同会话下一份、只停排队输入不打断当前工作、停止多跳子树保留另一位同事、来源禁用时不唤醒保留输入。停止请求已保存及已确认未推进边界两处真实 SIGKILL 恢复通过。与派活/核心/原Pi/临时委派/恢复组合55项通过（增加禁用来源修正前），修正后四项停止集成与类型/构建通过；当前整仓再次验证中。仍未开放 owner API/Runtime，没有完整预算/修订清理和工作待答/文件验收，Task4 不勾为完成。
+
+## Task 3 及单工作停止的当前证据
+
+内部固定输入/输出副本已实现，复用 Workspace/原 Pi memo；原目录、边界、大小、SHA-256、复制中变更、不同目标拒绝覆盖、二进制/空文件与原副本被改后返工拒绝都有实际断言。`assistant_attach` 绑定当前原工作和原工具回执，输出随报告返回，权限/源私有section不随扩展误传。复制完成未认领、输出完成未回执两处实际强杀保留原字节，即使原文件后来变化。
+
+最终整仓596通过、0失败、4项可选Office跳过，当前83项相关组合及后加prompt隔离回归通过。硅基流动三步24次请求通过；失败首轮8次请求保留，原因是验收脚本传入项目子目录，现通过assistantProject读取实际根，未修改产品归属检查。没有工作待答/指导、Runtime生命周期/owner入口及原Pi收益对照，Task2/4/5继续进行，Task3仍需产品流程与最终验收接入。[停止/文件证据](../../experiments/2026-11-26-assistant-peer-files-and-stop.json)

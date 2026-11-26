@@ -1,0 +1,61 @@
+{
+  "baseCommit": "cdb13465076b3ccc8c6ddaec33a984a1e6da00f5",
+  "scope": "Internal original-work selective stop, fixed input/output file copies and source-private extension exclusion; Runtime and owner product entries not enabled",
+  "references": {
+    "pi": "4a080252f06caf63a525d7873c5d94d3c23887e0",
+    "OpenMausBot": "3aec210054cd/server/host/handoff-files.ts and server/runtime-coordinator.ts",
+    "Rakazo": "e64d73292179/packages/adapters/src/bots/group-handoff.ts"
+  },
+  "focused": {
+    "passed": 83,
+    "failed": 0,
+    "note": "Core, file, dispatcher, seven SIGKILL windows, native Pi, role policy, named role, delegation, Runtime and recovery. An additional source-private prompt regression subsequently passed alone and in the final whole suite."
+  },
+  "fullSuite": {
+    "command": "npm test",
+    "total": 600,
+    "passed": 596,
+    "failed": 0,
+    "skipped": 4,
+    "skipReason": "Optional Office fixture dependencies",
+    "durationMs": 1090252.7535,
+    "note": "Source-private extension fix was made before the dispatch integration file started; the final suite includes and passes that added regression."
+  },
+  "previousStopSuite": {
+    "passed": 585,
+    "failed": 0,
+    "skipped": 4,
+    "note": "Started before file implementation; not reused as proof for file changes."
+  },
+  "recovery": {
+    "actualProcessKillWindows": [
+      "assignment-before-receipt",
+      "effect-before-receipt",
+      "report-before-receipt",
+      "input-copies-before-claim",
+      "output-copies-before-receipt",
+      "stop-requested",
+      "stop-confirmed-before-boundary"
+    ],
+    "assertions": "Original work, seat, input, side effect and report stay unique; fixed binary copies survive later source edits; stopping one original work preserves queued same-conversation work; stop receipt replay restores an interrupted passive boundary."
+  },
+  "realProvider": {
+    "model": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+    "passedStages": ["first assignment and actual returned artifact", "reopen, same conversation, original code recalled without code in the new brief or files", "linked original-role rework after catalog edit and archive"],
+    "requests": 24,
+    "evidence": "2026-11-26-assistant-peer-live.json",
+    "failedAttempt": "2026-11-26-assistant-peer-live-attempt-1.json",
+    "failedAttemptRequests": 8,
+    "failedAttemptCause": "The isolated live runner supplied its workspace subdirectory instead of the actual project root. Directory and assignment correctly rejected it. Runner now uses assistantProject; product admission was not weakened.",
+    "money": null,
+    "note": "Zero provider cost fields are unconfigured metadata, not evidence of free usage. All attempts count; synthetic local files only, no Runtime product entry or complete goal delivery."
+  },
+  "limitations": [
+    "Fixed files are ordinary workspace files with original hash binding and no overwrite; not an OS immutable-file or sandbox guarantee",
+    "Publication uses same-directory hard links; unsupported filesystems fail explicitly",
+    "Main assistant must independently verify actual file evidence",
+    "Original-work questions/guidance, lifecycle budget/revision reconciliation and owner product entry still pending",
+    "No complete independent code-review verdict; previous immutable dispatch commit credential scan passed but reviewer failed with 401",
+    "Full reference capability parity remains unachieved"
+  ]
+}
