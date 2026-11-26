@@ -306,6 +306,22 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         await runtime.answerQuestion(questionAnswer[1]!, questionAnswer[2]!, requestId, answer);
         return send(200, { requestId });
       }
+      const credentialInput = /^\/v1\/tasks\/([a-f0-9-]{36})\/credentials\/(\d+)$/.exec(url.pathname);
+      if (credentialInput && req.method === 'POST') {
+        const input = await body(req).catch(() => { throw new Error('Invalid protected credential input.'); });
+        if (!((Object.keys(input).length === 1 && typeof input.value === 'string') || (Object.keys(input).length === 1 && input.decline === true))) throw new Error('Provide a protected credential value or decline.');
+        await runtime.provideCredential(credentialInput[1]!, credentialInput[2]!, typeof input.value === 'string' ? input.value : undefined);
+        return send(200, { accepted: true });
+      }
+      if (url.pathname === '/v1/credentials') {
+        const project = await runtime.credentialScope(url.searchParams.get('workspace'));
+        if (req.method === 'GET') return send(200, await runtime.credentials.list(project));
+        if (req.method === 'DELETE') {
+          const input = await body(req);
+          if (typeof input.name !== 'string' || typeof input.revision !== 'number') throw new Error('Provide credential name and displayed revision.');
+          await runtime.credentials.remove(project, input.name, input.revision); return send(200, { removed: true });
+        }
+      }
       const match = /^\/v1\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|cancel|messages|confirm|view|memory))?$/.exec(url.pathname);
       if (!match) return send(404, { error: "Not found" });
       const id = match[1]!;

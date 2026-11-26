@@ -56,6 +56,19 @@ npm run harness -- memory reject 候选ID --workspace E:/project
 npm run harness -- memory review off --workspace E:/project
 ```
 
+## 应用 API 凭据
+
+新本机主会话可请求提供 API 凭据。卡片列出名称、用途、HTTPS 站点与认证方式；核对后输入 `/credential 问题ID`，再在终端的无回显提示中粘贴值。命令本身只填问题 ID。用 `/decline-credential 问题ID` 拒绝。macOS 已接入独立密码字段，编译与实机交互仍待验证。普通消息、选项答复和管道不能提供凭据；手机共享卡提示回本机处理。
+
+保存只回传通用确认，不创建 Goal 或授权外部工作。已确认执行任务可按名称、修订使用 Bearer、自定义认证头或 Basic；后端将认证头绑定原 HTTPS origin，检查公开 DNS 并固定连接地址，拒绝重定向和覆盖认证头。取消会关闭请求；未知外部结果不自动重试。响应有体积限制，检测到原值或支持的 JSON/percent/base64 转义形式时整段隐藏，不能保证任意服务变换后的秘密都能识别。旧任务、远程和子任务不会自动获得这些工具。
+
+```powershell
+npm run harness -- credentials list --workspace E:/project
+npm run harness -- credentials remove reports 1 --workspace E:/project
+```
+
+列表只返回元数据，删除须使用显示的当前修订。替换由新凭据请求完成，重复提交原请求只确认原结果，不覆盖后来的轮换或删除。值保存于 dataDir 的 `application-credentials/items.json`；这是受限本地明文文件，Git 忽略并由提交检查阻止暂存，适用平台使用 0600/0700。Windows 沿用户目录权限，尚未接系统密钥库，也不隔离本机任意文件工具。网页登录、验证码和远程遮罩输入仍未提供。[参考及验收计划](superpowers/plans/2026-11-26-application-credentials.md)
+
 ## 模型与方法
 
 密钥通过供应商环境变量或 Pi 已有认证设置。硅基流动使用 `SILICONFLOW_API_KEY`，凭据不写入任务配置。

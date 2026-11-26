@@ -44,6 +44,8 @@ import { historyExtension, historyInstructions, historyMatch, historyQuery, type
 import { projectTasksExtension } from './project-tasks.js';
 import { chatWorkItemsExtension } from './chat-work-items.js';
 import { Questions, QuestionError, currentQuestion, questionExtension, recordQuestionAnswer } from './questions.js';
+import { ApplicationCredentials, CredentialError, type CredentialNetwork } from './application-credentials.js';
+import { credentialTools, credentialExecution } from './credential-tools.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -75,6 +77,7 @@ export interface TaskMeta {
   historyRecall?: true;
   projectTaskCatalog?: true;
   structuredQuestions?: true;
+  credentialProject?: string;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
   chatBudget?: { costLimit: number; tokenLimit: number | null };
   learning?: boolean;
@@ -125,7 +128,7 @@ interface Active {
   /** Disposable cache derived from Pi entries; rebuilt from storage after reopening. */
   compactionCounts: Map<Conversation["id"], { last?: EntryId; count: number }>;
 }
-export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 
 /** Each top-level task owns a Pi session. The host, rather than the model, decides completion. */
 export class LocalRuntime {
@@ -133,6 +136,7 @@ export class LocalRuntime {
   readonly mcp: McpTools;
   readonly routines: LocalRoutines;
   readonly workItems: WorkItems<TaskMeta>;
+  readonly credentials: ApplicationCredentials;
   private inbox: NotificationStore;
   private active = new Map<string, Active>();
   private changes = new SerialQueue();
@@ -145,6 +149,7 @@ export class LocalRuntime {
   constructor(readonly config: Config, private options: RuntimeOptions) {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
+    this.credentials = new ApplicationCredentials(config.dataDir, options.credentialNetwork);
     this.workItems = new WorkItems<TaskMeta>(config.dataDir, {
       task: async id => {
         try { return await this.metadata(id); }
@@ -371,6 +376,7 @@ export class LocalRuntime {
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace);
       const workItemProject = options.chat && !options.remote ? await memoryProject(files.root) : undefined;
+      const credentialProject = !options.remote ? workItemProject ?? await memoryProject(files.root) : undefined;
       if (options.chat && !options.remote && !workItemProject) throw new Error('The chat work item project is unavailable.');
       const selection=options.remote ? [] : options.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
@@ -399,6 +405,7 @@ export class LocalRuntime {
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
         structuredQuestions: true,
+        ...(credentialProject ? { credentialProject } : {}),
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
@@ -584,8 +591,10 @@ export class LocalRuntime {
       } satisfies Partial<GenerationHooks>}]}) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const questions = meta.structuredQuestions ? questionExtension(!!meta.preparation, remote) : undefined;
+      const credentialManagement = !remote && meta.credentialProject ? credentialTools(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
+      const credentialRequests = !remote && meta.credentialProject ? credentialExecution(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
       const preparation = preparationExtension(workspace, this.defaultBudget(meta), { remote });
-      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(questions ? [questions] : []),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(questions ? [questions] : []),...(credentialManagement ? [credentialManagement] : []),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { remote, startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -593,6 +602,7 @@ export class LocalRuntime {
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
       const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now, meta.chatReminders === 'managed')] : []), ...(memory ? [memory] : []),
+        ...(credentialManagement ? [credentialManagement] : []),
         ...(questions ? [questions] : []),
         ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
         ...(history ? [history] : []),
@@ -615,7 +625,7 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(questions ? [questions] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
@@ -634,6 +644,7 @@ export class LocalRuntime {
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
         ...(questions ? [questions] : []),
+        ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []),
         ...(meta.preparation && !remote ? [verification] : []),
         ...(learning ? [learning] : []),
         ...(!remote && meta.schemaVersion === 3 && this.config.web !== false ? [webExtension(workspace)] : []), ...extra];
@@ -685,7 +696,7 @@ export class LocalRuntime {
           const asking = await this.latestInput(active);
           const question = await currentQuestion(active.harness, active.root.id, asking?.id, goal);
           const live = question ? await active.harness.snapshot(LiveDoc, active.root.id, ctx) : undefined;
-          if (question && asking?.status === 'placed' && live?.tools?.length === 1 && live.tools[0]?.name === 'ask_user' && String(live.tools[0].taskId) === question.id) {
+          if (question && asking?.status === 'placed' && live?.tools?.length === 1 && ['ask_user', 'request_credential'].includes(live.tools[0]?.name ?? '') && String(live.tools[0]?.taskId) === question.id) {
             await stopObsoleteDelegations(active.harness, undefined, ctx);
             active.enabled = false;
             active.harness.resume();
@@ -912,7 +923,7 @@ export class LocalRuntime {
       const asking = await this.latestInput(active);
       const question = await currentQuestion(active.harness, active.root.id, asking?.id, goal);
       const live = question ? await active.harness.snapshot(LiveDoc, active.root.id, ctx) : undefined;
-      if (question && live?.tools?.length === 1 && live.tools[0]?.name === 'ask_user' && String(live.tools[0].taskId) === question.id) {
+      if (question && live?.tools?.length === 1 && ['ask_user', 'request_credential'].includes(live.tools[0]?.name ?? '') && String(live.tools[0]?.taskId) === question.id) {
         active.enabled = false;
         return;
       }
@@ -1385,7 +1396,40 @@ export class LocalRuntime {
     await this.followUp(id, answer, requestId, undefined, undefined, { id: questionId, workspace: remoteWorkspace });
   }
   async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[], answerVersion?: string, question?: { id: string; workspace?: string }): Promise<void> {
-    await this.changes.run(async () => {
+    return this.changes.run(() => this.followUpTask(id, message, requestId, images, answerVersion, question));
+  }
+  async provideCredential(id: string, questionId: string, value: string | undefined): Promise<void> {
+    if (!/^\d{1,20}$/.test(questionId) || value !== undefined && typeof value !== 'string') throw new CredentialError(400, 'Provide a credential request and protected value, or decline.');
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy || !meta.credentialProject) throw new CredentialError(404, 'Credential request not found.');
+      if (meta.control !== 'active') throw new CredentialError(409, 'Resume the original task before providing its credential.');
+      const active = await this.open(meta, false), goal = await this.goalState(active);
+      const state = await active.harness.snapshot(Questions, active.root.id, ctx), saved = state?.questions[questionId];
+      if (!saved?.credential) throw new CredentialError(404, 'Credential request not found.');
+      const { credential } = saved;
+      const saveRequestId = 'credential-' + id + '-' + questionId;
+      const message = `Credential ${credential.name} ${value === undefined ? 'declined' : 'saved'} through protected input.`, requestId = 'credential-' + questionId;
+      if (saved.answer && (saved.answer.requestId !== 'user:' + requestId || saved.answer.text !== message)) throw new CredentialError(409, 'This credential request already has a different response.');
+      if (!saved.answer) {
+        const input = await this.latestInput(active);
+        const question = await currentQuestion(active.harness, active.root.id, input?.id, goal);
+        if (question?.id !== questionId || input?.status !== 'done') throw new CredentialError(409, 'This credential request changed or is still being saved.');
+        if (await this.budgetReason(active, goal) || goal && (!meta.preparation || goal.confirmation) && Date.now() >= this.deadline(active, goal)) throw new CredentialError(409, 'Resume the original task budget before providing its credential.');
+      }
+      if (value === undefined && await this.credentials.hasSave(saveRequestId)) throw new CredentialError(409, 'This credential was already saved. Retry the original protected input to confirm it.');
+      if (value !== undefined) await this.credentials.save({ project: meta.credentialProject, name: credential.name, origin: credential.origin, auth: credential.auth,
+        expectedRevision: credential.expectedRevision, requestId: saveRequestId, value });
+      await this.followUpTask(id, message, requestId, undefined, undefined, { id: questionId }, true);
+    });
+  }
+  async credentialScope(workspace: unknown): Promise<string> {
+    if (typeof workspace !== 'string') throw new CredentialError(400, 'Provide an existing project workspace.');
+    const project = await memoryProject(workspace);
+    if (!project) throw new CredentialError(400, 'Provide an existing project workspace.');
+    return project;
+  }
+  private async followUpTask(id: string, message: string, requestId: string, images?: InputImage[], answerVersion?: string, question?: { id: string; workspace?: string }, protectedInput = false): Promise<void> {
       if (!message.trim() || message.length > 32000) throw new Error("Provide a message between 1 and 32000 characters");
       if (!requestId.trim() || requestId.length > 200) throw new Error("requestId must contain 1 to 200 characters");
       const meta = await this.metadata(id);
@@ -1412,6 +1456,7 @@ export class LocalRuntime {
       }
       const input = questions?.current ? await this.latestInput(active) : undefined;
       const asking = questions?.current ? await currentQuestion(active.harness, active.root.id, input?.id, before) : null;
+      if ((asking?.credential || question && saved?.credential) && !protectedInput) throw new CredentialError(400, 'Use the protected credential input; never send the value in chat.');
       if (question && asking?.id !== question.id) throw new QuestionError(409, 'This question changed. Read the current question before answering.');
       if (question && input?.status !== 'done') throw new QuestionError(409, 'The question is still being saved. Refresh before answering.');
       const fingerprint = answerVersion === undefined ? undefined : createHash("sha256").update(JSON.stringify([answerVersion, message])).digest("hex");
@@ -1443,7 +1488,7 @@ export class LocalRuntime {
           await active.harness.commit(async tx => {
             const state = await tx.doc(Questions, active.root.id);
             if (asking) {
-              await recordQuestionAnswer(tx, active.root.id, asking.id, key, message);
+              await recordQuestionAnswer(tx, active.root.id, asking.id, key, message, undefined, protectedInput);
               state.outbox = { questionId: asking.id, requestId: key, content: message, ...(images?.length ? { images: structuredClone(images) } : {}) };
             } else if (state.current) state.questions[state.current]!.retired = true;
           }, ctx);
@@ -1469,7 +1514,7 @@ export class LocalRuntime {
       }
       if (before.review) await (await active.harness.conversation(before.review.conversationId, ctx))?.abort(ctx, { background: true });
       const updated = await this.updateGoal(active, async (goal, record, tx) => {
-        if (asking) await recordQuestionAnswer(tx, active.root.id, asking.id, key, message, goal);
+        if (asking) await recordQuestionAnswer(tx, active.root.id, asking.id, key, message, goal, protectedInput);
         else if (questions?.current) (await tx.doc(Questions, active.root.id)).questions[questions.current]!.retired = true;
         if (fingerprint !== undefined) {
           if (workItemAnswerVersion(meta, goal) !== answerVersion) throw new TaskConflictError("This question changed. Read the current run before answering.");
@@ -1489,7 +1534,6 @@ export class LocalRuntime {
       active.enabled = false;
       await this.dispatchOutbox(active);
       active.enabled = true;
-    });
   }
   private async remoteTaskControls(active: Active, meta: TaskMeta, status: string, goal?: GoalState): Promise<RemoteTaskControl[]> {
     if (meta.initializationError) return [];

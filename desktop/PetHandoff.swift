@@ -254,9 +254,15 @@ struct PetBubble: View {
         VStack(alignment: .leading, spacing: 18) {
             heading("还差一项资料")
             if let task = model.task, let question = task.userQuestion {
+                if question.credential != nil {
+                    PetCredentialReply(question: question, busy: model.busy) { value in
+                        model.provideCredential(question, taskID: task.id, value: value)
+                    }.id(task.id + ":" + question.id)
+                } else {
                 PetQuestionReply(question: question, busy: model.busy) { text, requestID in
                     model.answerQuestion(question, taskID: task.id, text: text, requestID: requestID)
                 }.id(task.id + ":" + question.id)
+                }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
@@ -617,6 +623,33 @@ private struct PetChildReply: View {
             }
                 .buttonStyle(PetButton())
                 .disabled(pending == nil && (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 4000))
+        }.disabled(busy)
+    }
+}
+
+private struct PetCredentialReply: View {
+    let question: PetChildQuestion
+    let busy: Bool
+    let send: (String?) -> Void
+    @State private var value = ""
+    @State private var pending = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(question.text).textSelection(.enabled)
+            if let detail = question.detail { Text(detail).textSelection(.enabled) }
+            if let credential = question.credential {
+                Text(credential.name + " · " + credential.origin + " · " + credential.auth.type).textSelection(.enabled)
+            }
+            SecureField("API 凭据", text: $value).textFieldStyle(.roundedBorder).disabled(pending)
+            Text("凭据只保存到本机应用凭据文件，不发送到聊天。")
+                .font(.system(size: 12)).foregroundColor(Palette.muted)
+            HStack {
+                Button("拒绝") { send(nil) }.buttonStyle(PetButton(primary: false)).disabled(pending)
+                Spacer()
+                Button(pending ? "重试原凭据" : "保存凭据") { pending = true; send(value) }
+                    .buttonStyle(PetButton()).disabled(value.isEmpty || value.utf16.count > 16384)
+            }
         }.disabled(busy)
     }
 }

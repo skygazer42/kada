@@ -578,11 +578,15 @@ async function refreshWorkItemRun(workItemId, runId, panel, currentWorkItem) {
     }
   }
   if (run.answerVersion) {
+    if (run.userQuestion?.credential) {
+      element("p", "Provide this credential on the host computer.", panel);
+    } else {
     const previous = workItemAnswerForms.get(runId);
     const form = previous?.version === run.answerVersion ? previous.form : workItemAnswerForm(workItemId, run);
     workItemAnswerForms.set(runId, { version: run.answerVersion, form });
     answerKeys.add(runId);
     panel.append(form);
+    }
   }
   if (run.status !== "paused") for (const key of workItemAnswerForms.keys()) {
     if ((key === runId || key.startsWith(runId + ":")) && !answerKeys.has(key)) workItemAnswerForms.delete(key);
@@ -1081,7 +1085,8 @@ function presentTask(view, id) {
   task.hidden = !view;
   if (!view) return;
   element("h2", taskStatusLabel(view.status), task);
-  if (view.userQuestion && ["waiting_user", "clarifying"].includes(view.status)) {
+  if (view.userQuestion?.credential) element("p", "Provide this credential on the host computer.", task);
+  else if (view.userQuestion && ["waiting_user", "clarifying"].includes(view.status)) {
     const key = identity.pairingId + ":" + id + ":" + view.userQuestion.id;
     const prefix = identity.pairingId + ":" + id + ":";
     for (const [old, form] of questionAnswerForms) if (old.startsWith(prefix) && old !== key) { form.remove(); questionAnswerForms.delete(old); }

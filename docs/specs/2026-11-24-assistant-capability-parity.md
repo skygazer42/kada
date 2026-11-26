@@ -177,6 +177,18 @@ MCP 工具总数取新任务已经固定的 `mcpPins`，大于 20 时保存 `mcp
 
 修改请求使用原聊天和工具 taskId 派生的身份，摘要及原结果写入 Pi 被动回执。相同请求同内容重放返回当次结果；请求内容改变或无回执的旧修订返回冲突。后来的编辑或取消保持当前状态，历史回执不能被当作最新安排。6 种实际 SIGKILL 场景验证原创建、取消及更新的未知结果恢复。DeepSeek V3.2 经硅基流动完成中文每周创建、重启后改为每日及新文字、取消，共 9 次请求、52,054 总 token，无 Goal，金额未知。 [周期提醒实测](../experiments/2026-11-25-chat-reminder-management-deepseek.json)
 
+### 应用 API 凭据
+
+新本机主会话固定 `credentialProject`。聊天/准备可用 `credentials_list` 与 `request_credential` 保存名称、origin、认证方式及 expectedRevision 到原 Questions；只有执行阶段增加非安全重放工具 `credential_request`。工具再次核对 working Goal 和原确认。旧任务、远程与子任务不自动继承能力，保存凭据不创建 Goal。 [Rakazo 请求入口](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-conversation.tool-definition.ts#L27) · [完整计划](../superpowers/plans/2026-11-26-application-credentials.md)
+
+owner 专用 POST `/v1/tasks/:id/credentials/:questionId` 仅接受 `{ value }` 或 `{ decline: true }`，普通消息/answer 拒绝凭据问题。终端无回显输入与 macOS SecureField 沿此入口；手机共享卡引导本机。原子本地文件同时保存值及 HMAC 提供回执，原请求原值重放只返回当次结果，不能覆盖后来轮换或复活删除。提供后用固定身份回传通用确认；4 项实际 SIGKILL 验证保存/答复之间和外部请求未知结果恢复。存储复用 proper-lockfile、atomicJson，不依赖 Pi 未公开的 AuthStorage；文件为受限明文，不能称加密密钥库。
+
+认证支持 Bearer、自定义头和 Basic，仅绑定原 HTTPS origin 与指定修订；全部 DNS 地址须 public，实际连接固定到已通过的地址且保留 TLS 主机名校验。轮换或删除发生在解析期间会阻止发出请求。拒绝重定向、认证覆盖及私有/映射/特殊地址；请求最多 64 KiB、30 秒，响应最多 1 MB、模型预览最多 20,000 字符。先检查原值、认证值及支持的 JSON/percent/base64 形式，命中则隐藏整段，任意服务变换后的秘密不保证识别。取消关闭实际连接，错误不带原取消原因，未知外部结果不自动重试。 [Rakazo 站点校验](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/secrets/bot-secret-destination.ts#L33) · [请求注入](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/secrets/bot-secret-request.ts#L201) · [安全地址与有界响应](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/web/web-ssrf.ts#L166)
+
+硅基流动 DeepSeek V3.2 完成中文请求保护字段、宿主提供合成值、daemon 重启、新授权执行任务引用并调用合成 API 一次；实际模型上下文与原 Pi 文件断言没有值，设置聊天无 Goal。共 5 次模型请求、33,461 总 token，金额未知；合成 HTTP transport 不能证明真实第三方 TLS/API 兼容性。macOS 仅解析语法，网页登录/OTP、系统密钥库、远程输入仍待补。 [实测记录](../experiments/2026-11-26-application-credential-deepseek.json)
+
+本地临时 CA 补验保留证书验证，正确主机名完成一次 TLS 请求，错误主机名在 HTTP 前被拒绝；测试注入仅负责本地路由与信任该 CA。Windows PTY 验证无回显、取消后重输与编辑缓存隔离，凭据输入完成/取消后重建 readline，避免私密文本经后续消息、undo 或 Ctrl+Y 泄露。全量 490 通过、4 项可选 Office 跳过，收尾相关 24 项再次通过；外部服务和 macOS 实机不由这些结果替代。[本地 TLS 记录](../experiments/2026-11-26-application-credential-local-tls.json)
+
 ## 已定位的能力差距
 
 更广的任务规划、结构化提问、安全凭据、命名助手、跨助手协作、撤销及语音等差距见[参考能力核对表](2026-11-25-reference-capability-matrix.md)。下表保留原来已经定位的具体兼容性与实测缺口，不能视为所有剩余能力。

@@ -31,6 +31,7 @@ try {
     console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
     console.log('work-items edit 的 JSON 可带 revision、title/objective、status（open/parked/done）和 archived（布尔值）。保存或完成待办不启动/取消原运行。');
+    console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -83,7 +84,7 @@ try {
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
-  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items'].includes(command)) {
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials'].includes(command)) {
     const {ensureDaemon} = await import('./daemon.js');
     await ensureDaemon(config,args.values.config);
     const action = id ?? 'list';
@@ -97,7 +98,13 @@ try {
       return JSON.parse(await readFile(file,'utf8'));
     };
     let result:unknown;
-    if (command === 'tasks') result = await request('/v1/tasks?filter='+encodeURIComponent(args.values.filter ?? 'all'));
+    if (command === 'credentials') {
+      const path = '/v1/credentials?workspace=' + encodeURIComponent(workspace);
+      if (action === 'list') result = await request(path);
+      else if (action === 'remove') result = await request(path, 'DELETE', { name: rest[0], revision: Number(rest[1]) });
+      else throw new Error('Use credentials list or credentials remove NAME REVISION --workspace PATH.');
+    }
+    else if (command === 'tasks') result = await request('/v1/tasks?filter='+encodeURIComponent(args.values.filter ?? 'all'));
     else if (command === 'work-items') {
       const path = '/v1/work-items';
       if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));

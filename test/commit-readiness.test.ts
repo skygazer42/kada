@@ -49,3 +49,19 @@ test('OAuth credentials are ignored in custom data directories and a forced stag
     });
   }finally{await rm(path,{recursive:true,force:true});}
 });
+
+test('application credentials stay ignored and force-staging is rejected without echoing values',async()=>{
+  const path=await mkdtemp(join(tmpdir(),'kada-application-commit-'));
+  try{
+    await execute('git',['init','-q'],{cwd:path});
+    await writeFile(join(path,'.gitignore'),await readFile(new URL('../.gitignore',import.meta.url),'utf8'));
+    await mkdir(join(path,'runtime','application-credentials'),{recursive:true});
+    const value='synthetic-application-private-value';
+    await writeFile(join(path,'runtime','application-credentials','items.json'),JSON.stringify({value}));
+    assert.equal((await execute('git',['ls-files','--others','--exclude-standard'],{cwd:path})).stdout.includes('items.json'),false);
+    await execute('git',['add','-f','runtime/application-credentials/items.json'],{cwd:path});
+    await assert.rejects(execute(process.execPath,['--import',loader,script],{cwd:path}),error=>{
+      const text=String((error as any).stderr);assert(text.includes('application-credentials/items.json'));assert(!text.includes(value));return true;
+    });
+  }finally{await rm(path,{recursive:true,force:true});}
+});

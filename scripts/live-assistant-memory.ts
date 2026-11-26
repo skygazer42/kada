@@ -3,7 +3,8 @@ import { createInterface } from 'node:readline';
 import { mkdir,readFile,writeFile } from 'node:fs/promises';
 import { join,resolve } from 'node:path';
 import { createServer } from 'node:net';
-import { Agent, request } from 'node:http';
+import { Agent, request, createServer as createHttpServer } from 'node:http';
+import type { request as HttpsRequest } from 'node:https';
 import { createHash,randomUUID } from 'node:crypto';
 import { createModels,createProvider,Type } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
@@ -38,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['F11-chat-reminder-management','W01-chat-work-items'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -50,9 +51,11 @@ function observe<T>(stream: T): T {
   return stream;
 }
 const models = createModels();
+let protectedMarker: string | undefined;
+function protectedContext(context: unknown) { assert(!protectedMarker || !JSON.stringify(context).includes(protectedMarker),'protected_value_absent_from_model_context'); }
 models.setProvider(createProvider({id:'siliconflow',models:[model],baseUrl:model.baseUrl,
   auth:{apiKey:{name:'SiliconFlow live validation',resolve:async()=>({auth:{apiKey}})}},
-  api:{stream:(selected,context,config)=>observe(native.stream(selected,context,options(config))),streamSimple:(selected,context,config)=>observe(native.streamSimple(selected,context,options(config)))}}));
+  api:{stream:(selected,context,config)=>{protectedContext(context);return observe(native.stream(selected,context,options(config)));},streamSimple:(selected,context,config)=>{protectedContext(context);return observe(native.streamSimple(selected,context,options(config)));}}}));
 const directory = resolve('.harness/live-assistant-memory',randomUUID());
 const home = join(directory,'home'),alpha=join(directory,'alpha'),beta=join(directory,'beta');
 await Promise.all([home,join(directory,'.git'),join(alpha,'.git'),join(beta,'.git')].map(path=>mkdir(path,{recursive:true})));
@@ -71,14 +74,25 @@ const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(To
   },
 })]});
 const routineOnly = process.env.KADA_LIVE_CASES === 'F11';
+const selectedCases=(process.env.KADA_LIVE_CASES ?? '').split(',').filter(Boolean);
+let credentialCalls=0;
+const credentialService=(!selectedCases.length || selectedCases.some(prefix=>'K01-application-credential'.startsWith(prefix))) ? createHttpServer((req,res)=>{
+  if(req.headers.authorization!=='Bearer '+protectedMarker){res.writeHead(401).end();return;}
+  credentialCalls++;res.end(JSON.stringify({report:'CREDENTIAL_REPORT_628'}));
+}) : undefined;
+if(credentialService) {protectedMarker='synthetic-live-private-'+randomUUID();await new Promise<void>(done=>credentialService.listen(0,'127.0.0.1',done));}
+const credentialNetwork=credentialService ? {lookup:async()=>[{address:'8.8.8.8',family:4}],request:((settings:any,callback:any)=>{
+  assert.equal(settings.hostname,'api.example','credential_host_bound');
+  return request({...settings,protocol:'http:',hostname:'127.0.0.1',port:(credentialService.address() as {port:number}).port,lookup:undefined},callback);
+}) as typeof HttpsRequest} : undefined;
 const serverOptions = {models, discovery:{home,timezone:'America/New_York'}, routineClock,
+  ...(credentialNetwork ? {credentialNetwork} : {}),
   ...(routineOnly ? {extensions:[routineScope]} : {})};
 let server=await serve(config,serverOptions);
 const client=createClient(config);
 const results:Record<string,{passed:boolean;detail?:string}>={};
 const evidence: Record<string, unknown> = {};
 const tasks=new Set<string>();
-const selectedCases=(process.env.KADA_LIVE_CASES ?? '').split(',').filter(Boolean);
 async function check(name:string,work:()=>Promise<void>) {
   if(selectedCases.length && !selectedCases.some(prefix=>name.startsWith(prefix))) return;
   try { await work();results[name]={passed:true}; }
@@ -236,6 +250,26 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  await check('K01-application-credential',async()=>{
+    const source=await server.runtime.create('请为当前项目配置名为 reports 的 API 凭据，站点是 https://api.example，认证方式为 Bearer。请通过受保护的凭据输入请求，不在聊天中询问密钥；现在只配置，不执行请求。',alpha,[],{chat:true});tasks.add(source.id);
+    const waiting=await until(()=>server.runtime.status(source.id),row=>['waiting_user','failed','answered','budget_limited'].includes(row.status),90_000);
+    assert.equal(waiting.status,'waiting_user');assert.equal(waiting.goal,undefined);
+    assert.equal(waiting.userQuestion?.credential?.name,'reports');assert.equal(waiting.userQuestion?.credential?.origin,'https://api.example');
+    assert.equal(waiting.userQuestion?.credential?.auth.type,'bearer');
+    const questionId=waiting.userQuestion!.id;
+    await server.runtime.provideCredential(source.id,questionId,protectedMarker!);
+    const saved=await until(()=>server.runtime.status(source.id),row=>['answered','failed','budget_limited'].includes(row.status),90_000);
+    assert.equal(saved.status,'answered');assert.equal(saved.goal,undefined);assert(!JSON.stringify(saved).includes(protectedMarker!));
+    const beforeRestart=requests;await server.close();server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'credential_restart_no_model');
+    const task=await server.runtime.create('已授权本次读取：使用当前项目已保存的 reports 凭据读取 https://api.example/report，GET 方法。先查询 credentials_list 得到当前修订，再用 credential_request 请求一次；不要使用 bash、read 或其他网络工具。最后 task_submit 提交服务返回的 report 代号，artifacts 为空。',alpha);tasks.add(task.id);
+    const done=await until(()=>server.runtime.status(task.id),row=>['completed','failed','waiting_user','budget_limited','needs_attention'].includes(row.status),90_000);
+    assert.equal(done.status,'completed');assert.match(done.goal?.candidate?.summary ?? '',/CREDENTIAL_REPORT_628/);
+    assert.equal(credentialCalls,1,'one_authenticated_request');assert(!JSON.stringify(done).includes(protectedMarker!));
+    const disk=await readFile(join(config.dataDir,'tasks',source.id,'session.sqlite'));
+    assert(!disk.includes(Buffer.from(protectedMarker!)),'credential_absent_from_pi_storage');
+    evidence.applicationCredential={sourceTaskId:source.id,executionTaskId:task.id,protectedInput:true,valueAbsentFromModelAndPi:true,authenticatedRequests:credentialCalls,restartNoModel:true,chatGoalCreated:false,requests};
   });
   await check('Q01-structured-question',async()=>{
     const source=await server.runtime.create('只问我一个普通选择题：周末想读书还是散步？请用 ask_user 提供“读书”和“散步”两个选项，然后等待。不创建任务说明，不执行工作。',alpha,[],{chat:true});tasks.add(source.id);
@@ -451,6 +485,7 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
   const usage=[];
   for(const id of tasks) {try {const state=await server.runtime.status(id);usage.push({id,tokens:state.budget.totalTokens,input:state.budget.inputTokens,output:state.budget.outputTokens,cached:state.budget.cachedTokens});} catch { /* A failed admission has no task ledger. */ }}
   await server.close();
+  if(credentialService) {credentialService.closeAllConnections();await new Promise<void>(done=>credentialService.close(()=>done()));}
   const report={at:new Date().toISOString(),model:modelId,customCatalog:!original,selection:selectedCases,fullSuite:selectedCases.length===0,passed:Object.values(results).every(result=>result.passed),maxRequests,modelRequests:requests,maxOutputTokensPerRequest:1536,estimatedCostUsd:null,results,evidence,tasks:usage,totalTaskTokens:usage.reduce((sum,item)=>sum+item.tokens,0),note:'Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate.'};
   await writeFile(join(directory,'result.json'),JSON.stringify(report,null,2)+'\n');
   console.log(`Evidence: ${join(directory,'result.json')}`);

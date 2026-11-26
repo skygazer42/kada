@@ -1,10 +1,12 @@
 import { Type } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
-import { defineDoc, defineExtension, defineTool, LiveDoc, type ConversationId, type Harness, type SubmissionId, type Tx } from '@earendil-works/pi-durable';
+import { defineDoc, defineExtension, defineTool, LiveDoc, type ConversationId, type Harness, type SubmissionId, type Tx, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import { changeGoal, GoalDoc, plain, type GoalState } from './goal.js';
 import type { InputImage } from './input-images.js';
+import type { CredentialDestination } from './application-credentials.js';
 
-export type UserQuestion = { id: string; text: string; options: string[]; detail?: string; createdAt: number };
+export type UserQuestion = { id: string; text: string; options: string[]; detail?: string; createdAt: number;
+  credential?: CredentialDestination & { expectedRevision: number } };
 type SavedQuestion = UserQuestion & { submissionId: SubmissionId; revision?: number; epoch?: number; retired?: true; answer?: { requestId: string; text: string } };
 export const Questions = defineDoc<{
   current?: string; questions: Record<string, SavedQuestion>;
@@ -29,14 +31,15 @@ export async function currentQuestion(harness: Harness, conversation: Conversati
   const state = await harness.snapshot(Questions, conversation, context), question = state?.current ? state.questions[state.current] : undefined;
   if (!question || question.answer || question.retired || question.submissionId !== submissionId ||
     (goal ? question.revision !== goal.revision || question.epoch !== goal.epoch || !['waiting_user', 'clarifying'].includes(goal.phase) : question.revision !== undefined)) return null;
-  const { id, text, options, detail, createdAt } = question;
-  return plain({ id, text, options, createdAt, ...(detail ? { detail } : {}) });
+  const { id, text, options, detail, createdAt, credential } = question;
+  return plain({ id, text, options, createdAt, ...(detail ? { detail } : {}), ...(credential ? { credential } : {}) });
 }
 
-export async function recordQuestionAnswer(tx: Tx, conversation: ConversationId, questionId: string, requestId: string, text: string, goal?: GoalState) {
+export async function recordQuestionAnswer(tx: Tx, conversation: ConversationId, questionId: string, requestId: string, text: string, goal?: GoalState, protectedInput = false) {
   const state = await tx.doc(Questions, conversation), question = state.questions[questionId];
   for (const other of Object.values(state.questions)) if (other.id !== questionId && other.answer?.requestId === requestId) throw new QuestionError(409, 'This request ID already answered another question.');
   if (!question) throw new QuestionError(409, 'This question is no longer available.');
+  if (question.credential && !protectedInput) throw new QuestionError(400, 'Use the protected credential input; do not send a credential in chat.');
   if (question.answer) {
     if (question.answer.requestId !== requestId || question.answer.text !== text) throw new QuestionError(409, 'This question already has a different answer.');
     return;
@@ -47,6 +50,31 @@ export async function recordQuestionAnswer(tx: Tx, conversation: ConversationId,
   question.answer = { requestId, text };
 }
 
+export async function saveQuestion(api: ToolExecutionApi, data: Pick<UserQuestion, 'text' | 'options' | 'detail' | 'credential'>, preparation: boolean, remote: boolean, ctx: typeof context, toolName = 'ask_user') {
+  const hasGoal = (await api.snapshot(GoalDoc, ctx))?.initialized, id = String(api.taskId);
+  await api.commit(async tx => {
+    const state = await tx.doc(Questions, api.conversationId);
+    if (state.questions[id]) return;
+    const live = await tx.doc(LiveDoc, api.conversationId), submissionId = live.run?.inputs.at(-1);
+    if (live.tools?.length !== 1 || !submissionId) throw new QuestionError(409, 'Invoke the question tool on its own.');
+    const previous = state.current ? state.questions[state.current] : undefined;
+    if (previous && !previous.answer && !previous.retired) {
+      if (previous.submissionId === submissionId) throw new QuestionError(409, 'The current question still needs an answer.');
+      previous.retired = true;
+    }
+    state.current = id;
+    state.questions[id] = { id, ...data, submissionId, createdAt: api.now() };
+    if (hasGoal) await changeGoal(tx, (goal, record) => {
+      if (goal.phase !== 'working') throw new QuestionError(409, 'The task is not ready to ask another question.');
+      state.questions[id]!.revision = goal.revision; state.questions[id]!.epoch = goal.epoch;
+      goal.phase = preparation && !goal.confirmation ? 'clarifying' : 'waiting_user'; goal.question = data.text; goal.reason = data.text;
+      record(goal.phase, data.text);
+    }, remote ? api.conversationId : undefined);
+    else if (remote) await tx.appendEntry(api.conversationId, { kind: 'local.goal.remote_progress', data: { event: 'waiting_user', timestamp: api.now() } });
+  }, ctx);
+  return { output: [{ type: 'text' as const, text: toolName === 'request_credential' ? 'Protected credential input requested. Never ask for its value in chat.' : 'Question saved; wait for the user answer.' }], control: { terminate: true } };
+}
+
 export function questionExtension(preparation: boolean, remote: boolean) {
   return defineExtension({ name: 'local_user_questions', tools: [defineTool({
     name: 'ask_user', description: 'Ask one material question with two to four choices and optional context, then wait. Call this tool alone. The user may choose or reply with other text. This is a question only: never use choices as permission to execute a task, approve an external action, or collect a secret. A normal chat question does not create a Goal.',
@@ -54,29 +82,7 @@ export function questionExtension(preparation: boolean, remote: boolean) {
     replay: 'safe', executionMode: 'sequential', callers: ['model'],
     execute: async (args, api, ctx) => {
       const data = questionChoices(args.question, args.options, args.detail);
-      const hasGoal = (await api.snapshot(GoalDoc, ctx))?.initialized;
-      const id = String(api.taskId);
-      await api.commit(async tx => {
-        const state = await tx.doc(Questions, api.conversationId);
-        if (state.questions[id]) return;
-        const live = await tx.doc(LiveDoc, api.conversationId), submissionId = live.run?.inputs.at(-1);
-        if (live.tools?.length !== 1 || !submissionId) throw new QuestionError(409, 'Invoke ask_user on its own.');
-        const previous = state.current ? state.questions[state.current] : undefined;
-        if (previous && !previous.answer && !previous.retired) {
-          if (previous.submissionId === submissionId) throw new QuestionError(409, 'The current question still needs an answer.');
-          previous.retired = true;
-        }
-        state.current = id;
-        state.questions[id] = { id, ...data, submissionId, createdAt: api.now() };
-        if (hasGoal) await changeGoal(tx, (goal, record) => {
-          if (goal.phase !== 'working') throw new QuestionError(409, 'The task is not ready to ask another question.');
-          state.questions[id]!.revision = goal.revision; state.questions[id]!.epoch = goal.epoch;
-          goal.phase = preparation && !goal.confirmation ? 'clarifying' : 'waiting_user'; goal.question = data.text; goal.reason = data.text;
-          record(goal.phase, data.text);
-        }, remote ? api.conversationId : undefined);
-        else if (remote) await tx.appendEntry(api.conversationId, { kind: 'local.goal.remote_progress', data: { event: 'waiting_user', timestamp: api.now() } });
-      }, ctx);
-      return { output: [{ type: 'text', text: 'Question saved; wait for the user answer.' }], control: { terminate: true } };
+      return saveQuestion(api, data, preparation, remote, ctx);
     },
   })] });
 }

@@ -222,6 +222,17 @@ import UniformTypeIdentifiers
             await self.refresh()
         }
     }
+    func provideCredential(_ question: PetChildQuestion, taskID: String, value: String?) {
+        guard let current = task, selectedID == taskID, current.id == taskID,
+              current.userQuestion == question, question.credential != nil,
+              ["waiting_user", "clarifying"].contains(current.status) else { return }
+        perform {
+            struct Receipt: Decodable { let accepted: Bool }
+            let body: [String: Any] = value.map { ["value": $0] } ?? ["decline": true]
+            let _: Receipt = try await self.api.request("/v1/tasks/\(taskID)/credentials/\(question.id)", method: "POST", body: body)
+            await self.refresh()
+        }
+    }
     func stopChild(_ child: PetStoppableChild, taskID: String) {
         guard selectedID == taskID, let current = task, current.id == taskID,
               current.stoppableChildren?.contains(child) == true else { return }

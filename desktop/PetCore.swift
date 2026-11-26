@@ -103,11 +103,19 @@ struct PetApproval: Decodable, Equatable {
     let digest: String
     let argumentsPreview: String
 }
+struct PetCredentialRequest: Decodable, Equatable {
+    struct Auth: Decodable, Equatable { let type: String; var name: String?; var username: String? }
+    let name: String
+    let origin: String
+    let auth: Auth
+    let expectedRevision: Int
+}
 struct PetChildQuestion: Decodable, Equatable {
     let id: String
     let text: String
     var options: [String]?
     var detail: String?
+    var credential: PetCredentialRequest?
 }
 struct PetDelegation: Decodable, Equatable {
     let conversationId: Int

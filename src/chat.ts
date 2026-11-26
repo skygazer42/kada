@@ -1,7 +1,7 @@
 import { createInterface, clearLine, cursorTo } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { setTimeout } from "node:timers/promises";
-import type { Readable, Writable } from "node:stream";
+import { Writable, type Readable } from "node:stream";
 import type { HarnessClient, TaskMeta, TaskStatus } from "./client.js";
 import type { LocalRuntime } from "./runtime.js";
 import type { MemoryFactView } from "./user-memory.js";
@@ -23,7 +23,7 @@ export class ChatSession {
   private activity = "";
   private shownBrief?: { revision: number; digest: string };
   private shownApprovals = new Map<string, string>();
-  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string) {}
+  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
   private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); }
   async attach(id: string): Promise<void> {
@@ -48,6 +48,16 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (command === '/credential' || command === '/decline-credential') {
+        if (!this.taskId || !/^\d+$/.test(argument ?? '')) throw new Error('使用当前凭据问题 ID，不要在命令中填写密钥。');
+        const status = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`), question = status.userQuestion;
+        if (!question?.credential || question.id !== argument) throw new Error('该凭据请求已变化，请刷新查看。');
+        if (command === '/credential' && !this.protectedInput) throw new Error('凭据输入需要交互终端；不能通过普通聊天或管道提供。');
+        const value = command === '/credential' ? await this.protectedInput!() : undefined;
+        await this.client.request(`/v1/tasks/${this.taskId}/credentials/${question.id}`, 'POST', value === undefined ? { decline: true } : { value });
+        this.info(value === undefined ? '已拒绝凭据请求。' : '已保存凭据并接回原会话。');
+        await this.poll(); return true;
+      }
       if (command === '/choose') {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
         const selected = /^(\d+)\s+([1-4])$/.exec(argument ?? '');
@@ -91,7 +101,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
@@ -275,7 +285,8 @@ export class ChatSession {
       const question = status.userQuestion, key = 'question:' + question.id;
       if (!this.printed.has(key)) {
         this.printed.add(key);
-        this.info(`${question.text}${question.detail ? '\n' + question.detail : ''}\n${question.options.map((option, index) => `${index + 1}. ${option}`).join('\n')}\n/choose ${question.id} 编号，或直接输入其他答复。`);
+        this.info(question.credential ? `${question.text}\n${question.detail ?? ''}\n${question.credential.name} · ${question.credential.origin} · ${question.credential.auth.type}\n/credential ${question.id} 进入无回显输入；/decline-credential ${question.id} 拒绝。不要在聊天中发送密钥。`
+          : `${question.text}${question.detail ? '\n' + question.detail : ''}\n${question.options.map((option, index) => `${index + 1}. ${option}`).join('\n')}\n/choose ${question.id} 编号，或直接输入其他答复。`);
       }
     }
     if (["clarifying", "awaiting_confirmation"].includes(status.status) && goal?.brief) {
@@ -319,7 +330,9 @@ export async function runChat(client: HarnessClient, options: {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const terminal = Boolean((input as NodeJS.ReadStream).isTTY && (output as NodeJS.WriteStream).isTTY);
-  const rl = createInterface({ input, output, terminal, prompt: "你 > " });
+  let hidden: { resolve(value: string): void; reject(error: Error): void } | undefined;
+  const display = new Writable({ write(chunk, _encoding, done) { if (hidden) done(); else { output.write(chunk); done(); } } });
+  let rl = createInterface({ input, output: display, terminal, prompt: "你 > " });
   rl.pause();
   let closed = false;
   let exiting = false;
@@ -327,17 +340,35 @@ export async function runChat(client: HarnessClient, options: {
   let lastPollError = "";
   const queue = new SerialQueue();
   const render = (event: ChatEvent) => {
-    if (finished) return;
+    if (finished || hidden) return;
     if (terminal) { clearLine(output, 0); cursorTo(output, 0); }
     output.write(event.kind === "answer" ? `\nAgent > ${event.text}\n\n` : `${event.kind === "error" ? "错误：" : ""}${event.text}\n`);
     if (terminal && !closed) rl.prompt(true);
   };
-  const session = new ChatSession(client, render, options.workspace);
+  const session = new ChatSession(client, render, options.workspace, terminal ? () => new Promise<string>((resolve, reject) => {
+    hidden = { resolve, reject };
+    output.write('受保护凭据输入（无回显，按 Enter 保存，Ctrl+C 取消）> ');
+  }) : undefined);
   output.write("Kada · 终端聊天\n直接聊天，需要实际交付时再确认任务说明与预算。/help 查看命令，/quit 退出。\n\n");
-  const end = new Promise<void>(resolve => rl.once("close", () => { closed = true; resolve(); }));
-  rl.on("SIGINT", () => rl.close());
+  let finish: () => void;
+  const end = new Promise<void>(resolve => { finish = resolve; });
+  function onClose() { closed = true; const pending = hidden; hidden = undefined; pending?.reject(new Error('凭据输入已取消。')); finish(); }
+  function renewReadline() {
+    // A fresh editor drops private text, undo and kill/yank buffers as well as history.
+    rl.off('close', onClose).off('SIGINT', onInterrupt).off('line', onLine).close();
+    rl = createInterface({ input, output: display, terminal, prompt: '你 > ' });
+    bindReadline();
+  }
+  function onInterrupt() {
+    if (hidden) { const pending = hidden; renewReadline(); hidden = undefined; pending.reject(new Error('凭据输入已取消。')); output.write('\n'); }
+    else rl.close();
+  }
   let commandWork: Promise<unknown> = Promise.resolve();
-  rl.on("line", line => {
+  function onLine(line: string) {
+    if (hidden) {
+      const pending = hidden; renewReadline(); hidden = undefined;
+      output.write('\n'); pending.resolve(line); return;
+    }
     commandWork = queue.run(async () => {
       if (exiting) return;
       try {
@@ -346,7 +377,9 @@ export async function runChat(client: HarnessClient, options: {
       } catch (error) { render({ kind: "error", text: errorText(error) }); }
       if (!closed && terminal) { clearLine(output, 0); cursorTo(output, 0); rl.prompt(); }
     });
-  });
+  }
+  function bindReadline() { rl.once('close', onClose).on('SIGINT', onInterrupt).on('line', onLine); }
+  bindReadline();
   if (options.taskId) {
     try { await session.attach(options.taskId); }
     catch (error) { rl.close(); throw error; }

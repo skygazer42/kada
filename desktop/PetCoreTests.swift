@@ -97,6 +97,8 @@ import AppKit
         let choices = try decode(object)
         try expect(choices.mode == .clarify && choices.userQuestion?.options == ["CSV", "XLSX"], "ordinary choices keep original question identity without confirmation")
         try expect(choices.confirmation == nil && choices.attentionKey != chat.attentionKey, "a choice card is never task authorization")
+        object["userQuestion"] = ["id": "58", "text": "Reports API", "options": [], "credential": ["name": "reports", "origin": "https://api.example", "auth": ["type": "bearer"], "expectedRevision": 0]]
+        try expect(try decode(object).userQuestion?.credential?.origin == "https://api.example", "protected input keeps its destination without a value")
         object.removeValue(forKey: "userQuestion"); object["status"] = "answered"
         object["reply"] = ["timestamp": 2345, "text": "好的，有需要再叫我。"]
         try expect(try decode(object).attentionKey != chat.attentionKey, "a new chat reply can notify even with unchanged status")
