@@ -1,0 +1,32 @@
+{
+  "at": "2026-11-26T01:40:54.472Z",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "customCatalog": false,
+  "selection": [
+    "F11-chat-reminder"
+  ],
+  "fullSuite": false,
+  "passed": false,
+  "maxRequests": 8,
+  "modelRequests": 2,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "F11-chat-reminder": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    }
+  },
+  "evidence": {},
+  "tasks": [
+    {
+      "id": "3033a107-7df7-44b0-890a-ad88a4975a31",
+      "tokens": 3443,
+      "input": 3372,
+      "output": 71,
+      "cached": 0
+    }
+  ],
+  "totalTaskTokens": 3443,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

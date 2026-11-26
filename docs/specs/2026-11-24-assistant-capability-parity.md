@@ -6,6 +6,7 @@
 
 | 能力 | Kada 契约与验收 | 参考实现 |
 | --- | --- | --- |
+| 本机聊天内单次提醒 | 新聊天的主会话以原 Pi 工具保存、查询和取消同项目单次通知。先读机器时间/时区，创建 ID 固定原聊天及工具任务；取消绑定工具参数中的修订并在原事务复核。强杀后不重复创建，不取消后来编辑的新提醒，不创建 Goal。远程、准备及旧聊天不自动扩权。 | [OpenMausBot 时间与触发器查询](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L596) · [创建路径](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-call-triggers.ts#L453) · [Pots 请求 ID 防重](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/gateway/timers.ts#L429) · [工具与隔离回归](../../test/chat-reminders.test.ts) · [强杀恢复](../../test/chat-reminder-recovery.test.ts) |
 | 例行任务账户拒绝降频 | 循环项目任务显式开启 accountBackoff 后，原 Pi 最终账户拒绝按 5 分钟倍增至 24 小时跳过后续自动预检和模型请求。原任务/提交 ID 防止重复累计，截止时间使用原消息时间。手动成功任务在下次检查清除降频，暂停/编辑和 SIGKILL 保留状态。临时错误仍由 Pi 重试。 | [Rakazo 拒绝分类](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L37) · [倍增间隔](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L60) · [成功后清除](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-backoff.ts#L119) · [回归](../../test/routine-account-backoff.test.ts) · [强杀恢复](../../test/routine-account-recovery.test.ts) |
 | 本地 MCP 单次动作审批 | 终端展示脱敏参数与摘要，决定绑定工具、参数、连接和任务修订。实际派发前复核连接权限与期限。强杀测试覆盖待答恢复和已派发但结果未知，原动作最多派发一次。 | [Rakazo 审批预览](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/approvals/approval-ask.ts#L74) · [批准参数执行](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/approvals/approval-effect.ts#L91) · [Suparagent 许可入口](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/routers/permission.py#L60) · [审批回归](../../test/approvals.test.ts) · [强杀回归](../../test/approval-recovery.test.ts) |
 | 配对手机处理单项审批 | 本机用户按原任务、动作、摘要和配对设备分享审批。手机展示脱敏参数并提交决定，沿用原任务的权限和期限检查。回归覆盖设备重配、撤回分享、重复决定和动作只派发一次。 | [Suparagent 待处理审批](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/team/needs_you.py#L155) · [Rakazo 批准参数执行](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/approvals/approval-effect.ts#L91) · [服务端回归](../../test/approvals.test.ts) · [手机页面回归](../../test/remote-pending-page.test.ts) |
@@ -155,6 +156,8 @@ GitHub PR 规则沿用 `githubWebhooks` 和 `/hooks/github/{routineId}`，例如
 判定要求原提交为 `model_error` 且对应原生助手错误：明确的 401、403、402、`invalid_api_key`、`authentication_error`、`permission_denied`、`insufficient_quota`、`insufficient credits`、余额过低、`out of budget`、`model_not_found` 或 404 的模型不存在。Pi 的 `isRetryableAssistantError` 判为临时错误时不降频。普通 429、网络故障、上下文/输出错误、不可信工具正文和未知报错均保持 Pi 原重试/失败处理。
 
 截止时间使用原 Pi 助手消息的请求开始时间戳，原任务/提交身份防止重复累计，重启不会重算截止时间。手动运行跳过降频，但仍遵守预算、预检和防重叠；仅受理成功不清除失败，下一次检查确认原任务已完成才清除。暂停/恢复和编辑保留已有间隔，旧修订的迟到结果不追加失败。此字段仅用于有工作区的循环任务，不用于通知、单次、纯事件或混合事件规则。移除字段关闭门槛；不解析供应商自然语言重置时间，不自动解锁其他规则。配置及恢复回归见[账户降频](../../test/routine-account-backoff.test.ts)与[强杀恢复](../../test/routine-account-recovery.test.ts)。
+
+本机聊天提醒的实现与使用见[聊天提醒计划](../superpowers/plans/2026-11-25-chat-reminders.md)和[使用入口](../assistant-usage.md#提醒与例行任务)。硅基流动 DeepSeek V3.2 在中文请求中完成纽约时间换算、原工具保存、daemon 重启后取消，共 6 次请求、24,018 总 token（含缓存），无 Goal。Qwen2.5 7B 的独立尝试产生无效工具参数，没有保存提醒。两次结果分别保留，不能从较强模型通过推断所有模型可用；实际金额未知，不声称成本改善。 [通过记录](../experiments/2026-11-25-chat-reminder-deepseek.json) · [7B 失败记录](../experiments/2026-11-25-chat-reminder-qwen.json)
 
 ## 已定位的能力差距
 

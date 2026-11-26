@@ -38,10 +38,11 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
+const maxRequests = process.env.KADA_LIVE_CASES === 'F11-chat-reminder' ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
-  assert(requests < 32,'Live request limit reached.');requests++;
+  assert(requests < maxRequests,'Live request limit reached.');requests++;
   return {...input,maxTokens:Math.min(input?.maxTokens ?? 1536,1536),signal:AbortSignal.any([deadline,...(input?.signal ? [input.signal] : [])])};
 };
 function observe<T>(stream: T): T {
@@ -63,7 +64,8 @@ const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow'
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
   beforeTool(call) {
-    const allowed = (call.name === 'read' && call.arguments.path === 'reports/inventory.txt') ||
+    const allowed = ['reminders_info','reminder_create','reminder_cancel'].includes(call.name) ||
+      (call.name === 'read' && call.arguments.path === 'reports/inventory.txt') ||
       (call.name === 'write' && call.arguments.path === 'routine-summary.json') || call.name === 'task_submit';
     if (!allowed) return {block:'Use read on reports/inventory.txt, write routine-summary.json, then task_submit.'};
   },
@@ -205,6 +207,26 @@ try {
     assert.equal(requests-before,1,'reconnect must not generate a second response');
     evidence.disconnect = {taskId:status.id,requestId:recovered.requestId,clientClosedDuringRequest:true,modelRequests:requests-before,assistantReplies:1};
   });
+  await check('F11-chat-reminder',async()=>{
+    const due = Date.parse('2026-12-01T22:00:00Z');
+    const {status:created} = await chat(alpha,'请在 2026 年 12 月 1 日纽约时间下午 5 点提醒我检查合成报告。只保存通知提醒。');
+    const reminder = (await server.runtime.routines.list()).find(rule=>rule.action==='notify' && rule.schedule.kind==='once');
+    assert(reminder && reminder.schedule.kind==='once','chat_reminder_saved');
+    assert.equal(Date.parse(reminder.schedule.at),due,'chat_reminder_time');
+    assert(created.messages.some(message=>message.role==='toolResult' && message.toolName==='reminders_info' && !message.isError),'chat_reminder_clock_read');
+    assert(created.messages.some(message=>message.role==='toolResult' && message.toolName==='reminder_create' && !message.isError),'chat_reminder_tool_succeeded');
+    const beforeRestart = requests;
+    await server.close(); server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'chat_reminder_restart_no_model');
+    await server.runtime.followUp(created.id,'取消刚才检查合成报告的提醒。','cancel-chat-reminder');
+    const cancelled = await until(()=>server.runtime.status(created.id),status=>status.status==='answered' && status.submission?.requestId==='user:cancel-chat-reminder',90_000);
+    assert.equal(cancelled.goal,undefined);
+    assert(cancelled.messages.some(message=>message.role==='toolResult' && message.toolName==='reminder_cancel' && !message.isError),'chat_reminder_cancel_succeeded');
+    assert.equal((await server.runtime.routines.list()).find(rule=>rule.id===reminder.id)?.status,'cancelled');
+    routineClock.advanceTo(due);
+    assert(!(await server.runtime.notifications()).some(event=>event.routineId===reminder.id));
+    evidence.chatReminder={routineId:reminder.id,at:new Date(due).toISOString(),saved:true,cancelled:true,goalCreated:false,requests};
+  });
   await check('F11-F12-reminder-and-change-aware-routine',async()=>{
     const parsed = await models.complete(model, {
       messages: [{role:'user',timestamp:Date.now(),content:'Remind me at 5 PM in New York on December 1, 2026. Call reminder_time with the corresponding ISO 8601 datetime and its UTC offset.'}],
@@ -298,7 +320,7 @@ try {
   const usage=[];
   for(const id of tasks) {try {const state=await server.runtime.status(id);usage.push({id,tokens:state.budget.totalTokens,input:state.budget.inputTokens,output:state.budget.outputTokens,cached:state.budget.cachedTokens});} catch { /* A failed admission has no task ledger. */ }}
   await server.close();
-  const report={at:new Date().toISOString(),model:modelId,customCatalog:!original,selection:selectedCases,fullSuite:selectedCases.length===0,passed:Object.values(results).every(result=>result.passed),maxRequests:32,modelRequests:requests,maxOutputTokensPerRequest:1536,estimatedCostUsd:null,results,evidence,tasks:usage,totalTaskTokens:usage.reduce((sum,item)=>sum+item.tokens,0),note:'Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate.'};
+  const report={at:new Date().toISOString(),model:modelId,customCatalog:!original,selection:selectedCases,fullSuite:selectedCases.length===0,passed:Object.values(results).every(result=>result.passed),maxRequests,modelRequests:requests,maxOutputTokensPerRequest:1536,estimatedCostUsd:null,results,evidence,tasks:usage,totalTaskTokens:usage.reduce((sum,item)=>sum+item.tokens,0),note:'Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate.'};
   await writeFile(join(directory,'result.json'),JSON.stringify(report,null,2)+'\n');
   console.log(`Evidence: ${join(directory,'result.json')}`);
   console.log(JSON.stringify({passed:report.passed,requests,totalTaskTokens:report.totalTaskTokens}));

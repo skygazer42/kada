@@ -38,6 +38,7 @@ import { imageInput, inputImageExtension, type InputImage } from './input-images
 import { approvalExtension, approvalViews, approvalReport, decideApproval, requestApproval, stopObsoleteApprovals, ApprovalError } from './approvals.js';
 import type { GithubIssue, GithubPullRequest } from './github-routine-events.js';
 import { modelAccountRefusal, type AccountRefusal } from './routine-account-backoff.js';
+import { reminderExtension } from './reminders.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -64,6 +65,7 @@ export interface TaskMeta {
   preparation?: boolean;
   /** Absent on historical/explicit tasks. A chat creates GoalDoc only on task_prepare. */
   entrypoint?: "chat";
+  chatReminders?: true;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
   chatBudget?: { costLimit: number; tokenLimit: number | null };
   learning?: boolean;
@@ -378,6 +380,7 @@ export class LocalRuntime {
         ...(this.config.discovery === true && !this.options.legacyResources && !options.remote ? { discovery: true, userMemory: true as const, memoryTracking: true as const } : {}),
         ...(options.prepare || options.chat ? { preparation: true } : {}),
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
+        ...(options.chat && !options.remote ? { chatReminders: true as const } : {}),
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
@@ -492,7 +495,7 @@ export class LocalRuntime {
           tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
-      const chatExtensions = [conversation, ...(memory ? [memory] : []),
+      const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now)] : []), ...(memory ? [memory] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
@@ -541,7 +544,7 @@ export class LocalRuntime {
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: meta.entrypoint === "chat" ? chatExtensions : meta.preparation ? preparationExtensions : extensions,
-          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace) : this.instructions(meta, !!meta.preparation) } });
+          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote && meta.chatReminders === true) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
         this.active.set(meta.id, active);
@@ -666,7 +669,7 @@ export class LocalRuntime {
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
-        instructions: conversationInstructions(active.meta.workspace) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
+        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy && active.meta.chatReminders === true) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
     const preparing = !!active.meta.preparation && !state?.confirmation;

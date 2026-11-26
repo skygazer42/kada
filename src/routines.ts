@@ -897,13 +897,14 @@ export class LocalRoutines {
     return result.routine;
   }
 
-  async cancel(id: string): Promise<Routine> {
+  async cancel(id: string, expectedRevision?: number): Promise<Routine> {
     const key = keyFor(inputId(id));
     const { harness, conversationId } = await this.open();
     const result = await harness.commit(async (tx) => {
       const { rules } = await tx.doc(routinesDoc);
       const previous = snapshot(rules[key]);
       if (!previous) throw new RoutineError(404, "Routine not found.");
+      if (expectedRevision !== undefined && previous.revision !== expectedRevision) throw new RoutineError(409, 'The reminder changed. Read the current reminder before cancelling it.');
       if (previous.status === "cancelled") return { routine: toRoutine(previous) };
       const next = endSchedule(previous, "cancelled");
       await interruptManual(tx, conversationId, previous, this.now());
