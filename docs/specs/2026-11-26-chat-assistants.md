@@ -47,3 +47,5 @@ Assistants 复用原 atomicJson/SerialQueue。记录可选 operations，保存 r
 硅基流动 DeepSeek V3.2 在同一普通聊天完成实际工具目录查询、配置创建、daemon 重启、完整读回后追加原指令、归档和恢复，并再次回读。原ID保留，最终revision=4，原Pi记录中一次创建、三次更新，无Goal、角色切换或额外任务。13次模型请求，136,859总token（含缓存），实际金额未知；该测试配置总token上限180,000、最多16次请求、单次输出1536token、每轮180秒，不代表原生Pi成本改善。[实测记录](../experiments/2026-11-26-chat-assistants-deepseek.json)
 
 最终相关组合28项通过（包含角色原范围与owner入口）。独立只读审查尝试因任务正文未送达而未审阅代码，没有独立结论；前一项CLI审查的认证401也未修复，本轮不把它计为通过。作者已另行核对实际服务、调用、存储回执与项目/阶段边界，独立审查仍是限制。
+
+不可变功能提交`121181f`通过TruffleHog 3.100.1凭据扫描（17.6秒），使用已验证官方工具和原扫描器前置函数，保留verified/unknown结果策略、全部参数及失败退出。此处只运行凭据扫描，不启动或冒充LLM代码审查。[扫描及验证记录](../experiments/2026-11-26-chat-assistants-verification.json)

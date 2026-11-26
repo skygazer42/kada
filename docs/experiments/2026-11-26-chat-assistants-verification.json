@@ -1,0 +1,30 @@
+{
+  "targetCommit": "121181f5e1c5804a0d182ea90729fd28f908e231",
+  "fullSuite": {
+    "total": 543,
+    "passed": 539,
+    "failed": 0,
+    "skipped": 4,
+    "skips": "Optional Office dependencies",
+    "initialRun": "One multibyte metadata output failure was reproduced and fixed; the complete suite was rerun."
+  },
+  "focused": {
+    "passed": 28,
+    "failed": 0
+  },
+  "realProcessKillCases": 5,
+  "credentialScan": {
+    "tool": "TruffleHog",
+    "version": "3.100.1",
+    "officialArchiveSha256Matched": true,
+    "status": "clean",
+    "durationSeconds": 17.6,
+    "scope": "Exact immutable feature commit; helper preflight invoked without an LLM review."
+  },
+  "codeReview": {
+    "completed": false,
+    "status": "assignment_not_delivered",
+    "verdict": null,
+    "note": "Independent read-only reviewer received no assignment body and reviewed no code. Author checks and credential scan are separate evidence."
+  }
+}
