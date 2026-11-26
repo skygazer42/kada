@@ -1,5 +1,9 @@
 import type { TaskStatus } from "./client.js";
 
+export function assistantText(status: Pick<TaskStatus, 'assistant'>): string {
+  return status.assistant ? `助手：${status.assistant.name} · v${status.assistant.revision}` : '';
+}
+
 export function progressText(status: TaskStatus): string {
   const steps = status.goal?.plan ?? [];
   const tools = status.activeTools ?? [];

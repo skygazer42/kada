@@ -151,7 +151,7 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
       },
     }),
     defineTool({
-      name: "task_plan", description: `${options.advisoryPlan ? "Optionally record a concise plan for progress. Plan status does not gate delivery. " : ""}Persist a plan with stable step IDs; retain completed steps. Optionally APPEND executable acceptance checks. Existing checks cannot be removed or weakened. Only mark steps done through task_checkpoint with evidence.`,
+      name: "task_plan", description: `${options.advisoryPlan ? "Optionally record a concise plan for progress. Plan status does not gate delivery. " : ""}Persist a plan with stable step IDs; retain completed steps. Optionally APPEND mechanical file checks. Existing checks cannot be removed or weakened. Only mark steps done through task_checkpoint with evidence.`,
       parameters: Type.Object({ steps: Type.Array(Type.Object({ id: Type.String({ minLength: 1, maxLength: 64 }), title: Type.String({ minLength: 1, maxLength: 500 }) }), { minItems: 1, maxItems: 24 }),
         checks: Type.Optional(Type.Array(CheckSchema, { maxItems: 32 })) }), replay: "safe", executionMode: "sequential",
       execute: async (args, api, context) => ({ output: output(await mutate(api, context, (goal, record) => {

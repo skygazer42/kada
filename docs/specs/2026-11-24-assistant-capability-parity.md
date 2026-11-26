@@ -199,6 +199,16 @@ owner 专用 POST `/v1/tasks/:id/credentials/:questionId` 仅接受 `{ value }` 
 
 DeepSeek V3.2 经硅基流动保存日期截止，重启后读回并改为精确时刻；首轮 90 秒观察在修改已提交、模型仍生成最终答复时结束，保留失败。随后续接原 Pi 会话的过期合成聊天窗口，完成确认及清空截止；合计 8 次请求、56,332 已知 token，原记录只有一次创建、两次修改，没有 Goal、运行或提醒，金额及中断请求账单未知。观察时限改为每轮配置时限加 5 秒，未声称重新完成了不中断的全新样本。[首轮失败](../experiments/2026-11-26-work-item-planning-deepseek-attempt-1.json) · [原会话续验](../experiments/2026-11-26-work-item-planning-deepseek-continuation.json)
 
+### 命名助手与固定范围
+
+owner 的 Assistants 目录保存项目身份、名称、完整指令、模型引用、明确动作工具名单与修订；保存不创建任务。原 chat/run 可用 `--assistant ID@REVISION`，TaskMeta 保存完整必要快照和解析后的模型。缺省模型沿新任务的原项目设置；归档阻止新选择，旧任务仍保留原配置。模型和会话、工具执行、预算、恢复及压缩继续由 Pi 1.4.0 承担。[OpenMausBot 实际创建](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routes/bots-create.ts#L212) · [Rakazo 创建事务](https://github.com/elie222/rakazo/blob/e64d73292179/packages/db/src/bots/bot-repository.ts#L429) · [完整契约](2026-11-26-named-assistants.md)
+
+动作范围与原阶段工具求交集。固定 ToolTask.beforeTool 逐次检查，afterTool 过滤越界 addTools；后台显式工具集合同时取交集并保留策略。当前 acceptance 只允许机械文件检查；真正的命令核验 criterion.verification 和 task_verify 需要 bash，后者的嵌套调用再受同一范围约束。原默认、远程、工作项和例行任务不自动获得角色。named-assistants capability 握手阻止同版本旧服务忽略角色参数，原消息接口拒绝换角色。
+
+25 项聚焦及全量 524 项通过，另 4 项可选 Office 跳过；真实 SIGKILL 覆盖元数据已保存和原读取待执行，目录后来获得写权限也不扩大原任务。原生压缩、后台待答后重启、原角色模型与指令、实际 21 项 MCP 中只提供并调用一个工具均有验证。工具范围是本机工具名单约束，不能解释为系统沙箱或完整 Bot 隔离。
+
+硅基流动 DeepSeek V3.2 首轮模型提出 30 秒预算，测试确认后在计划阶段正确到限，无产物；该失败保留。第二轮明确 180 秒/100,000 token 配置并跳过可选计划后，验证旧会话重启保留 v1、新会话使用 v2、确认前无文件/写工具、确认后只写一次并交付精确字节，bash 始终不提供。两轮 12 次请求、41,924 已知 token，实际金额及中断请求账单未知，不据此声称净收益。[首轮](../experiments/2026-11-26-named-assistant-deepseek-attempt-1.json) · [完整通过](../experiments/2026-11-26-named-assistant-deepseek.json)
+
 ## 已定位的能力差距
 
 更广的任务规划、结构化提问、安全凭据、命名助手、跨助手协作、撤销及语音等差距见[参考能力核对表](2026-11-25-reference-capability-matrix.md)。下表保留原来已经定位的具体兼容性与实测缺口，不能视为所有剩余能力。

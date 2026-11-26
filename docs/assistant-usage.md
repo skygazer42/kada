@@ -66,6 +66,30 @@ npm run harness -- memory reject 候选ID --workspace E:/project
 npm run harness -- memory review off --workspace E:/project
 ```
 
+## 命名助手
+
+先在项目中保存一份角色定义，例如 `reader.json`：
+
+```json
+{ "name": "研究员", "instructions": "阅读原始资料并引用证据，能力不足时明确说明。", "model": null, "tools": ["read", "history_search", "history_read", "project_tasks"] }
+```
+
+```powershell
+npm run harness -- assistants add reader.json --workspace E:/project
+npm run harness -- assistants list --workspace E:/project
+npm run harness -- assistants show 助手ID
+npm run harness -- chat --assistant 助手ID@1 --workspace E:/project
+npm run harness -- run "阅读资料并给出摘要" --assistant 助手ID@1 --workspace E:/project
+```
+
+创建定义只保存配置，不开始工作。`model: null` 使用新任务创建时的原项目模型；也可指定目录中的 `{ "provider": "…", "modelId": "…" }`，认证仍沿 Pi 原设置，不把凭据写进角色定义。CLI 省略 workspace 时，选角色的新工作使用当前目录。角色只能在原任务已有能力内收窄工具，名称按实际注册名填写；Goal 和待答所需的少量控制由宿主保留，命令核验需要 bash。名单不构成系统沙箱。
+
+普通角色聊天仍无 Goal，提出实际交付后沿原说明与预算确认。`run --yes` 和聊天 `/run` 继续要求已有明确授权。终端新建、接回和 `/status` 会显示助手名称与修订。接回已有任务不带 `--assistant`，原任务不能通过追加消息换角色。
+
+用 `assistants edit 助手ID edit.json` 修改，例如 `{ "revision": 1, "instructions": "新的完整指令", "tools": ["read", "write"] }`。只修改提供的字段；新工作须明确选择新修订，旧会话和原子任务保留原模型、指令与范围。模型用于主会话，子任务如有原先指定的 worker 模型则继续该配置，否则由 Pi 复制父配置。指令保留原空白与 Unicode 字符串，不能从缩略列表拼回覆盖。
+
+归档使用 `{ "revision": 2, "archived": true }`，恢复用当前修订和 `false`。归档阻止新选择，既有任务仍从原任务入口暂停/取消。目录不删除历史。当前由本机 owner CLI/API 管理，手机和模型不会自动获得角色编辑权。配置旧服务尚不支持时，角色请求会报错。[源码与验收](specs/2026-11-26-named-assistants.md)
+
 ## 应用 API 凭据
 
 新本机主会话可请求提供 API 凭据。卡片列出名称、用途、HTTPS 站点与认证方式；核对后输入 `/credential 问题ID`，再在终端的无回显提示中粘贴值。命令本身只填问题 ID。用 `/decline-credential 问题ID` 拒绝。macOS 已接入独立密码字段，编译与实机交互仍待验证。普通消息、选项答复和管道不能提供凭据；手机共享卡提示回本机处理。

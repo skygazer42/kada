@@ -7,17 +7,18 @@ import type { LocalRuntime, TaskMeta } from "./runtime.js";
 export type TaskStatus = Awaited<ReturnType<LocalRuntime["status"]>>;
 export interface HarnessClient {
   request<T>(path: string, method?: string, data?: unknown): Promise<T>;
-  healthy(): Promise<boolean>;
+  healthy(requiredCapability?: string): Promise<boolean>;
 }
 
 export function createClient(config: Config): HarnessClient {
   const base = `http://127.0.0.1:${config.port}`;
   return {
-    async healthy() {
+    async healthy(requiredCapability?: string) {
       try {
         const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1000) });
         const data = await response.json() as { status?: string; version?: string; capabilities?: string[] };
-        return response.ok && data.status === "ok" && data.version === VERSION && data.capabilities?.includes("ordinary-chat") === true;
+        return response.ok && data.status === "ok" && data.version === VERSION && data.capabilities?.includes("ordinary-chat") === true &&
+          (requiredCapability === undefined || data.capabilities?.includes(requiredCapability) === true);
       } catch { return false; }
     },
     async request<T>(path: string, method = "GET", data?: unknown): Promise<T> {

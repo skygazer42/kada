@@ -7,6 +7,7 @@ import type { Config } from "./config.js";
 import { ComputerBridge } from "./computer.js";
 import { VERSION } from "./version.js";
 import { LocalRuntime, type RuntimeOptions } from "./runtime.js";
+import { AssistantError, type AssistantRef } from './assistants.js';
 import { cloudModels } from "./models.js";
 import { errorText } from "./util.js";
 import { taskView } from "./task-view.js";
@@ -62,7 +63,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -175,6 +176,17 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (mcp[2] === 'approval') return send(200, await runtime.mcp.setApproval(id, input.tools, input.revision));
         return send(200,await runtime.mcp.enable(id,input.tools,input.revision));
       }
+      if (url.pathname === '/v1/assistants') {
+        if (req.method === 'GET') return send(200, await runtime.assistants.list(url.searchParams.get('workspace')));
+        if (req.method === 'POST') return send(201, await runtime.assistants.create(await body(req)));
+        return send(405, { error: 'Use GET or POST for assistant definitions.' });
+      }
+      const assistant = /^\/v1\/assistants\/([a-f0-9-]{36})$/.exec(url.pathname);
+      if (assistant) {
+        if (req.method === 'GET') return send(200, await runtime.assistants.get(assistant[1]!));
+        if (req.method === 'PATCH') return send(200, await runtime.assistants.update(assistant[1]!, await body(req)));
+        return send(405, { error: 'Use GET or PATCH for an assistant definition.' });
+      }
       if (url.pathname === '/v1/work-items') {
         if (req.method === 'GET') return send(200, await runtime.workItems.list(url.searchParams.get('workspace')));
         if (req.method === 'POST') return send(201, await runtime.workItems.create(await body(req)));
@@ -263,7 +275,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.confirmed !== undefined && typeof input.confirmed !== "boolean") throw new Error("confirmed must be a boolean");
         if (input.mode !== undefined && input.mode !== "chat") throw new Error("mode must be chat when supplied");
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
-        return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined }));
+        return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined,
+          assistant: input.assistant as AssistantRef | undefined }));
       }
       const childControl = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/(stop|interrupt)$/.exec(url.pathname);
       if (childControl && req.method === "POST") {
@@ -338,6 +351,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           if (!Number.isSafeInteger(input.revision) || typeof input.digest !== "string") throw new Error("Confirm requires the displayed brief revision and digest");
           await runtime.confirm(id, input.revision as number, input.digest); break;
         case "messages":
+          if (Object.hasOwn(input, 'assistant')) throw new AssistantError(409, 'An existing task keeps its original assistant; select a role only for a new task.');
           if (typeof input.message !== "string" || (input.requestId !== undefined && typeof input.requestId !== "string")) throw new Error("Expected message and optional requestId strings");
           await runtime.followUp(id, input.message, input.requestId); break;
         default: return send(404, { error: "Not found" });

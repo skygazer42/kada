@@ -46,6 +46,8 @@ import { chatWorkItemsExtension } from './chat-work-items.js';
 import { Questions, QuestionError, currentQuestion, questionExtension, recordQuestionAnswer } from './questions.js';
 import { ApplicationCredentials, CredentialError, type CredentialNetwork } from './application-credentials.js';
 import { credentialTools, credentialExecution } from './credential-tools.js';
+import { Assistants, AssistantError, assistantRef, type AssistantRef, type AssistantPin } from './assistants.js';
+import { assistantPolicy, assistantTools } from './assistant-policy.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -56,6 +58,7 @@ function workItemAnswerVersion(meta: TaskMeta, goal?: GoalState): string | null 
 }
 export interface TaskMeta {
   id: string;
+  assistant?: AssistantPin;
   objective: string;
   workspace: string;
   model: ModelRef;
@@ -137,6 +140,7 @@ export class LocalRuntime {
   readonly routines: LocalRoutines;
   readonly workItems: WorkItems<TaskMeta>;
   readonly credentials: ApplicationCredentials;
+  readonly assistants: Assistants;
   private inbox: NotificationStore;
   private active = new Map<string, Active>();
   private changes = new SerialQueue();
@@ -150,6 +154,7 @@ export class LocalRuntime {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
     this.credentials = new ApplicationCredentials(config.dataDir, options.credentialNetwork);
+    this.assistants = new Assistants(config.dataDir, options.models);
     this.workItems = new WorkItems<TaskMeta>(config.dataDir, {
       task: async id => {
         try { return await this.metadata(id); }
@@ -347,11 +352,13 @@ export class LocalRuntime {
     }
     await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
+      const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
+      if (assistant && (options.remote || workspace === undefined)) throw new AssistantError(400, 'Select an assistant only for a new local task with its existing project workspace.');
       if (typeof objective !== "string" || !objective.trim() || objective.length > 32000) throw new Error("Provide an objective between 1 and 32000 characters");
       const checks = acceptanceChecks(acceptance);
       if (options.chat && checks.length) throw new Error("Acceptance checks belong to an explicit task, not an ordinary conversation");
@@ -364,7 +371,7 @@ export class LocalRuntime {
         ...(options.images?.length ? { images: options.images } : {}),
         ...(options.routineIssue ? { routineIssue: options.routineIssue } : {}),
         ...(options.routinePullRequest ? { routinePullRequest: options.routinePullRequest } : {}),
-        ...(options.workItem ? { workItem: options.workItem } : {}) })).digest("hex");
+        ...(options.workItem ? { workItem: options.workItem } : {}), ...(assistant ? { assistant } : {}) })).digest("hex");
       if (options.id) try {
         const saved = await this.metadata(id);
         if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
@@ -372,7 +379,8 @@ export class LocalRuntime {
         return saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const projectWorkspace = workspace === undefined || options.remote ? undefined : requestedWorkspace;
-      const model = validateModel(this.options.models, await this.providers.selected(this.config.model, projectWorkspace));
+      const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : undefined;
+      const model = validateModel(this.options.models, role?.model ?? await this.providers.selected(this.config.model, projectWorkspace));
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace);
       const workItemProject = options.chat && !options.remote ? await memoryProject(files.root) : undefined;
@@ -382,6 +390,8 @@ export class LocalRuntime {
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       const mcpPins = options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root);
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
+        ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
+          instructions: role.instructions, tools: [...role.tools], model: { ...model } } } : {}),
         mcpPins,
         ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
         ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
@@ -556,6 +566,7 @@ export class LocalRuntime {
       const registry = createRegistry();
       const remote=meta.remotePolicy==='workspace';
       const policy=remote ? remoteFilePolicy(workspace) : undefined;
+      const rolePolicy = meta.assistant ? assistantPolicy(meta.assistant) : undefined;
       const imagePolicy = remote ? inputImageExtension(meta.model) : undefined;
       const history = !remote && meta.historyRecall ? historyExtension((query, limit) => this.searchHistory(meta.id, query, limit), (taskId, entryId) => this.readHistory(meta.id, taskId, entryId)) : undefined;
       const projectTasks = !remote && meta.projectTaskCatalog ? projectTasksExtension((filter, limit, offset) => this.projectTasks(meta.id, filter, limit, offset)) : undefined;
@@ -594,7 +605,7 @@ export class LocalRuntime {
       const credentialManagement = !remote && meta.credentialProject ? credentialTools(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
       const credentialRequests = !remote && meta.credentialProject ? credentialExecution(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
       const preparation = preparationExtension(workspace, this.defaultBudget(meta), { remote });
-      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(questions ? [questions] : []),...(credentialManagement ? [credentialManagement] : []),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(questions ? [questions] : []),...(credentialManagement ? [credentialManagement] : []),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : []), ...(rolePolicy ? [rolePolicy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { remote, startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -609,7 +620,7 @@ export class LocalRuntime {
         ...(projectTasks ? [projectTasks] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
-        ...(policy ? [policy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
+        ...(policy ? [policy] : []), ...(rolePolicy ? [rolePolicy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
       const verification = verificationExtension(workspace, nativeSkills);
       const methods = meta.learning && !nativeSkills ? await (this.methodStore ??= MethodStore.open(this.config.dataDir)) : undefined;
       const skills = meta.learning && nativeSkills ? await (this.skillStore ??= SkillStore.open(this.config.dataDir)) : undefined;
@@ -621,6 +632,7 @@ export class LocalRuntime {
           (goal.tokenLimit === null || used.totalTokens < goal.tokenLimit * 0.8) && Date.now() + 10_000 < this.deadline(current, goal);
       } }) : undefined;
       const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
+      if (rolePolicy) extra.push(rolePolicy);
       const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp).extension : undefined;
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
@@ -633,7 +645,7 @@ export class LocalRuntime {
           if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
         } : undefined, childAdmission, remote ? workspace : undefined, remote ? async (tx, parent, timestamp) => {
           await tx.appendEntry(parent, { kind: remoteProgressKind, data: { event: "child_waiting_input", timestamp } });
-        } : undefined, meta.structuredQuestions === true),
+        } : undefined, meta.structuredQuestions === true, meta.assistant),
         ...(policy ? [policy] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(approvals ? [approvals] : []),
@@ -659,7 +671,9 @@ export class LocalRuntime {
             ...(meta.schemaVersion === 3 ? { compaction: taskCompaction(this.options.models, [meta.model, meta.subagentModel ?? meta.model], this.config.compactAtTokens) } : {}) },
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
-        const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: meta.entrypoint === "chat" ? chatExtensions : meta.preparation ? preparationExtensions : extensions,
+        const initialExtensions = meta.entrypoint === 'chat' ? chatExtensions : meta.preparation ? preparationExtensions : extensions;
+        const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: initialExtensions,
+          ...(meta.assistant ? { tools: assistantTools(initialExtensions.flatMap(extension => extension.tools ?? []), meta.assistant) } : {}),
           instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true, !remote && !!meta.chatWorkItems) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
@@ -801,6 +815,7 @@ export class LocalRuntime {
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
+        ...(active.meta.assistant ? { tools: assistantTools(active.chatExtensions.flatMap(extension => extension.tools ?? []), active.meta.assistant) } : {}),
         instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true, !active.meta.remotePolicy && !!active.meta.chatWorkItems) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
@@ -820,9 +835,11 @@ export class LocalRuntime {
     const ask = deferredMcp ? executionTools.find(tool => tool.name === 'delegation_ask') : undefined;
     const offered = deferredMcp ? new Set((await active.root.agent(ctx)).tools.map(tool => tool.name)) : undefined;
     const loaded = offered ? executionTools.filter(tool => tool.name.startsWith('mcp_') && tool.deferred && offered.has(tool.name)) : [];
-    await active.root.configure({ extensions: preparing ? active.preparationExtensions : active.executionExtensions,
-      ...(ask ? { tools: { remove: [ask] } } : {}),
-      modelTools: deferredMcp ? { ...(hideScript ? { remove: [runSkillScript] } : {}), add: loaded } : hideScript ? { remove: [runSkillScript] } : null,
+    const stageExtensions = preparing ? active.preparationExtensions : active.executionExtensions;
+    const roleTools = active.meta.assistant ? assistantTools(stageExtensions.flatMap(extension => extension.tools ?? []), active.meta.assistant) : undefined;
+    await active.root.configure({ extensions: stageExtensions,
+      ...(roleTools ? { tools: roleTools } : ask ? { tools: { remove: [ask] } } : {}),
+      modelTools: roleTools ? roleTools.filter(tool => !hideScript || tool.name !== runSkillScript.name) : deferredMcp ? { ...(hideScript ? { remove: [runSkillScript] } : {}), add: loaded } : hideScript ? { remove: [runSkillScript] } : null,
       instructions: this.instructions(active.meta, preparing) + (!active.meta.remotePolicy && active.meta.historyRecall ? '\n' + historyInstructions : '') + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
         (!preparing && active.meta.resourcePolicy === "pi-skills" ? skillInstructions(state?.skills, !!active.skills) : "") +
         (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);

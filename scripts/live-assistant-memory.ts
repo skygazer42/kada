@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { Agent, request, createServer as createHttpServer } from 'node:http';
 import type { request as HttpsRequest } from 'node:https';
 import { createHash,randomUUID } from 'node:crypto';
-import { createModels,createProvider,Type } from '@earendil-works/pi-ai';
+import { createModels,createProvider,getCurrentTools,Type, type TranscriptContext } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { defineExtension, hook, ToolTask } from '@earendil-works/pi-durable';
 import { cloudModels } from '../src/models.js';
@@ -39,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -52,7 +52,8 @@ function observe<T>(stream: T): T {
 }
 const models = createModels();
 let protectedMarker: string | undefined;
-function protectedContext(context: unknown) { assert(!protectedMarker || !JSON.stringify(context).includes(protectedMarker),'protected_value_absent_from_model_context'); }
+let onModelContext: ((context: TranscriptContext) => void) | undefined;
+function protectedContext(context: TranscriptContext) { assert(!protectedMarker || !JSON.stringify(context).includes(protectedMarker),'protected_value_absent_from_model_context'); onModelContext?.(context); }
 models.setProvider(createProvider({id:'siliconflow',models:[model],baseUrl:model.baseUrl,
   auth:{apiKey:{name:'SiliconFlow live validation',resolve:async()=>({auth:{apiKey}})}},
   api:{stream:(selected,context,config)=>{protectedContext(context);return observe(native.stream(selected,context,options(config)));},streamSimple:(selected,context,config)=>{protectedContext(context);return observe(native.streamSimple(selected,context,options(config)));}}}));
@@ -250,6 +251,48 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  await check('A01-named-assistant',async()=>{
+    const oldMarker='ROLE_LIVE_READER_731', newMarker='ROLE_LIVE_WRITER_936';
+    let expected=oldMarker, canWrite=false, contexts=0;
+    onModelContext=context=>{
+      const system=JSON.stringify(context.messages.filter(message=>message.role==='system'));
+      if(system.includes('context summarization assistant')) return;
+      assert(system.includes(expected),'role_context_original_or_new');
+      assert(!system.includes(expected===oldMarker ? newMarker : oldMarker),'role_context_other_revision_absent');
+      const names=getCurrentTools(context.messages).map(tool=>tool.name);
+      assert(!names.includes('bash'),'role_bash_never_enabled');
+      assert.equal(names.includes('write'),canWrite,'role_write_only_after_confirmation');contexts++;
+    };
+    try {
+      const role=await server.runtime.assistants.create({workspace:alpha,name:'合成阅读助手',instructions:'你是合成阅读助手。每次回复以 '+oldMarker+' 开头。按当前用户要求工作；配置本身不授权执行。',model:{provider:'siliconflow',modelId},tools:['read']});
+      const source=await server.runtime.create('请用两句介绍你的职责，不用工具，不创建任务或提醒。',alpha,[],{chat:true,assistant:{id:role.id,revision:1}});tasks.add(source.id);
+      const answered=await until(()=>server.runtime.status(source.id),row=>['answered','failed','waiting_user','budget_limited'].includes(row.status),config.maxDurationMs+5000);
+      assert.equal(answered.status,'answered');assert.equal(answered.goal,undefined);
+      assert(answered.messages.map(conversationAnswer).some(text=>text?.includes(oldMarker)),'role_marker_in_reply');
+      await server.runtime.assistants.update(role.id,{revision:1,name:'合成写作助手',instructions:'你是合成写作助手。每次回复以 '+newMarker+' 开头。按当前任务说明、用户确认和工具范围交付。',tools:['read','write']});
+      const beforeRestart=requests;await server.close();server=await serve(config,serverOptions);
+      assert.equal(requests,beforeRestart,'role_restart_no_new_request');
+      await server.runtime.followUp(source.id,'请只复述你的固定角色标记和当前职责，不执行工作。','role-original');
+      const original=await until(()=>server.runtime.status(source.id),row=>row.submission?.requestId==='user:role-original' && ['answered','failed','waiting_user','budget_limited'].includes(row.status),config.maxDurationMs+5000);
+      assert.equal(original.status,'answered');assert.equal(original.goal,undefined);assert.equal(original.assistant?.revision,1);
+      assert.equal(original.assistant?.name,'合成阅读助手');assert(original.messages.map(conversationAnswer).at(-1)?.includes(oldMarker));
+      expected=newMarker;
+      const task=await server.runtime.create('在当前项目直接使用相对路径 role-result.txt，内容必须逐字为 ROLE_ARTIFACT_519，不加换行，也不要其他产物。先用 task_prepare 提出说明、scope、inspect 核验标准并等待确认；checks 使用 file_contains。总预算明确设为 maxDurationMs=180000、maxTotalTokens=100000、maxEstimatedCostUsd=1。确认后直接 write、必要的 read，再 task_submit；无需查询工作目录，也不登记 task_plan 或 task_checkpoint。',alpha,[],{chat:true,assistant:{id:role.id,revision:2}});tasks.add(task.id);
+      const waiting=await until(()=>server.runtime.status(task.id),row=>['awaiting_confirmation','failed','waiting_user','budget_limited'].includes(row.status),config.maxDurationMs+5000);
+      assert.equal(waiting.status,'awaiting_confirmation');assert.equal(waiting.assistant?.revision,2);
+      assert.equal(waiting.goal?.brief?.budget.maxDurationMs,180_000,'role_requested_time_budget');
+      assert.equal(waiting.goal?.brief?.budget.maxTotalTokens,100_000,'role_requested_token_budget');
+      assert.equal(waiting.goal?.brief?.budget.maxEstimatedCostUsd,1,'role_requested_cost_budget');
+      await assert.rejects(readFile(join(alpha,'role-result.txt')),{code:'ENOENT'});
+      canWrite=true;await server.runtime.confirm(task.id,waiting.goal!.brief!.revision,waiting.briefDigest!);
+      const done=await until(()=>server.runtime.status(task.id),row=>['completed','failed','blocked','needs_attention','waiting_user','budget_limited'].includes(row.status),config.maxDurationMs+5000);
+      assert.equal(done.status,'completed');assert.equal(await readFile(join(alpha,'role-result.txt'),'utf8'),'ROLE_ARTIFACT_519');
+      assert.equal(done.assistant?.revision,2);assert.equal(done.model.modelId,modelId);
+      assert.equal(done.messages.filter(message=>message.role==='toolResult' && message.toolName==='write' && !message.isError).length,1);
+      evidence.namedAssistant={assistantId:role.id,originalChatId:source.id,writerTaskId:task.id,oldRevisionRetained:1,newRevision:2,originalChatGoal:false,restartNoModel:true,
+        confirmedOriginalBrief:true,artifactExact:true,writeCalls:1,bashOffered:false,roleContextChecks:contexts,requests};
+    } finally {onModelContext=undefined;}
   });
   await check('K01-application-credential',async()=>{
     const source=await server.runtime.create('请为当前项目配置名为 reports 的 API 凭据，站点是 https://api.example，认证方式为 Bearer。请通过受保护的凭据输入请求，不在聊天中询问密钥；现在只配置，不执行请求。',alpha,[],{chat:true});tasks.add(source.id);

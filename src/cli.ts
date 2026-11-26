@@ -8,19 +8,26 @@ import { errorText } from "./util.js";
 import { createClient, type TaskMeta, type TaskStatus } from "./client.js";
 import { loadEnvFile } from "node:process";
 import { readFile } from "node:fs/promises";
-import { briefText, usageText, verificationText } from "./presentation.js";
+import { assistantText, briefText, usageText, verificationText } from "./presentation.js";
+import { assistantRef } from './assistants.js';
 import type { Routine } from "./routines.js";
 
 try { loadEnvFile(".env"); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 
 const args = parseArgs({ allowPositionals: true, options: {
-  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
+  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, assistant:{type:'string'}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
 } });
 const [command = "chat", id, ...rest] = args.positionals;
 const config = await loadConfig(args.values.config);
 const client = createClient(config);
 const { request } = client;
+function selectedAssistant() {
+  if (args.values.assistant === undefined) return;
+  const match = /^([a-f0-9-]{36})@([1-9]\d*)$/.exec(args.values.assistant);
+  if (!match) throw new Error('Use --assistant ID@REVISION from the project assistant list.');
+  return assistantRef({ id: match[1], revision: Number(match[2]) });
+}
 
 try {
   if (args.values.help || command === "help") {
@@ -32,6 +39,7 @@ try {
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
     console.log('work-items edit 的 JSON 可带 revision、title/objective、status（open/parked/done）、archived（布尔值）、priority（low/normal/high/urgent）、dueDate（YYYY-MM-DD）或 dueAt（带 UTC 偏移的 ISO 时刻）及 timeZone（IANA）。截止用 null 清空，切换种类须清空旧字段。保存、完成或设截止不启动/取消原运行，也不创建提醒。');
     console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
+    console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -40,11 +48,13 @@ try {
     console.log("\nGitHub Issue Webhook：daemon 配置 githubWebhooks: [{ routineId, secretEnv }]，入口 POST /hooks/github/规则ID；JSON 原始正文按 X-Hub-Signature-256 验签。默认关闭，外部代理只转发该 Webhook 路径。");
     console.log("GitHub PR Webhook 使用同一配置，规则类型为 pull_request.opened、pull_request.reopened、pull_request.synchronize、pull_request.closed 或 pull_request.ready_for_review。原任务保留仓库、编号、headSha/baseSha 及 draft/merged；可按这些标量精确匹配。");
   } else if (command === "chat") {
+    const assistant = selectedAssistant();
+    if (id && assistant) throw new Error('接回任务保留原助手；仅新会话可使用 --assistant。');
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
     const daemon = await ensureDaemon(config, args.values.config);
     console.log(daemon.started ? `已启动后台服务（PID ${daemon.pid}），退出聊天后任务仍可继续。` : "已连接本地后台服务。");
-    await runChat(createClient(config), { taskId: id, workspace: args.values.workspace ? resolve(args.values.workspace) : undefined });
+    await runChat(createClient(config), { taskId: id, workspace: args.values.workspace ? resolve(args.values.workspace) : assistant ? process.cwd() : undefined, assistant });
   } else if (command === "serve") {
     const { serve } = await import("./server.js");
     const server = await serve(config);
@@ -84,7 +94,7 @@ try {
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
-  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials'].includes(command)) {
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants'].includes(command)) {
     const {ensureDaemon} = await import('./daemon.js');
     await ensureDaemon(config,args.values.config);
     const action = id ?? 'list';
@@ -98,7 +108,17 @@ try {
       return JSON.parse(await readFile(file,'utf8'));
     };
     let result:unknown;
-    if (command === 'credentials') {
+    if (command === 'assistants') {
+      if (!await client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；请重启到当前版本。');
+      const path = '/v1/assistants';
+      if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));
+      else if (action === 'show') result = await request(path + '/' + segment(rest[0]));
+      else if (action === 'add') {
+        const input = await json(rest[0]); result = await request(path, 'POST', { ...input, workspace: input.workspace ?? workspace });
+      } else if (action === 'edit') result = await request(path + '/' + segment(rest[0]), 'PATCH', await json(rest[1]));
+      else throw new Error('Use assistants list, add FILE.json, show ID or edit ID FILE.json.');
+    }
+    else if (command === 'credentials') {
       const path = '/v1/credentials?workspace=' + encodeURIComponent(workspace);
       if (action === 'list') result = await request(path);
       else if (action === 'remove') result = await request(path, 'DELETE', { name: rest[0], revision: Number(rest[1]) });
@@ -220,11 +240,15 @@ try {
     console.log(JSON.stringify(await request(id ? `/v1/tasks/${id}` : "/v1/tasks"), null, 2));
   } else if (command === "run") {
     if (!await client.healthy()) throw new Error("后台未就绪或版本不匹配，请先用 npm run chat 启动/连接当前版本的后台。");
+    const assistant = selectedAssistant();
+    if (assistant && !await client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；角色请求不会降级为普通任务。');
     const objective = [id, ...rest].filter(Boolean).join(" ");
     const acceptance = args.values.acceptance ? JSON.parse(await readFile(args.values.acceptance, "utf8")) : undefined;
     const skills = args.values.skills === undefined ? undefined : args.values.skills.split(',').filter(Boolean).map(ref => { const [name,version] = ref.split('@'); return {name,...(version ? {version} : {})}; });
-    const task = await request<TaskMeta>("/v1/tasks", "POST", { objective, workspace: args.values.workspace ? resolve(args.values.workspace) : undefined, acceptance, confirmed: args.values.yes,skills });
+    const task = await request<TaskMeta>("/v1/tasks", "POST", { objective, workspace: args.values.workspace ? resolve(args.values.workspace) : assistant ? process.cwd() : undefined, acceptance, confirmed: args.values.yes,skills,
+      ...(assistant ? { assistant } : {}) });
     console.log(`Task: ${task.id}\nWorkspace: ${task.workspace}`);
+    if (task.assistant) console.log(assistantText(task));
     if (task.preparation) console.log(`先整理目标和预算；进入聊天 /attach ${task.id} 后确认。已有明确授权可使用 run --yes。`);
     if (!args.values.detach) {
       let previous = "";

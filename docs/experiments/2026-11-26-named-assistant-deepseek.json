@@ -1,0 +1,54 @@
+{
+  "at": "2026-11-26T08:48:13.465Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "A01-named-assistant"
+  ],
+  "fullSuite": false,
+  "passed": true,
+  "maxRequests": 12,
+  "modelRequests": 6,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "A01-named-assistant": {
+      "passed": true
+    }
+  },
+  "evidence": {
+    "namedAssistant": {
+      "assistantId": "3694d994-cb3a-4c8a-8d1c-d1a9d66a01d0",
+      "originalChatId": "d0cec174-07a9-45a5-8242-b58d53dfab62",
+      "writerTaskId": "4c0422cf-1061-4e11-abc2-8644306fa747",
+      "oldRevisionRetained": 1,
+      "newRevision": 2,
+      "originalChatGoal": false,
+      "restartNoModel": true,
+      "confirmedOriginalBrief": true,
+      "artifactExact": true,
+      "writeCalls": 1,
+      "bashOffered": false,
+      "roleContextChecks": 6,
+      "requests": 6
+    }
+  },
+  "tasks": [
+    {
+      "id": "d0cec174-07a9-45a5-8242-b58d53dfab62",
+      "tokens": 5922,
+      "input": 2989,
+      "output": 117,
+      "cached": 2816
+    },
+    {
+      "id": "4c0422cf-1061-4e11-abc2-8644306fa747",
+      "tokens": 17845,
+      "input": 7890,
+      "output": 867,
+      "cached": 9088
+    }
+  ],
+  "totalTaskTokens": 23767,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

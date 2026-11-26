@@ -6,7 +6,8 @@ import type { HarnessClient, TaskMeta, TaskStatus } from "./client.js";
 import type { LocalRuntime } from "./runtime.js";
 import type { MemoryFactView } from "./user-memory.js";
 import { errorText, SerialQueue } from "./util.js";
-import { briefText, progressText, usageText, verificationText } from "./presentation.js";
+import { assistantText, briefText, progressText, usageText, verificationText } from "./presentation.js";
+import type { AssistantRef } from './assistants.js';
 import { isConfirmation } from "./preparation.js";
 import { conversationAnswer as answer } from "./conversation.js";
 
@@ -23,12 +24,13 @@ export class ChatSession {
   private activity = "";
   private shownBrief?: { revision: number; digest: string };
   private shownApprovals = new Map<string, string>();
-  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>) {}
+  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
   private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); }
   async attach(id: string): Promise<void> {
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     this.select(id);
+    if (status.assistant) this.info(assistantText(status));
     this.info(`已接入${status.interaction === "chat" ? "对话" : "任务"} ${id}\n${status.interaction === "chat" ? "首条消息" : "目标"}：${status.objective}\n输出目录：${status.workspace}`);
     if (!status.goal) {
       const answers = status.messages.map(m => ({ m, text: answer(m) })).filter(v => v.text !== undefined);
@@ -219,6 +221,7 @@ export class ChatSession {
         if (command === "/status") {
           const status = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`);
           const goal = status.goal;
+          if (status.assistant) this.info(assistantText(status));
           this.info(`${status.interaction === "chat" ? "对话" : "任务"}：${status.id}\n状态：${status.status === "completed" ? "已交付（核验范围见下）" : status.status}\n子 Agent：${status.activeWorkerCount} 个运行 / ${status.workerCount} 个累计\n输出目录：${status.workspace}\n${usageText(status)}${goal ? `\n目标修订：${goal.revision}${goal.reason ? `\n原因：${goal.reason}` : ""}${goal.question ? `\n待回答：${goal.question}` : ""}` : ""}\n${verificationText(status)}${goal?.brief ? `\n${briefText(status)}${goal.confirmation ? "\n该版本已确认；预算不会因普通消息或重复确认补充。" : ""}` : ""}`);
           const progress = progressText(status);
           if (progress) this.info(progress);
@@ -249,8 +252,11 @@ export class ChatSession {
   }
   private async send(message: string, confirmed = false): Promise<void> {
     if (!this.taskId) {
-      const task = await this.client.request<TaskMeta>("/v1/tasks", "POST", { objective: message, workspace: this.workspace, confirmed, ...(confirmed ? {} : { mode: "chat" }) });
+      if (this.assistant && !await this.client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；请重启到当前版本，角色请求不会降级为普通任务。');
+      const task = await this.client.request<TaskMeta>("/v1/tasks", "POST", { objective: message, workspace: this.workspace ?? (this.assistant ? process.cwd() : undefined), confirmed,
+        ...(this.assistant ? { assistant: this.assistant } : {}), ...(confirmed ? {} : { mode: "chat" }) });
       this.select(task.id);
+      if (task.assistant) this.info(assistantText(task));
       this.info(confirmed ? `任务：${task.id}\n输出目录：${task.workspace}\n沿用已有授权与配置预算直接执行。费用上限 $${task.maxEstimatedCostUsd ?? 1}，配置时限 ${(task.deadlineAt - task.createdAt) / 60_000} 分钟。`
         : `对话：${task.id}\n普通问答直接回复，需要实际交付时再确认任务说明与预算。`);
     } else {
@@ -325,8 +331,9 @@ export class ChatSession {
 }
 
 export async function runChat(client: HarnessClient, options: {
-  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number;
+  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef;
 } = {}): Promise<void> {
+  if (options.taskId && options.assistant) throw new Error('接回任务保留原助手；仅新会话可使用 --assistant。');
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const terminal = Boolean((input as NodeJS.ReadStream).isTTY && (output as NodeJS.WriteStream).isTTY);
@@ -348,7 +355,7 @@ export async function runChat(client: HarnessClient, options: {
   const session = new ChatSession(client, render, options.workspace, terminal ? () => new Promise<string>((resolve, reject) => {
     hidden = { resolve, reject };
     output.write('受保护凭据输入（无回显，按 Enter 保存，Ctrl+C 取消）> ');
-  }) : undefined);
+  }) : undefined, options.assistant);
   output.write("Kada · 终端聊天\n直接聊天，需要实际交付时再确认任务说明与预算。/help 查看命令，/quit 退出。\n\n");
   let finish: () => void;
   const end = new Promise<void>(resolve => { finish = resolve; });

@@ -13,7 +13,7 @@ for (const mode of ['model-visible-only', 'enabled-tools-only', 'loaded-adds-ena
     } });
     const bridge = defineTool({ name: 'bridge', description: 'Call hidden_write as a nested tool.', parameters: Type.Object({}), execute: async (_args, api, context) => {
       const nested = await api.executeTool('hidden_write', {}, context);
-      return { output: [{ type: 'text' as const, text: JSON.stringify(nested) }] };
+      return { output: [{ type: 'text' as const, text: JSON.stringify(nested) }], isError: nested.isError };
     } });
     const loader = defineTool({ name: 'load_hidden_write', description: 'Load a registered tool.', parameters: Type.Object({}), execute: async () => ({
       output: [{ type: 'text' as const, text: 'Loaded.' }], control: { addTools: [write.name] },
