@@ -11,6 +11,7 @@ import type { SkillState } from "./skills.js";
 import { outstandingDelegation, savedDelegation } from "./delegation.js";
 import type { InputImage } from "./input-images.js";
 import { outstandingApproval } from "./approvals.js";
+import { outstandingAssistantWork } from './assistant-peer-state.js';
 
 export type GoalPhase = "working" | "clarifying" | "awaiting_confirmation" | "submitted" | "verifying" | "completed" | "waiting_user" | "blocked" | "needs_attention" | "failed";
 export type ReviewVerdict = { verdict: "pass" | "rework" | "blocked"; reason: string; evidence: string[] };
@@ -106,20 +107,27 @@ export async function readGoal(harness: Harness): Promise<GoalState> {
   return harness.commit(async tx => plain(await tx.doc(GoalDoc)), ctx);
 }
 
-export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: boolean; remote?: boolean } = {}) {
-  const mutate = async (api: ToolExecutionApi, context: typeof ctx, action: GoalChange<void>, submitting = false) => api.commit(tx => changeGoal(tx, async (goal, record) => {
-    const key = String(api.taskId);
-    if (!goal.appliedTools[key]) {
-      if (goal.phase !== "working") throw new Error(`Goal is ${goal.phase}; wait for supervision or user input`);
-      if (submitting && await outstandingDelegation(tx, api.conversationId, goal)) {
-        throw new Error("Background delegation has not returned. End this turn when your independent work is done.");
+export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: boolean; remote?: boolean; assistantPeers?: boolean } = {}) {
+  const rootOnly = async (tx: Tx, conversation: ConversationId) => {
+    if (options.assistantPeers && (await tx.conversation(conversation))?.owner) throw new Error('This assistant can use only its assigned work; source-task control and private requirements are unavailable.');
+  };
+  const mutate = async (api: ToolExecutionApi, context: typeof ctx, action: GoalChange<void>, submitting = false) => api.commit(async tx => {
+    await rootOnly(tx, api.conversationId);
+    return changeGoal(tx, async (goal, record) => {
+      const key = String(api.taskId);
+      if (!goal.appliedTools[key]) {
+        if (goal.phase !== "working") throw new Error(`Goal is ${goal.phase}; wait for supervision or user input`);
+        if (submitting && await outstandingDelegation(tx, api.conversationId, goal)) {
+          throw new Error("Background delegation has not returned. End this turn when your independent work is done.");
+        }
+        if (submitting && await outstandingApproval(tx, api.conversationId)) throw new Error('An action approval is still outstanding. Wait for its result before submitting.');
+        if (submitting && options.assistantPeers && await outstandingAssistantWork(tx, api.conversationId, goal)) throw new Error('Original assistant work has not returned. Wait for its report before submitting.');
+        await action(goal, record, tx);
+        goal.appliedTools[key] = true;
       }
-      if (submitting && await outstandingApproval(tx, api.conversationId)) throw new Error('An action approval is still outstanding. Wait for its result before submitting.');
-      await action(goal, record, tx);
-      goal.appliedTools[key] = true;
-    }
-    return { ok: true, revision: goal.revision, phase: goal.phase, candidateId: goal.candidate?.id ?? null };
-  }, options.remote ? api.conversationId : undefined), context);
+      return { ok: true, revision: goal.revision, phase: goal.phase, candidateId: goal.candidate?.id ?? null };
+    }, options.remote ? api.conversationId : undefined);
+  }, context);
   const output = (value: unknown) => [{ type: "text" as const, text: JSON.stringify(value) }];
   return defineExtension({ name: "local_goal", tools: [
     defineTool({
@@ -127,6 +135,7 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
       parameters: Type.Object({ details: Type.Optional(Type.Boolean()), proofId: Type.Optional(Type.String({ minLength: 1 })),
         delegation: Type.Optional(Type.Union([Type.Literal("list"), Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })])) }), replay: "safe", executionMode: "sequential",
       execute: async (args, api, context) => {
+        if (options.assistantPeers) await api.commit(tx => rootOnly(tx, api.conversationId), context);
         if (args.delegation) return { output: output(await savedDelegation(api, args.delegation, context)) };
         return { output: output(await api.commit(async tx => {
           const goal = await tx.doc(GoalDoc);

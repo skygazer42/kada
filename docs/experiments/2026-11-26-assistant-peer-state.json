@@ -1,0 +1,31 @@
+{
+  "at": "2026-11-26T13:25:29.4400258Z",
+  "phase": "Persistent assistant collaboration: business identity and transaction core",
+  "coreTestsPassed": 21,
+  "relatedRegressionPassed": 55,
+  "failed": 0,
+  "typecheck": "passed",
+  "build": "passed",
+  "publicTestTypes": "strict ES2024 NodeNext passed",
+  "sqliteReopen": "Original native ownership, request identity and confirmed stop retained across two reopenings",
+  "verified": [
+    "Native allocation and business record commit or roll back together",
+    "Original request identity and compatible standing/new/existing conversations",
+    "Inactive, expired, unconfirmed and foreign admissions refused before allocation",
+    "Source fixed tool ceiling checked independently of transient offered tools",
+    "Owned peers cannot become new roots or inspect/mutate the source Goal",
+    "Root work limit and stop decisions survive revision/epoch changes",
+    "Pending work and concurrent Goal submission serialize in the same transaction",
+    "Result derives from exact native inputs and required report; current report may submit without self-deadlock",
+    "Stop requests freeze descendants; native tasks, inputs and descendant confirmations must settle before acknowledgement",
+    "Default Goals do not gain new documents or guards"
+  ],
+  "runtimeFeatureEnabled": false,
+  "modelOrOwnerEntryAvailable": false,
+  "actualFileCopyVerified": false,
+  "newReporterSigkillVerified": false,
+  "liveProviderRun": false,
+  "wholeRepositorySuiteRunForThisPhase": false,
+  "independentReviewCompleted": false,
+  "limitations": "Delivery/report tool integration, immutable file transfer, question/rework, owner controls, source lifecycle wiring and complete product validation remain in the original Spec. Existing review channels are unavailable; tests are not an independent review."
+}
