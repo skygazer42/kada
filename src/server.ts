@@ -20,6 +20,7 @@ import type { McpDefinition } from './mcp-tools.js';
 import type { RoutineInput } from './routines.js';
 import { watchGithubIssues } from "./github-routine-events.js";
 import { githubWebhook } from './github-webhook.js';
+import { createWorkboardAccess } from './workboard-access.js';
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -41,6 +42,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   let runtime: LocalRuntime | undefined;
   const devices = new RemoteDevices(config.dataDir);
   let remote: ReturnType<typeof createRemoteHandler>;
+  let workboard: ReturnType<typeof createWorkboardAccess>;
   let pushRun: Promise<void> | undefined;
   let pushTimer: NodeJS.Timeout | undefined;
   const githubAbort = new AbortController();
@@ -67,6 +69,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
+      if (await workboard.handle(req, res, url)) return;
       if (url.pathname === '/v1/settings/mcp/oauth/callback' && req.method === 'GET') {
         if (req.headers.host !== new URL(`http://127.0.0.1:${config.port}`).host) return send(403, { error: 'Use the local OAuth callback address.' });
         res.setHeader('Referrer-Policy', 'no-referrer');
@@ -190,6 +193,18 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (url.pathname === '/v1/work-items') {
         if (req.method === 'GET') return send(200, await runtime.workItems.list(url.searchParams.get('workspace')));
         if (req.method === 'POST') return send(201, await runtime.workItems.create(await body(req)));
+      }
+      if (url.pathname === '/v1/work-items/board') {
+        const workspace = url.searchParams.get('workspace');
+        if (!workspace) throw new Error('Provide the project workspace.');
+        if (req.method === 'GET') return send(200, await runtime.workItems.board(workspace));
+        if (req.method === 'PATCH') return send(200, await runtime.workItems.editBoard(workspace, await body(req)));
+        return send(405, { error: 'Method not allowed' });
+      }
+      if (url.pathname === '/v1/work-items/board-link' && req.method === 'POST') {
+        const { workspace } = await body(req);
+        if (typeof workspace !== 'string') throw new Error('Provide the project workspace.');
+        return send(201, await workboard.link(workspace));
       }
       const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|share|unshare|share-replies|unshare-replies|share-controls|unshare-controls))?$/.exec(url.pathname);
       if (workItem) {
@@ -433,6 +448,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
     runtime = new LocalRuntime(config, { ...options, models: options?.models ?? cloudModels(), extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
+    workboard = createWorkboardAccess(runtime.workItems, `http://127.0.0.1:${config.port}`, body);
     remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),sharedDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
     await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));

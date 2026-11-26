@@ -23,9 +23,39 @@ export type WorkItem = WorkItemLink & {
 } & Planning;
 type LegacyFields = 'status' | 'archived' | 'completedAt' | keyof Planning;
 type StoredWorkItem = Omit<WorkItem, LegacyFields> & Partial<Pick<WorkItem, LegacyFields>> & {
+  boardColumn?: string;
   operations?: { requestId: string; fingerprint: string; result: WorkItem }[];
 };
 export type WorkItemRequest = { requestId: string; project: string };
+export type WorkBoardColumn = { id: string; title: string; status: WorkItemStatus };
+export type WorkBoard = { project: string; version: string; columns: Array<WorkBoardColumn & { items: WorkItem[] }> };
+type BoardReceipt = { version: string; columnId?: string; itemId?: string };
+type StoredBoard = { columns: WorkBoardColumn[]; order: Record<string, string[]>;
+  operations: Array<{ requestId: string; fingerprint: string; receipt: BoardReceipt }> };
+type WorkItemData = { items: StoredWorkItem[]; boards?: Record<string, StoredBoard> };
+
+const defaultColumns: WorkBoardColumn[] = [
+  { id: 'open', title: '待办', status: 'open' }, { id: 'parked', title: '搁置', status: 'parked' }, { id: 'done', title: '已完成', status: 'done' },
+];
+
+function boardView(project: string, data: WorkItemData): WorkBoard {
+  const saved = data.boards?.[project];
+  const columns = (saved?.columns ?? defaultColumns).map(column => ({ ...column, items: [] as WorkItem[] }));
+  const byId = new Map(columns.map(column => [column.id, column]));
+  for (const item of data.items) {
+    if (item.project !== project || item.archived) continue;
+    const card = view(item);
+    const placed = item.boardColumn ? byId.get(item.boardColumn) : undefined;
+    (placed?.status === card.status ? placed : byId.get(card.status))?.items.push(card);
+  }
+  for (const column of columns) {
+    const ranks = new Map((saved?.order[column.id] ?? []).map((id, rank) => [id, rank]));
+    column.items.sort((a, b) => (ranks.get(a.id) ?? ranks.size) - (ranks.get(b.id) ?? ranks.size));
+  }
+  const version = createHash('sha256').update(JSON.stringify([project, columns.map(column =>
+    [column.id, column.title, column.status, column.items.map(item => [item.id, item.revision])])])).digest('hex');
+  return { project, version, columns };
+}
 
 function view(item: StoredWorkItem): WorkItem {
   const { id, revision, project, workspace, title, objective, createdAt, updatedAt } = item;
@@ -147,13 +177,22 @@ export class WorkItems<T extends WorkItemRun> {
     this.path = join(dataDir, "work-items.json");
   }
 
-  private async load(): Promise<StoredWorkItem[]> {
-    try { return await readJson<StoredWorkItem[]>(this.path); }
+  private async loadData(): Promise<WorkItemData> {
+    try {
+      const saved = await readJson<StoredWorkItem[] | WorkItemData>(this.path);
+      if (Array.isArray(saved)) return { items: saved };
+      if (!Array.isArray(saved?.items)) throw new Error('Invalid work item data.');
+      return saved;
+    }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { items: [] };
       throw error;
     }
   }
+
+  private async load() { return (await this.loadData()).items; }
+
+  private async saveData(data: WorkItemData) { await atomicJson(this.path, data.boards ? data : data.items); }
 
   private find(items: StoredWorkItem[], id: string): StoredWorkItem {
     const item = items.find(candidate => candidate.id === id);
@@ -176,6 +215,84 @@ export class WorkItems<T extends WorkItemRun> {
     return (await this.load()).filter(item => ids.includes(item.id)).map(view);
   }
 
+  async board(workspace: string, expectedProject?: string): Promise<WorkBoard> {
+    const { project } = await projectFor(workspace);
+    if (expectedProject !== undefined && expectedProject !== project) throw new WorkItemError(409, 'The original workboard project changed.');
+    return boardView(project, await this.loadData());
+  }
+
+  async editBoard(workspace: string, input: unknown, expectedProject?: string): Promise<BoardReceipt> {
+    const common = ['action', 'version', 'requestId'];
+    const action = (input as { action?: unknown } | null)?.action;
+    const extras = action === 'add-column' ? ['title', 'status'] : action === 'rename-column' ? ['columnId', 'title'] :
+      action === 'remove-column' ? ['columnId'] : action === 'reorder-columns' ? ['columnIds'] :
+      action === 'move-card' ? ['itemId', 'itemRevision', 'columnId', 'beforeId'] : undefined;
+    if (!extras) throw new WorkItemError(400, 'Choose a workboard action.');
+    const value = fields(input, [...common, ...extras]);
+    if (typeof value.version !== 'string' || !/^[a-f0-9]{64}$/.test(value.version) || typeof value.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(value.requestId)) {
+      throw new WorkItemError(400, 'Provide the displayed board version and a request ID.');
+    }
+    const requestId = value.requestId;
+    const fingerprint = createHash('sha256').update(JSON.stringify([action, value.version, ...extras.map(key => value[key])])).digest('hex');
+    const { project } = await projectFor(workspace);
+    if (expectedProject !== undefined && expectedProject !== project) throw new WorkItemError(409, 'The original workboard project changed.');
+    return this.changes.run(async () => {
+      const data = await this.loadData(), current = boardView(project, data);
+      const board: StoredBoard = data.boards?.[project] ?? { columns: defaultColumns.map(column => ({ ...column })), order: {}, operations: [] };
+      const prior = board.operations.find(operation => operation.requestId === requestId);
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) throw new WorkItemError(409, 'The board request already has different content.');
+        return prior.receipt;
+      }
+      if (current.version !== value.version) throw new WorkItemError(409, 'The workboard changed. Read the current board.');
+      let columnId: string | undefined, itemId: string | undefined;
+      if (action === 'add-column') {
+        const column = { id: randomUUID(), title: text(value.title, 'column title', 80), status: status(value.status) };
+        board.columns.push(column);
+        columnId = column.id;
+      } else if (action === 'reorder-columns') {
+        if (!Array.isArray(value.columnIds) || value.columnIds.length !== board.columns.length || new Set(value.columnIds).size !== board.columns.length ||
+          value.columnIds.some(id => !board.columns.some(column => column.id === id))) throw new WorkItemError(400, 'Provide each current column once.');
+        board.columns = value.columnIds.map(id => board.columns.find(column => column.id === id)!);
+      } else {
+        const column = board.columns.find(entry => entry.id === value.columnId);
+        const visible = current.columns.find(entry => entry.id === value.columnId);
+        if (!column || !visible) throw new WorkItemError(404, 'Column not found in this board.');
+        columnId = column.id;
+        if (action === 'rename-column') column.title = text(value.title, 'column title', 80);
+        else if (action === 'remove-column') {
+          if (defaultColumns.some(entry => entry.id === column.id)) throw new WorkItemError(400, 'The default status columns belong to the work item lifecycle.');
+          if (visible.items.length) throw new WorkItemError(409, 'Move the cards before removing this column.');
+          board.columns = board.columns.filter(entry => entry !== column);
+          delete board.order[column.id];
+        } else {
+          const item = data.items.find(entry => entry.id === value.itemId && entry.project === project && !entry.archived);
+          if (!item) throw new WorkItemError(404, 'Work item not found in this project board.');
+          if (item.revision !== revision(value.itemRevision)) throw new WorkItemError(409, 'The work item changed. Read its latest revision.');
+          const selected = visible.items.filter(card => card.id !== item.id).map(card => card.id);
+          const at = value.beforeId === undefined || value.beforeId === null ? selected.length : selected.findIndex(id => id === value.beforeId);
+          if (at < 0) throw new WorkItemError(409, 'The reference card is unavailable in this column.');
+          for (const id of Object.keys(board.order)) board.order[id] = board.order[id]!.filter(card => card !== item.id);
+          selected.splice(at, 0, item.id);
+          board.order[column.id] = selected;
+          item.boardColumn = column.id;
+          item.updatedAt = Date.now();
+          item.revision++;
+          if ((item.status ?? 'open') !== column.status) {
+            item.status = column.status;
+            item.completedAt = column.status === 'done' ? item.updatedAt : null;
+          }
+          itemId = item.id;
+        }
+      }
+      data.boards = { ...data.boards, [project]: board };
+      const receipt = { version: boardView(project, data).version, ...(columnId ? { columnId } : {}), ...(itemId ? { itemId } : {}) };
+      board.operations.push({ requestId, fingerprint, receipt });
+      await this.saveData(data);
+      return receipt;
+    });
+  }
+
   async create(input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
     requestKey(request);
     const value = fields(input, ["workspace", "title", "objective", "status", 'priority', 'dueDate', 'dueAt', 'timeZone']);
@@ -187,7 +304,7 @@ export class WorkItems<T extends WorkItemRun> {
     // Keep the original digest when planning fields are absent, including pre-upgrade replays.
     const fingerprint = createHash('sha256').update(JSON.stringify(['create', workspace, title, objective, state, request?.project, ...(Object.keys(plan).length ? [plan] : [])])).digest('hex');
     return this.changes.run(async () => {
-      const items = await this.load();
+      const data = await this.loadData(), items = data.items;
       const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
       if (receipt) return receipt;
       const location = await projectFor(workspace);
@@ -196,7 +313,7 @@ export class WorkItems<T extends WorkItemRun> {
       const item: WorkItem = { ...location, id: randomUUID(), title, objective, status: state, archived: false,
         priority: 'normal', dueDate: null, dueAt: null, timeZone: 'UTC', ...plan,
         completedAt: state === 'done' ? now : null, revision: 1, createdAt: now, updatedAt: now };
-      await atomicJson(this.path, [...items, { ...item, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: item }] } : {}) }]);
+      await this.saveData({ ...data, items: [...items, { ...item, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: item }] } : {}) }] });
       return item;
     });
   }
@@ -214,7 +331,7 @@ export class WorkItems<T extends WorkItemRun> {
     if (title === undefined && objective === undefined && state === undefined && archived === undefined && !Object.keys(plan).length) throw new WorkItemError(400, "Provide work item fields to update.");
     const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, title, objective, state, archived, request?.project, ...(Object.keys(plan).length ? [plan] : [])])).digest('hex');
     return this.changes.run(async () => {
-      const items = await this.load();
+      const data = await this.loadData(), items = data.items;
       const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
       if (receipt) return receipt;
       const item = this.find(items, id);
@@ -230,8 +347,9 @@ export class WorkItems<T extends WorkItemRun> {
         next.revision++; next.updatedAt = Date.now();
         if (next.status !== previous.status) next.completedAt = next.status === 'done' ? next.updatedAt : null;
       }
-      const stored = { ...next, operations: request ? [...(item.operations ?? []), { requestId: request.requestId, fingerprint, result: next }] : item.operations };
-      await atomicJson(this.path, items.map(previous => previous === item ? stored : previous));
+      const stored = { ...next, boardColumn: next.status === previous.status ? item.boardColumn : undefined,
+        operations: request ? [...(item.operations ?? []), { requestId: request.requestId, fingerprint, result: next }] : item.operations };
+      await this.saveData({ ...data, items: items.map(previous => previous === item ? stored : previous) });
       return next;
     });
   }

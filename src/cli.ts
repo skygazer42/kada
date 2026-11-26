@@ -39,6 +39,7 @@ try {
     console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
     console.log('work-items edit 的 JSON 可带 revision、title/objective、status（open/parked/done）、archived（布尔值）、priority（low/normal/high/urgent）、dueDate（YYYY-MM-DD）或 dueAt（带 UTC 偏移的 ISO 时刻）及 timeZone（IANA）。截止用 null 清空，切换种类须清空旧字段。保存、完成或设截止不启动/取消原运行，也不创建提醒。');
+    console.log('work-items board-link --workspace 路径获取本机浏览器看板链接。board 查看 JSON，edit-board 编辑.json 使用原看板版本。');
     console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
     console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
     console.log('\n工作区快照（本机）\n  snapshots save 任务ID "快照名称"\n  snapshots list 任务ID\n  snapshots preview 任务ID 快照ID\n  snapshots restore 任务ID 快照ID 预览版本');
@@ -140,6 +141,9 @@ try {
     else if (command === 'work-items') {
       const path = '/v1/work-items';
       if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));
+      else if (action === 'board') result = await request(path + '/board?workspace=' + encodeURIComponent(workspace));
+      else if (action === 'board-link') result = await request(path + '/board-link', 'POST', { workspace });
+      else if (action === 'edit-board') result = await request(path + '/board?workspace=' + encodeURIComponent(workspace), 'PATCH', await json(rest[0]));
       else if (action === 'add') result = await request(path, 'POST', await json(rest[0]));
       else if (action === 'edit') result = await request(path + '/' + segment(rest[0]), 'PATCH', await json(rest[1]));
       else if (action === 'runs') result = await request(path + '/' + segment(rest[0]) + '/runs');
@@ -151,7 +155,7 @@ try {
         if (rest.length !== 3) throw new Error('Use work-items ' + action + ' <work-item-id> <account-id> <device-id>.');
         result = await request(path + '/' + segment(id) + '/' + action, 'POST', { accountId, deviceId });
       }
-      else throw new Error('Use work-items list, add, edit, runs, run, share, unshare, share-replies, unshare-replies, share-controls or unshare-controls. edit JSON accepts revision, title/objective, status (open/parked/done) and archived (boolean).');
+      else throw new Error('Use work-items list, board, board-link, edit-board, add, edit, runs, run, share, unshare, share-replies, unshare-replies, share-controls or unshare-controls.');
     }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {

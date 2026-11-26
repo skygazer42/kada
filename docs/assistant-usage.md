@@ -222,12 +222,15 @@ npm run harness -- remote unshare-approval 任务ID 动作ID 账户ID 设备ID �
 ```powershell
 npm run harness -- work-items add item.json
 npm run harness -- work-items list --workspace E:/project
+npm run harness -- work-items board-link --workspace E:/project
 npm run harness -- work-items edit 工作项ID edit.json
 npm run harness -- work-items run 工作项ID 1 本次请求ID
 npm run harness -- work-items runs 工作项ID
 ```
 
 新运行先准备任务说明和预算。已有明确授权时可附加 `--yes`。断线后用同一请求 ID 和原修订重试，返回原任务。
+
+在本机浏览器打开 `board-link` 返回的 URL，即可新建和编辑工作项、增减自定义列、调整列顺序。拖动卡片或在工作项内选择「移动到列」。移到已完成列会记录完成时间。链接在两分钟内可使用一次，页面刷新会沿用已打开的会话，重启服务后重新获取链接。
 
 把工作项分享给指定配对设备后，手机可以在 **Shared work items** 查看当前目标、修订和原运行的状态。点击某次运行可展开它的原始目标、步骤和子任务问题。需要处理的运行排在前面。分享按工作项 ID 生效，包含后续修订和运行。撤销分享后，设备刷新时会移除该工作项。
 
