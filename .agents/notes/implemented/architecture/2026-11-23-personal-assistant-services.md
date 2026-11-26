@@ -68,7 +68,11 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 大型 MCP 清单沿用 Pi 原生 deferred/tool_search。新任务总固定工具数大于 20 时保存 mcpDiscovery，工具注册只增加 deferred，具体执行仍走原 MCP 和审批路径。执行阶段配置从 Pi 当前 agent 投影已加载 MCP 工具并保留到原 modelTools，不另存目录或加载状态。只在执行扩展选择 tool-search；主会话从 enabled tools 移除 delegation_ask，防止目录把原本不可见的后台待答工具加载给主助手。同步子任务使用原范围，后台子任务仍保留文件工具与自己的待答入口。 [Rakazo 超过 20 个工具切换目录](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-connector.ts#L440) · [Pi 原生加载与持久化](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/src/tool-search/tool-search.ts)
 
+项目任务目录以新主任务的 projectTaskCatalog 标记固定，复用 memoryProject 和原 status/taskHandoff；先筛项目元数据，再读 Pi 状态，只返回有界的目标、摘要、问题和步骤。status 自己进入运行时状态队列，目录不能在同一队列内再等待它。查询不提交模型输入、不恢复工作，也不修改预算；子会话、旧任务和远程私有会话不获得工具。目录分页是当前视图，不是跨页快照。 [OpenMausBot 原任务目录](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L236) · [Rakazo 目录聚合](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22)
+
 ## Alternatives considered
+
+直接调用 owner list 再过滤可减少代码，但会先打开其他项目状态；项目目录先筛元数据。只用元数据推测状态可避免打开旧 Harness，却不能呈现 Pi 子任务待答、预算与交付，所以复用既有只读状态入口。该入口可能打开原存储做 Pi 投影，但不会启动 scheduler 或提交原工作；不同于仅取旧讨论的 history 工具，目录需要当前业务状态。
 
 自建搜索、加载、执行代理可定制排序及中文分词，但 Pi 已提供工具检索和原生加载状态；增加代理会再做参数与权限入口。一次发送所有 schema 接法最短，但大型清单把无关工具结构带到每次请求；按已有参考的 20 个工具阈值为新任务选择延迟注册，旧任务保留原快照行为。只隐藏 modelTools 中的 delegation_ask 不足以限制搜索，因为 Pi 从 enabled deferred 清单检索，所以在主会话的 tools 范围排除它。
 
@@ -139,6 +143,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+项目任务目录复用既有完整状态读取，减少状态分叉并保留原子任务的待答投影；它仍需遍历同项目任务，大量历史的延迟和跨页变动尚未量化。6 项 Pi 回归覆盖范围、截断、分页、坏存储、重启与聊天转 Goal；硅基流动 DeepSeek 的中文查询使用 4 次请求、20,844 总 token，金额未知，不能推出成本或任务质量收益。参考项目完整产品能力仍按能力核对表逐项补齐。
 
 周期提醒的确定性回归验证每周通知、改为每日、保留原政策及无效输入拒绝。实际 SIGKILL 覆盖更新未提交、已提交后被再次编辑和已提交后被取消，回放保持原结果且不覆盖当前规则。DeepSeek V3.2 用 9 次请求完成中文创建、重启后修改和取消，原提醒 ID 保留，无 Goal；52,054 总 token 包含缓存，金额未知。当前不提供通知型 Cron/间隔、执行型任务或跨设备聊天管理，不据此声称全场景时间理解和成本改善。
 

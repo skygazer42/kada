@@ -6,6 +6,7 @@
 
 | 能力 | Kada 契约与验收 | 参考实现 |
 | --- | --- | --- |
+| 聊天查询当前项目任务 | 新本机主会话用 project_tasks 查询同项目其他原任务，待处理优先并分页，返回原 ID、状态、目标/摘要/问题/步骤的有限投影。排除远程私有会话、其他项目和调用者；历史和子会话不扩权。沿原 status/taskHandoff 读取，查询不提交模型工作、修改预算或创建 Goal。 | [OpenMausBot list_threads](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L236) · [Rakazo 实际目录](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22) · [回归](../../test/project-tasks.test.ts) |
 | 聊天周期提醒与修改 | 新本机聊天可保存、查询、修改和取消本项目 once/daily/weekly 通知。原 Pi 计算 IANA 时区、夏令时和补跑；编辑保留工作区与原政策。修改固定原修订，并在原事务保存请求摘要和结果；强杀后返回原回执，不覆盖后续编辑或取消。旧 true 聊天保留单次接口，其他项目、混合事件和执行型规则排除。 | [Rakazo 日程工具](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/schedule-tools.ts#L52) · [修改归属](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/schedule-tools.ts#L1030) · [修改竞态](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/schedule-tools.ts#L1197) · [工具与回执回归](../../test/chat-reminder-management.test.ts) · [强杀恢复](../../test/chat-reminder-recovery.test.ts) |
 | 大型 MCP 工具集按需加载 | 本机新任务固定的 MCP 工具总数超过 20 时，使用 Pi deferred/tool_search 加载所需 schema；原 Pi 会话保留已加载工具，压缩和重启后可继续使用。加载后的调用仍通过原修订、允许列表与单次审批。主会话排除子任务待答工具；准备、聊天和旧任务保持原范围。 | [Rakazo 目录切换](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-connector.ts#L440) · [目录边界](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/lazy-tool-catalog.ts#L33) · [Pi 工具发现](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/src/tool-search/tool-search.ts) · [Pi/stdio 回归](../../test/mcp-discovery.test.ts) |
 | 项目原对话检索与回读 | 本机新主会话可检索同项目其他任务的原用户输入与最终助手正文，返回 taskId、entryId、时间和片段，再按 ID 回读原文。原 Pi 分页和压缩后记录保持来源；其他项目、远程私有会话、自动初始输入及内部流量排除。旧任务和子 Agent 不自动获得能力。 | [OpenMausBot session_search](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L568) · [工具与回读](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-call.ts#L807) · [归属边界](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/index.ts#L13390) · [Unicode 匹配](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/message-search-query.ts#L14) · [Pi 集成回归](../../test/project-history.test.ts) |
@@ -175,6 +176,8 @@ MCP 工具总数取新任务已经固定的 `mcpPins`，大于 20 时保存 `mcp
 修改请求使用原聊天和工具 taskId 派生的身份，摘要及原结果写入 Pi 被动回执。相同请求同内容重放返回当次结果；请求内容改变或无回执的旧修订返回冲突。后来的编辑或取消保持当前状态，历史回执不能被当作最新安排。6 种实际 SIGKILL 场景验证原创建、取消及更新的未知结果恢复。DeepSeek V3.2 经硅基流动完成中文每周创建、重启后改为每日及新文字、取消，共 9 次请求、52,054 总 token，无 Goal，金额未知。 [周期提醒实测](../experiments/2026-11-25-chat-reminder-management-deepseek.json)
 
 ## 已定位的能力差距
+
+更广的任务规划、结构化提问、安全凭据、命名助手、跨助手协作、撤销及语音等差距见[参考能力核对表](2026-11-25-reference-capability-matrix.md)。下表保留原来已经定位的具体兼容性与实测缺口，不能视为所有剩余能力。
 
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |
 | --- | --- | --- | --- |

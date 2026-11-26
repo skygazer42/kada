@@ -38,7 +38,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'F11-chat-reminder-management' ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'F11-chat-reminder-management' ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -236,6 +236,27 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  await check('T01-project-tasks',async()=>{
+    const source=await server.runtime.create('合成验收任务 ORBIT_542：用户尚未决定导出 CSV 还是 XLSX，不能自行选择。只调用 task_blocked，reason 说明缺少格式，question 提问 CSV 还是 XLSX，然后等待。不要执行命令、写文件或委派。',alpha);tasks.add(source.id);
+    const pending=await until(()=>server.runtime.status(source.id),row=>['waiting_user','failed','budget_limited','completed'].includes(row.status),90_000);
+    assert.equal(pending.status,'waiting_user','catalog_source_waiting');
+    assert.match(pending.goal?.question ?? '',/CSV/);assert.match(pending.goal?.question ?? '',/XLSX/);
+    const {status:foreign}=await chat(beta,'这是另一个项目的私人讨论 FOREIGN_CATALOG_648。只回复收到，不调用工具。');
+    const beforeRestart=requests;
+    await server.close();server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'catalog_reopen_no_model');
+    const {status:answer,answer:text}=await chat(alpha,'这个项目还有哪些任务在等我答复？请给出原任务 ID 和具体问题，以系统当前状态为准；不要开始、恢复或修改任何工作。');
+    const result=answer.messages.find(message=>message.role==='toolResult' && message.toolName==='project_tasks' && !message.isError);
+    assert(result && result.role==='toolResult','catalog_tool_succeeded');
+    const page=JSON.parse(result.content.filter(block=>block.type==='text').map(block=>block.text).join(''));
+    assert(page.tasks.some((task:{id:string;question:string|null})=>task.id===source.id && task.question===pending.goal?.question),'catalog_original_task_and_question');
+    assert(!page.tasks.some((task:{id:string})=>task.id===foreign.id),'catalog_excludes_other_project');
+    assert(text.includes(source.id),'catalog_answer_original_id');assert.match(text,/CSV/);assert.match(text,/XLSX/);
+    assert(!text.includes('FOREIGN_CATALOG_648'),'catalog_answer_scope');
+    assert.equal((await server.runtime.status(source.id)).status,'waiting_user');
+    assert.equal(answer.goal,undefined);
+    evidence.projectTasks={sourceTaskId:source.id,queryTaskId:answer.id,sourceStillWaiting:true,questionVerified:true,otherProjectExcluded:true,goalCreated:false,requests};
   });
   await check('H01-project-history',async()=>{
     const {status:source} = await chat(alpha,'项目回顾：NEBULA_842 的数据库选择是 SQLite。只回复“已记下这次讨论”，不要调用记忆工具。');

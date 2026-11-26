@@ -4,6 +4,8 @@
 
 逐功能的源码文件、关键符号、接口与测试条件见 [个人助手功能 Spec](../../specs/2026-11-23-personal-assistant.md)。
 
+首期之后的持续对齐顺序与尚缺的产品能力见[参考项目能力核对表](../../specs/2026-11-25-reference-capability-matrix.md)，已实现增量与证据见[能力对照](../../specs/2026-11-24-assistant-capability-parity.md)。
+
 ## 开发目标与协作方式
 
 把 Kada 做成能理解项目背景、接下目标、持续推进、主动提醒并交付结果的本地个人助手。首期用户入口是终端，macOS 客户端消费同一套本地 API。个人助手的产品能力在 TypeScript、Node.js 和 Pi 的现有结构上逐项补齐。 [当前产品范围](../../../SPEC.md) · [项目约束](../../../AGENTS.md)

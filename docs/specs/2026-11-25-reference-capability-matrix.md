@@ -1,0 +1,35 @@
+# 参考项目能力核对表
+
+2026-11-25。目标是逐项吸收参考实现的产品能力；这张表不把测试数量当成功能对齐率。版本与 Star 优先级沿用[开发计划](../superpowers/plans/2026-11-23-personal-assistant.md#参考优先级)，Star 不是实现质量证明。当前判断依据为固定版本源码、Kada 入口及已有验收记录；没有逐个穷尽所有参考项目和平台。
+
+## 已增加的基础
+
+相对首期计划基线 `092cc43`，Kada 已增加记忆编辑/遗忘与使用追踪、任务交接与通知、项目模型与 Skills/MCP 配置、例行任务、手机 Web 派活和附件交付、浏览器接管回交、可追溯后台子任务。后续又补充单次动作审批、共享工作项与原运行、OAuth、变更预检、事件入口、项目活动门槛、账户拒绝降频、原对话检索、大型 MCP 按需加载和聊天提醒。逐项实现与证据见[首期 Spec](2026-11-23-personal-assistant.md)、[增量 Spec](2026-11-24-assistant-capability-parity.md)。这些入口已有不代表下表能力全部达到参考项目水平。
+
+## 剩余能力与验收
+
+“部分”表示已有对应原语或入口；“缺少”表示未找到完整产品路径；“待实测”表示实现存在但指定环境没有验收。以下均是待办，不是本轮交付承诺。
+
+| 优先级 | 能力、当前状态 | 下一步与通过条件 | 固定源码参考 |
+| --- | --- | --- | --- |
+| P0 | 聊天查询当前任务：本机项目运行目录已实现，综合工作目录仍为部分 | project_tasks 已查询同项目原任务、待处理优先、有界分页、当前问题与交付摘要。6 项 Pi 回归及 DeepSeek 中文查询通过；工作项/规则/Skills 综合目录和大量历史性能仍待补。 | [OpenMausBot list_threads](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L236) · [Rakazo 实际目录聚合](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22) · [本轮计划](../superpowers/plans/2026-11-25-project-task-catalog.md) |
+| P0 | 聊天保存与维护待办：部分；工作项只有标题、目标、修订和原运行，主要由 CLI/API 管理 | 聊天中创建、查阅、修改、完成/归档待办；保存待办不等于授权执行。复用 WorkItems 与原运行身份，重放不重复。 | [Rakazo scratchpad 工具](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-work.tool-definition.ts#L167) · [Suparagent WorkItem](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L31) |
+| P0 | 结构化提问：部分；Goal 与子任务已有文本待答 | 2–4 个选项、可补充文本，问题绑定原任务/修订；原答复经过重启只接回一次。终端、手机与桌面分别验收。 | [Rakazo ask_user](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-conversation.tool-definition.ts#L94) · [OpenMausBot 被动选项卡](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L121) |
+| P0 | 安全凭据请求与使用：部分；模型设置、MCP 环境引用/OAuth 已有，通用秘密卡缺少 | 用户在独立遮罩入口保存，模型只见名称和用途；后端仅向绑定 origin 注入，拒绝跳转并脱敏回显。旧凭据保留，不经聊天明文收集。 | [OpenMausBot request_credential](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L451) · [Rakazo request_secret / secret_request](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-conversation.tool-definition.ts#L135) |
+| P1 | 工作项规划：缺少优先级、截止日期、完成与归档状态、看板顺序 | 先补持久字段与用户入口；日期不是自动执行计划。修改保留原运行快照；旧文件无损读取，并发编辑冲突可见。 | [Suparagent 规划字段与原运行](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L31) · [Rakazo tickets](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-work.tool-definition.ts#L247) |
+| P1 | 命名助手与角色：部分；已有临时 Pi workers，没有持久角色目录 | 保存角色说明、模型和明确工具范围；新工作引用角色版本，旧会话保留原配置。执行继续由 Pi 会话承担。 | [Rakazo spawn_bot / update_bot](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-fleet.tool-definition.ts#L158) · [OpenMausBot create_bot](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L348) |
+| P1 | 跨助手持久协作：部分；单目标内委派、补充指令、待答及回传已有 | 用户指定助手间交接独立工作、传递固定文件、回收结果和返工；不把一组临时子任务称为完整团队/群组。禁止循环转派和权限继承扩张。 | [OpenMausBot coordinate_bots](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L174) · [Rakazo handoff_to_bot / groups](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-fleet.tool-definition.ts#L434) |
+| P1 | 独立工作与会话整理：部分；原任务创建/接回已有 | 用户明确要求时创建独立会话并回报来源；提供标题、归档和再打开。删除仍由用户决定，已运行工作的取消与归档分开。 | [OpenMausBot start_thread / close_thread](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L244) |
+| P1 | 普通聊天中的模型与工具设置：部分；CLI 设置及项目默认模型已有 | 模型提出具体变更，由原 owner 入口确认应用；保存设置修订，不静默改变当前运行或自动扩大工具范围。 | [OpenMausBot propose_model](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L675) · [Rakazo add_mcp_server](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-conversation.tool-definition.ts#L234) |
+| P1 | 真实应用连接器与主动工作：部分；MCP、OAuth、GitHub 事件与活动/预算门槛已有 | 选定一个真实账户完成连接、只读检查、断线/撤权恢复和通知；再逐服务扩展邮件、日历等。合成 OAuth 不等于真实账号兼容。 | [Rakazo Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [Amuse 主动检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
+| P1 | 浏览器登录与人工接管：部分；agent-browser 本地合成页已验收 | 真实浏览器任务中明确请求接管，恢复后重新观察而非重放未知副作用；授权、账号和具体应用需分别验收。 | [OpenMausBot request_sign_in / fill_login](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L475) |
+| P1 | 工作区撤销：缺少完整入口；已有交付快照不等于可恢复备份 | 在工作区外保存有界快照，展示恢复差异并由用户明确恢复；保护原凭据、目录边界与后来编辑，验证二进制及失败恢复。 | [Suparagent snapshot / restore](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/workspace_snapshots.py#L112) |
+| P2 | 语音输入/语音便笺与朗读：缺少 | 优先复用已选供应商或本地现成服务；原语音、转写与对话 ID 关联，失败可回到文本。真实麦克风与音频输出另验收。 | [OpenMausBot send_voice_note](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L505) · [TTS 路由](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routes/tts.ts) |
+| P2 | 交互图表、页面与分享：部分；文件/目录交付已有，动态页面产品入口缺少 | 先完成本地生成、版本与安全预览；外部分享须有明确授权、访问控制和撤回。图表数据与报告使用同一结果。 | [Rakazo render_plot / save_page](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-conversation.tool-definition.ts#L171) |
+| P2 | 多电脑、云电脑、VM 与系统应用操作：部分；本机终端及浏览器适配已有 | 逐驱动复用成熟实现，明确设备、目录和能力授权；离线不能替换成其他设备。系统原生操作未由网页验收证明。 | [OpenMausBot shared_computer / select_computer](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L154) |
+| P2 | 手机推送与原生客户端：待实测 | 实体 iOS/Android 关闭页面后收通知、打开原会话；macOS 验证任务卡、子任务答复及停止。Windows 的 API/语法测试不代替实机。 | [Codync Android Push](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |
+| P2 | Skills 创建/修改/分享：部分；发现、固定版本、复用和可选捕获已有 | 用户可管理可复用方法及来源；新版本只影响后续选择，失败能撤回。对照原生 Pi 验证质量/人工介入/成本。 | [Rakazo skill_create / skill_update](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-fleet.tool-definition.ts#L61) · [OpenMausBot skill_manage](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L731) |
+
+## 推进规则
+
+先把 P0 的正常聊天路径逐项做完整，再做 P1 的持久规划与角色协作；安全凭据的真实服务与原生设备验收可独立等待外部条件，不阻塞其他本地工作。每项在动手前补单独计划、Pi 扩展点核对和源码执行路径；字段存在或工具定义存在只证明接口，不能直接标为整项完成。目标仍为持续对齐，上表不是参考项目全部能力的穷尽清单。

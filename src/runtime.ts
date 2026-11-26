@@ -41,6 +41,7 @@ import type { GithubIssue, GithubPullRequest } from './github-routine-events.js'
 import { modelAccountRefusal, type AccountRefusal } from './routine-account-backoff.js';
 import { reminderExtension } from './reminders.js';
 import { historyExtension, historyInstructions, historyMatch, historyQuery, type HistoryMessage } from './history.js';
+import { projectTasksExtension } from './project-tasks.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -69,6 +70,7 @@ export interface TaskMeta {
   entrypoint?: "chat";
   chatReminders?: true | 'managed';
   historyRecall?: true;
+  projectTaskCatalog?: true;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
   chatBudget?: { costLimit: number; tokenLimit: number | null };
   learning?: boolean;
@@ -388,6 +390,7 @@ export class LocalRuntime {
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
+        ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
@@ -459,6 +462,25 @@ export class LocalRuntime {
     if (!project) throw new Error('Project history is unavailable for this task.');
     return project;
   }
+  async projectTasks(callerId: string, filter = 'all', limit = 20, offset = 0) {
+    if (!['all', 'running', 'pending', 'delivered'].includes(filter)) throw new Error('Invalid project task filter.');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid project task page.');
+    const caller = await this.metadata(callerId);
+    const project = !caller.remotePolicy && caller.projectTaskCatalog ? await memoryProject(caller.workspace) : undefined;
+    if (!project) throw new Error('Project task catalog is unavailable for this task.');
+    const tasks = [];
+    for (const meta of await this.metadataList()) {
+      if (meta.id === callerId || meta.remotePolicy || await memoryProject(meta.workspace) !== project) continue;
+      const status = await this.status(meta.id), handoff = taskHandoff(status);
+      if (filter !== 'all' && handoff.group !== filter) continue;
+      tasks.push({ id: meta.id, createdAt: meta.createdAt, status: status.status, group: handoff.group,
+        objective: status.objective.slice(0, 500), summary: handoff.summary.slice(0, 500),
+        question: handoff.question?.slice(0, 1000) ?? null, step: handoff.step?.slice(0, 200) ?? null,
+        truncated: status.objective.length > 500 || handoff.summary.length > 500 || (handoff.question?.length ?? 0) > 1000 || (handoff.step?.length ?? 0) > 200 });
+    }
+    tasks.sort((a, b) => Number(b.group === 'pending') - Number(a.group === 'pending') || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+    return { tasks: tasks.slice(offset, offset + limit), total: tasks.length, nextOffset: offset + limit < tasks.length ? offset + limit : null };
+  }
   private async *historyMessages(meta: TaskMeta): AsyncGenerator<HistoryMessage> {
     const existing = this.active.get(meta.id)?.storage, path = join(this.directory(meta.id), 'session.sqlite');
     if (!existing) await access(path);
@@ -521,6 +543,7 @@ export class LocalRuntime {
       const policy=remote ? remoteFilePolicy(workspace) : undefined;
       const imagePolicy = remote ? inputImageExtension(meta.model) : undefined;
       const history = !remote && meta.historyRecall ? historyExtension((query, limit) => this.searchHistory(meta.id, query, limit), (taskId, entryId) => this.readHistory(meta.id, taskId, entryId)) : undefined;
+      const projectTasks = !remote && meta.projectTaskCatalog ? projectTasksExtension((filter, limit, offset) => this.projectTasks(meta.id, filter, limit, offset)) : undefined;
       const nativeSkills = meta.resourcePolicy === "pi-skills";
       const localContext = !remote && meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective).catch(() => undefined) : undefined;
       const statements = () => this.userStatements(this.active.get(meta.id)!);
@@ -553,7 +576,7 @@ export class LocalRuntime {
       } satisfies Partial<GenerationHooks>}]}) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const preparation = preparationExtension(workspace, this.defaultBudget(meta), { remote });
-      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(history ? [history] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { remote, startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -562,6 +585,7 @@ export class LocalRuntime {
       } });
       const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now, meta.chatReminders === 'managed')] : []), ...(memory ? [memory] : []),
         ...(history ? [history] : []),
+        ...(projectTasks ? [projectTasks] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
@@ -580,7 +604,7 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(history ? [history] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
@@ -595,6 +619,7 @@ export class LocalRuntime {
         ...(memoryUse ? [memoryUse] : []),
         ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
         ...(history ? [history] : []),
+        ...(projectTasks ? [projectTasks] : []),
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
         ...(meta.preparation && !remote ? [verification] : []),
