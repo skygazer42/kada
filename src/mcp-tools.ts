@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { CallToolResult, Tool as ServerTool } from '@modelcontextprotocol/sdk/types.js';
 import { memoryProject } from './memory-sources.js';
-import { atomicJson, readJson, SerialQueue } from './util.js';
+import { atomicJson, readJson, redactCredentials, SerialQueue } from './util.js';
 import { McpOAuth, McpAuthError, loopback, oauthUrl, normalizeOAuth, type McpAuthSession, type McpOAuthSetting } from './mcp-oauth.js';
 
 export type McpDefinition = { id: string } & (
@@ -31,6 +31,39 @@ export type McpConnection = Omit<SavedConnection, 'definition' | 'test'> & {
   oauth?: { credentialsSaved: boolean; authorizationPending: boolean };
   test?: Omit<McpTest, 'tools'> & { message?: string; tools?: Array<Pick<FoundTool, 'name' | 'description' | 'readOnly'>> };
 };
+export type McpConnectionProposal = { id: string; sourceTaskId: string; connectionId: string; endpoint: string;
+  state: 'pending' | 'registered' | 'declined'; createdAt: string; settledAt?: string; connectionRevision?: string };
+export type McpProposalDecision = 'apply' | 'decline';
+type StoredMcpProposal = McpConnectionProposal & { project: string };
+type McpConfiguration = { connections: SavedConnection[]; proposals?: StoredMcpProposal[] };
+export type McpProjectToolProposal = { id: string; sourceTaskId: string; tools: ProjectMcpTool[] | null; previous: ProjectMcpTool[] | null;
+  effective: ProjectMcpTool[]; state: 'pending' | 'applied' | 'declined'; createdAt: string; settledAt?: string };
+export type McpSettingsProposal = McpConnectionProposal | McpProjectToolProposal;
+type StoredToolProposal = McpProjectToolProposal & { project: string; baseline: string };
+type McpProjectSettings = { projects: Record<string, ProjectMcpTool[]>; proposals?: StoredToolProposal[] };
+
+export class McpProposalError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
+function mcpProposalView({ project: _project, ...view }: StoredMcpProposal): McpConnectionProposal { return view; }
+function toolProposalView({ project: _project, baseline: _baseline, ...view }: StoredToolProposal): McpProjectToolProposal { return view; }
+
+function selectProjectTools(connections: SavedConnection[], tools: ProjectMcpTool[]): ProjectMcpTool[] {
+  if (tools.some(({ id, tool }) => !connections.some(connection =>
+    connection.enabled && connection.definition.id === id && connection.allowedTools.includes(tool)))) {
+    throw new Error('Only currently enabled MCP tools may be selected for a project.');
+  }
+  return Object.values(Object.fromEntries(tools.map(({ id, tool }) => [JSON.stringify([id, tool]), { id, tool }])));
+}
+
+function projectBaseline(connections: SavedConnection[], previous: ProjectMcpTool[] | null, next: ProjectMcpTool[] | null) {
+  const relevant = new Set([...(previous ?? []), ...(next ?? [])].map(item => item.id));
+  const state = connections.filter(connection => connection.enabled && (previous === null || next === null || relevant.has(connection.definition.id)))
+    .map(connection => ({ id: connection.definition.id, revision: connection.revision, tools: connection.allowedTools, approvals: connection.approvalTools ?? [] }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return stableJson([previous, state]);
+}
 
 const pinOf = (connection: SavedConnection): McpPin => ({
   id: connection.definition.id,
@@ -187,21 +220,31 @@ export class McpTools {
     return result;
   }
 
-  private async read(): Promise<SavedConnection[]> {
+  private async readConfiguration(): Promise<McpConfiguration> {
     try {
-      return await readJson<SavedConnection[]>(this.path);
+      const data = await readJson<SavedConnection[] | McpConfiguration>(this.path);
+      if (Array.isArray(data)) return { connections: data };
+      if (!Array.isArray(data?.connections)) throw new Error('MCP connection configuration must contain a connection list.');
+      return data;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { connections: [] };
       throw error;
     }
   }
 
+  private async read(): Promise<SavedConnection[]> { return (await this.readConfiguration()).connections; }
+
+  private async writeConfiguration(data: McpConfiguration) {
+    await atomicJson(this.path, data.proposals?.length ? data : data.connections);
+  }
+
   private async update(id: string, change: (old?: SavedConnection) => SavedConnection | Promise<SavedConnection>, after?: (next: SavedConnection, old?: SavedConnection) => Promise<void>): Promise<McpConnection> {
     return this.changes.run(async () => {
-      const connections = await this.read();
+      const data = await this.readConfiguration();
+      const connections = data.connections;
       const previous = connections.find(connection => connection.definition.id === id);
       const next = await change(previous);
-      await atomicJson(this.path, [...connections.filter(connection => connection !== previous), next]);
+      await this.writeConfiguration({ ...data, connections: [...connections.filter(connection => connection !== previous), next] });
       const revoked = previous?.enabled && (!next.enabled || previous.allowedTools.some(name => !next.allowedTools.includes(name)));
       if (previous && (next.revision !== previous.revision || revoked)) {
         this.cancel(id);
@@ -228,6 +271,63 @@ export class McpTools {
         if (JSON.stringify(old?.definition) !== JSON.stringify(next.definition) &&
           (next.definition.transport === 'http' && next.definition.oauth || old?.definition.transport === 'http' && old.definition.oauth)) await this.oauth.clear(normalized.id);
       });
+  }
+
+  private async proposalProject(workspace: string) {
+    const project = await memoryProject(workspace);
+    if (!project) throw new McpProposalError(404, 'MCP proposals require an existing project workspace.');
+    return project;
+  }
+
+  async proposeConnection(workspace: string, sourceTaskId: string, id: string, input: { connectionId: string; endpoint: string }) {
+    if (!/^[1-9]\d{0,19}$/.test(id) || typeof input.endpoint !== 'string' || !input.endpoint.trim() || input.endpoint.length > 2048) {
+      throw new McpProposalError(400, 'Provide an original proposal ID and an HTTP endpoint.');
+    }
+    if (redactCredentials(input.endpoint) !== input.endpoint) throw new McpProposalError(400, 'Provide a credential-free MCP endpoint.');
+    const normalized = normalize({ id: input.connectionId, transport: 'http', url: input.endpoint }) as Extract<McpDefinition, { transport: 'http' }>;
+    const project = await this.proposalProject(workspace);
+    return this.changes.run(async () => {
+      const data = await this.readConfiguration();
+      const prior = data.proposals?.find(item => item.project === project && item.sourceTaskId === sourceTaskId && item.id === id);
+      if (prior) {
+        if (prior.connectionId !== normalized.id || prior.endpoint !== normalized.url) throw new McpProposalError(409, 'The MCP proposal already has different content.');
+        return mcpProposalView(prior);
+      }
+      if (data.connections.some(connection => connection.definition.id === normalized.id)) throw new McpProposalError(409, 'That MCP connection already exists.');
+      const proposal: StoredMcpProposal = { id, sourceTaskId, project, connectionId: normalized.id, endpoint: normalized.url,
+        state: 'pending', createdAt: new Date().toISOString() };
+      await this.writeConfiguration({ ...data, proposals: [...(data.proposals ?? []), proposal] });
+      return mcpProposalView(proposal);
+    });
+  }
+
+  async connectionProposals(workspace: string, sourceTaskId: string) {
+    const project = await this.proposalProject(workspace);
+    return ((await this.readConfiguration()).proposals ?? []).filter(item => item.project === project && item.sourceTaskId === sourceTaskId).map(mcpProposalView);
+  }
+
+  async decideConnectionProposal(workspace: string, sourceTaskId: string, id: string, decision: McpProposalDecision) {
+    if (decision !== 'apply' && decision !== 'decline') throw new McpProposalError(400, 'Choose apply or decline.');
+    const project = await this.proposalProject(workspace);
+    const state = decision === 'apply' ? 'registered' : 'declined';
+    return this.changes.run(async () => {
+      const data = await this.readConfiguration();
+      const proposal = data.proposals?.find(item => item.project === project && item.sourceTaskId === sourceTaskId && item.id === id);
+      if (!proposal) throw new McpProposalError(404, 'MCP proposal not found in this conversation.');
+      if (proposal.state === state) return mcpProposalView(proposal);
+      if (proposal.state !== 'pending') throw new McpProposalError(409, 'The MCP proposal already has a different decision.');
+      if (decision === 'apply') {
+        if (data.connections.some(connection => connection.definition.id === proposal.connectionId)) throw new McpProposalError(409, 'That MCP connection already exists.');
+        const definition = normalize({ id: proposal.connectionId, url: proposal.endpoint, transport: 'http' });
+        const revision = randomUUID();
+        data.connections.push({ definition, revision, enabled: false, allowedTools: [] });
+        proposal.connectionRevision = revision;
+      }
+      proposal.state = state;
+      proposal.settledAt = new Date().toISOString();
+      await this.writeConfiguration(data);
+      return mcpProposalView(proposal);
+    });
   }
 
   async login(id: string, redirectUrl: string) {
@@ -365,41 +465,95 @@ export class McpTools {
     return { sha256: createHash('sha256').update(value).digest('hex') };
   }
 
-  private async readProjects(): Promise<Record<string, ProjectMcpTool[]>> {
+  private async readProjectSettings(): Promise<McpProjectSettings> {
     try {
-      return await readJson<Record<string, ProjectMcpTool[]>>(this.projectsPath);
+      const value = await readJson<Record<string, ProjectMcpTool[]> | McpProjectSettings>(this.projectsPath);
+      if ('projects' in value && !Array.isArray(value.projects)) return value as McpProjectSettings;
+      return { projects: value as Record<string, ProjectMcpTool[]> };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { projects: {} };
       throw error;
     }
   }
 
+  private async writeProjectSettings(data: McpProjectSettings) {
+    await atomicJson(this.projectsPath, data.proposals?.length ? data : data.projects);
+  }
+
   async projectTools(workspace: string): Promise<ProjectMcpTool[] | null> {
     const project = await projectRoot(workspace);
-    return (await this.readProjects())[project] ?? null;
+    return (await this.readProjectSettings()).projects[project] ?? null;
   }
 
   async setProjectTools(workspace: string, tools: unknown): Promise<ProjectMcpTool[] | null> {
     if (tools !== null && !validProjectTools(tools)) throw new Error('Provide an array of MCP connection IDs and tool names, or null.');
     const project = await projectRoot(workspace);
     return this.changes.run(async () => {
-      const projects = await this.readProjects();
+      const data = await this.readProjectSettings(), projects = data.projects;
       if (tools === null) {
         if (Object.hasOwn(projects, project)) {
           delete projects[project];
-          await atomicJson(this.projectsPath, projects);
+          await this.writeProjectSettings(data);
         }
         return null;
       }
-      const connections = await this.read();
-      if (tools.some(({ id, tool }) => !connections.some(connection =>
-        connection.enabled && connection.definition.id === id && connection.allowedTools.includes(tool)))) {
-        throw new Error('Only currently enabled MCP tools may be selected for a project.');
-      }
-      const selection = Object.values(Object.fromEntries(tools.map(({ id, tool }) => [JSON.stringify([id, tool]), { id, tool }])));
+      const selection = selectProjectTools(await this.read(), tools);
       projects[project] = selection;
-      await atomicJson(this.projectsPath, projects);
+      await this.writeProjectSettings(data);
       return selection;
+    });
+  }
+
+  async proposeProjectTools(workspace: string, sourceTaskId: string, id: string, tools: ProjectMcpTool[] | null) {
+    if (!/^[1-9]\d{0,19}$/.test(id) || tools !== null && !validProjectTools(tools)) throw new McpProposalError(400, 'Provide an original proposal ID and an MCP tool selection.');
+    const project = await this.proposalProject(workspace);
+    const requested = tools?.map(({ id, tool }) => ({ id, tool })) ?? null;
+    return this.changes.run(async () => {
+      const data = await this.readProjectSettings();
+      const prior = data.proposals?.find(item => item.project === project && item.sourceTaskId === sourceTaskId && item.id === id);
+      if (prior) {
+        if (stableJson(prior.tools) !== stableJson(requested)) throw new McpProposalError(409, 'The MCP project proposal already has different content.');
+        return toolProposalView(prior);
+      }
+      const connections = await this.read(), previous = data.projects[project] ?? null;
+      const effective = requested === null
+        ? connections.filter(connection => connection.enabled).flatMap(connection => connection.allowedTools.map(tool => ({ id: connection.definition.id, tool })))
+        : selectProjectTools(connections, requested);
+      const proposal: StoredToolProposal = { id, sourceTaskId, project, tools: requested, previous, effective,
+        baseline: projectBaseline(connections, previous, requested), state: 'pending', createdAt: new Date().toISOString() };
+      data.proposals = [...(data.proposals ?? []), proposal];
+      await this.writeProjectSettings(data);
+      return toolProposalView(proposal);
+    });
+  }
+
+  async projectToolProposals(workspace: string, sourceTaskId: string) {
+    const project = await this.proposalProject(workspace);
+    return ((await this.readProjectSettings()).proposals ?? []).filter(item => item.project === project && item.sourceTaskId === sourceTaskId).map(toolProposalView);
+  }
+
+  async decideProjectToolProposal(workspace: string, sourceTaskId: string, id: string, decision: McpProposalDecision) {
+    if (decision !== 'apply' && decision !== 'decline') throw new McpProposalError(400, 'Choose apply or decline.');
+    const project = await this.proposalProject(workspace);
+    const state = decision === 'apply' ? 'applied' : 'declined';
+    return this.changes.run(async () => {
+      const data = await this.readProjectSettings();
+      const proposal = data.proposals?.find(item => item.project === project && item.sourceTaskId === sourceTaskId && item.id === id);
+      if (!proposal) throw new McpProposalError(404, 'MCP project tool proposal not found in this conversation.');
+      if (proposal.state === state) return toolProposalView(proposal);
+      if (proposal.state !== 'pending') throw new McpProposalError(409, 'The MCP project proposal already has a different decision.');
+      if (decision === 'apply') {
+        const connections = await this.read();
+        if (projectBaseline(connections, data.projects[project] ?? null, proposal.tools) !== proposal.baseline) {
+          throw new McpProposalError(409, 'The MCP project scope changed. Ask for a new proposal.');
+        }
+        if (proposal.tools === null) delete data.projects[project];
+        else data.projects[project] = selectProjectTools(connections, proposal.tools);
+      }
+      proposal.state = state;
+      proposal.settledAt = new Date().toISOString();
+      await this.writeProjectSettings(data);
+      return toolProposalView(proposal);
     });
   }
 

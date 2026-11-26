@@ -296,6 +296,17 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         }
         return send(405, { error: 'Method not allowed' });
       }
+      const mcpProposal = /^\/v1\/tasks\/([a-f0-9-]{36})\/mcp-proposals(?:\/([1-9]\d{0,19}))?$/.exec(url.pathname);
+      if (mcpProposal) {
+        const [, taskId, id] = mcpProposal;
+        if (!id && req.method === 'GET') return send(200, await runtime.mcpSettingsProposals(taskId!));
+        if (id && req.method === 'POST') {
+          const { decision } = await body(req);
+          if (decision !== 'apply' && decision !== 'decline') throw new Error('Choose apply or decline.');
+          return send(200, await runtime.decideMcpProposal(taskId!, id, decision));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       const snapshotRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/snapshots(?:\/([a-f0-9-]{36})\/(preview|restore))?$/.exec(url.pathname);
       if (snapshotRoute) {
         const [, taskId, snapshotId, operation] = snapshotRoute;

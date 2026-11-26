@@ -28,7 +28,7 @@ import { LocalDiscovery, localContextInstructions, type DiscoveryOptions, type L
 import { conversationAnswer, conversationInstructions } from "./conversation.js";
 import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ModelProposalError, ProviderSettings, type ModelProposalDecision } from "./provider-settings.js";
-import { McpTools, type McpPin } from "./mcp-tools.js";
+import { McpProposalError, McpTools, type McpPin, type McpProposalDecision, type ProjectMcpTool } from "./mcp-tools.js";
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
@@ -50,6 +50,7 @@ import { Assistants, AssistantError, assistantRef, type AssistantRef, type Assis
 import { assistantPolicy, assistantTools } from './assistant-policy.js';
 import { chatAssistantsExtension } from './chat-assistants.js';
 import { chatModelProposals } from './chat-model-proposals.js';
+import { chatMcpProposals } from './chat-mcp-proposals.js';
 import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssistantWork, readAssistantAnswer, retireAssistantWork,
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
@@ -88,6 +89,7 @@ export interface TaskMeta {
   chatWorkItems?: { project: string };
   chatAssistants?: { project: string };
   modelProposals?: true;
+  mcpProposals?: true;
   historyRecall?: true;
   projectTaskCatalog?: true;
   projectCatalog?: true;
@@ -357,6 +359,43 @@ export class LocalRuntime {
   async decideProjectModel(id: string, proposalId: string, decision: ModelProposalDecision) {
     return this.providers.decideProposal(await this.modelProposalScope(id), id, proposalId, decision, this.config.model);
   }
+  private async mcpProposalScope(id: string) {
+    const meta = await this.metadata(id);
+    const project = !meta.remotePolicy && meta.mcpProposals ? meta.chatAssistants?.project : undefined;
+    if (!project || await memoryProject(meta.workspace) !== project) throw new McpProposalError(404, 'No MCP proposals in this conversation.');
+    return meta.workspace;
+  }
+  private async activeMcpProposalWorkspace(id: string) {
+    const workspace = await this.mcpProposalScope(id);
+    const active = this.active.get(id);
+    if (!active || active.meta.control !== 'active' || active.meta.thread?.archivedAt || await this.goalState(active)) {
+      throw new McpProposalError(409, 'A local ordinary conversation can propose MCP settings.');
+    }
+    return workspace;
+  }
+  private async proposeMcpConnection(id: string, proposalId: string, input: { connectionId: string; endpoint: string }) {
+    return this.changes.run(async () => this.mcp.proposeConnection(await this.activeMcpProposalWorkspace(id), id, proposalId, input));
+  }
+  private async proposeMcpProjectTools(id: string, proposalId: string, tools: ProjectMcpTool[] | null) {
+    return this.changes.run(async () => this.mcp.proposeProjectTools(await this.activeMcpProposalWorkspace(id), id, proposalId, tools));
+  }
+  private async mcpSettingsCatalog(id: string) {
+    const workspace = await this.mcpProposalScope(id);
+    return { selected: await this.mcp.projectTools(workspace),
+      available: (await this.mcp.list()).filter(connection => connection.enabled).map(({ id, allowedTools }) => ({ id, tools: allowedTools })) };
+  }
+  async mcpConnectionProposals(id: string) { return this.mcp.connectionProposals(await this.mcpProposalScope(id), id); }
+  async mcpSettingsProposals(id: string) {
+    const workspace = await this.mcpProposalScope(id);
+    return [...await this.mcp.connectionProposals(workspace, id), ...await this.mcp.projectToolProposals(workspace, id)];
+  }
+  async decideMcpProposal(id: string, proposalId: string, decision: McpProposalDecision) {
+    const workspace = await this.mcpProposalScope(id);
+    if ((await this.mcp.projectToolProposals(workspace, id)).some(proposal => proposal.id === proposalId)) {
+      return this.mcp.decideProjectToolProposal(workspace, id, proposalId, decision);
+    }
+    return this.mcp.decideConnectionProposal(workspace, id, proposalId, decision);
+  }
   private async snapshotWorkspace(id: string) {
     const meta = await this.metadata(id);
     if (meta.remotePolicy) throw new WorkspaceSnapshotError(404, 'Workspace snapshots belong to local tasks.');
@@ -515,7 +554,7 @@ export class LocalRuntime {
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
-        ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const } : {}),
+        ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
@@ -841,6 +880,11 @@ export class LocalRuntime {
         ...(projectTasks ? [projectTasks] : []),
         ...(!remote && meta.projectCatalog ? [projectCatalogExtension((section, limit, offset) => this.projectCatalog(meta.id, section, limit, offset))] : []),
         ...(!remote && meta.modelProposals ? [chatModelProposals((id, ref, reason) => this.proposeProjectModel(meta.id, id, ref, reason))] : []),
+        ...(!remote && meta.mcpProposals ? [chatMcpProposals({
+          propose: (id, input) => this.proposeMcpConnection(meta.id, id, input),
+          select: (id, tools) => this.proposeMcpProjectTools(meta.id, id, tools),
+          catalog: () => this.mcpSettingsCatalog(meta.id),
+        })] : []),
         ...(!remote && meta.threadTools ? [threadTools((args, input) => this.startThread(meta.id, args, input))] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),

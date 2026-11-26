@@ -16,6 +16,7 @@ import { ChatSession } from '../src/chat.js';
 import { conversationAnswer } from '../src/conversation.js';
 import type { Routine } from '../src/routines.js';
 import { fakeRoutineClock, until } from '../test/helpers.js';
+import { startMcpProposalService } from '../test/fixtures/mcp-proposal-service.js';
 
 let apiKey = process.env.SILICONFLOW_API_KEY ?? '';
 delete process.env.SILICONFLOW_API_KEY;
@@ -40,7 +41,7 @@ if (!original) {
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? template : undefined;
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -468,6 +469,82 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(calls.filter(message=>message.toolName==='work_item_update' && !message.isError).length,2);
     assert(!calls.some(message=>/reminder_(?:create|update)|task_prepare/.test(message.toolName)),'planning_no_execution_or_reminder');
     evidence.workItemPlanning={itemId:item.id,chatId:created.id,dateOnlySaved:true,timedDeadlineSaved:true,deadlineCleared:true,originalIdKept:true,restartNoModel:true,goalCreated:false,runs:0,requests};
+  });
+  if (selectedCases.includes('T07-mcp-scope-proposals')) await check('T07-mcp-scope-proposals', async () => {
+    const fixture = await startMcpProposalService();
+    const checkpoints: Record<string, unknown> = {};
+    evidence.mcpProjectScopeProposal = checkpoints;
+    try {
+      const connection = 'scope-demo', path = `/v1/settings/mcp/${connection}`;
+      await client.request('/v1/settings/mcp', 'POST', { id: connection, transport: 'http', url: fixture.address });
+      const probe = await client.request<{ revision: string; test?: { status: string } }>(path + '/test', 'POST', {});
+      assert.equal(probe.test?.status, 'ok');
+      await client.request(path + '/enable', 'POST', { revision: probe.revision, tools: ['status'] });
+      await client.request('/v1/settings/mcp/project', 'PUT', { workspace: alpha, tools: [{ id: connection, tool: 'status' }] });
+      const connectionsBefore = fixture.methods.length;
+      const events: string[] = [], term = new ChatSession(client, event => events.push(event.text), alpha);
+      await term.handle('请用 mcp_settings_catalog 查看项目工具范围，再用 propose_project_mcp_tools 建议设为空数组，供我确认。无需调用任何业务工具。');
+      const source = term.taskId!;
+      tasks.add(source);
+      const original = await until(() => server.runtime.status(source), status => status.messages.some(message =>
+        message.role === 'toolResult' && message.toolName === 'propose_project_mcp_tools' && !message.isError), 100_000);
+      await term.poll();
+      assert(events.some(text => text.includes('/mcp-proposals')));
+      const [draft] = await server.runtime.mcpSettingsProposals(source);
+      assert(draft && 'tools' in draft && draft.state === 'pending');
+      assert.deepEqual(draft.effective, []);
+      assert.deepEqual(draft.previous, [{ id: connection, tool: 'status' }]);
+      assert.deepEqual(original.mcpPins?.[0]?.tools, ['status']);
+      await term.handle(`/apply-mcp ${draft.id}`);
+      assert.deepEqual(await server.runtime.mcp.projectTools(alpha), []);
+      assert.deepEqual((await server.runtime.mcp.pins(beta))[0]?.tools, ['status']);
+      assert.deepEqual((await server.runtime.status(source)).mcpPins?.[0]?.tools, ['status']);
+      const next = await chat(alpha, '请直接回复 READY。');
+      assert.deepEqual(next.status.mcpPins, []);
+      assert.equal(fixture.methods.length, connectionsBefore);
+      Object.assign(checkpoints, { proposalSaved: true, ownerApplied: true, oldTaskPinned: true, otherProjectUnchanged: true,
+        newTaskHadEmptyScope: true, mcpNetworkCallsDuringChange: fixture.methods.length - connectionsBefore, requests });
+    } finally { await fixture.close(); }
+  });
+  if (selectedCases.includes('T06-mcp-proposals')) await check('T06-mcp-proposals', async () => {
+    const fixture = await startMcpProposalService();
+    const checkpoints: Record<string, unknown> = {};
+    evidence.mcpConnectionProposal = checkpoints;
+    try {
+      const events: string[] = [], term = new ChatSession(client, event => events.push(event.text), alpha);
+      await term.handle(`请用 propose_mcp_connection 建议一个 HTTP MCP。连接 ID 为 proposal-demo，地址为 ${fixture.address}。由我决定是否登记。`);
+      const source = term.taskId!;
+      tasks.add(source);
+      await until(() => server.runtime.status(source), status => status.messages.some(message =>
+        message.role === 'toolResult' && message.toolName === 'propose_mcp_connection' && !message.isError), 100_000);
+      await term.poll();
+      assert(events.some(text => text.includes('/mcp-proposals')));
+      const [draft] = await server.runtime.mcpConnectionProposals(source);
+      assert(draft?.state === 'pending');
+      assert.equal(draft.connectionId, 'proposal-demo');
+      assert.equal(draft.endpoint, fixture.address);
+      assert.deepEqual(await server.runtime.mcp.list(), []);
+      checkpoints.proposed = true;
+      await term.handle(`/apply-mcp ${draft.id}`);
+      assert.deepEqual(fixture.methods, []);
+      assert.equal((await server.runtime.mcp.list())[0]?.enabled, false);
+      checkpoints.registeredWithoutNetwork = true;
+      const path = `/v1/settings/mcp/${draft.connectionId}`;
+      const probe = await client.request<{ revision: string; test?: { status: string } }>(path + '/test', 'POST', {});
+      assert.equal(probe.test?.status, 'ok');
+      await client.request(path + '/enable', 'POST', { revision: probe.revision, tools: ['status'] });
+      await client.request('/v1/settings/mcp/project', 'PUT', { workspace: alpha, tools: [{ id: draft.connectionId, tool: 'status' }] });
+      const task = await client.request<{ id: string }>('/v1/tasks', 'POST', { workspace: alpha, confirmed: true,
+        objective: 'Use the enabled tool from the proposal-demo MCP server once to read the sample status. Use the actual tool, read its result, then submit a short text result with task_submit.' });
+      tasks.add(task.id);
+      const status = await until(() => server.runtime.status(task.id), state => state.messages.some(message => message.role === 'toolResult' &&
+        message.toolName.startsWith('mcp_proposal-demo_status_') && !message.isError && JSON.stringify(message.content).includes('PROPOSAL_TOOL_RESULT')), 100_000);
+      assert.deepEqual(status.mcpPins?.find(pin => pin.id === draft.connectionId)?.tools, ['status']);
+      assert.deepEqual((await server.runtime.status(source)).mcpPins, []);
+      if (status.status !== 'completed') await server.runtime.cancel(task.id);
+      Object.assign(checkpoints, { providerToolCalled: true, originalChatScopePreserved: true, testedTools: ['status'],
+        toolCalls: fixture.methods.filter(method => method === 'tools/call').length, requests });
+    } finally { await fixture.close(); }
   });
   if (proposalModel) await check('T05-model-proposals', async () => {
     const checkpoints: Record<string, unknown> = {};

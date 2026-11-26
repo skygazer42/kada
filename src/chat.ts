@@ -5,6 +5,7 @@ import { Writable, type Readable } from "node:stream";
 import type { HarnessClient, TaskMeta, TaskStatus } from "./client.js";
 import type { LocalRuntime } from "./runtime.js";
 import type { ModelProposal } from './provider-settings.js';
+import type { McpSettingsProposal } from './mcp-tools.js';
 import type { MemoryFactView } from "./user-memory.js";
 import { errorText, SerialQueue } from "./util.js";
 import { assistantText, briefText, progressText, usageText, verificationText } from "./presentation.js";
@@ -20,6 +21,7 @@ const HELP = `直接输入消息：普通问答直接回复，需要实际交付
 const ASSISTANT_WORK_HELP = '/assistant-work [工作ID] 查看同事工作或原结果\n/reply-assistant 工作ID 问题ID 答复\n/guide-assistant 工作ID 补充说明\n/stop-assistant 工作ID 停止已查看的工作';
 const THREAD_HELP = '/thread 标题 | 任务说明  从当前会话打开独立工作\n/title 标题  修改当前会话的标题\n/archive  归档当前会话\n/unarchive  将当前会话移回列表\n/tasks archived  查找已归档会话';
 const MODEL_PROPOSAL_HELP = '/model-proposals  查看当前会话的项目模型建议\n/apply-model 建议ID  检查连通性并应用\n/decline-model 建议ID  拒绝建议';
+const MCP_PROPOSAL_HELP = '/mcp-proposals  查看当前会话的 MCP 连接与范围建议\n/apply-mcp 建议ID  应用建议\n/decline-mcp 建议ID  拒绝建议';
 
 /** Conversation selection and delivery are independent of terminal rendering. */
 export class ChatSession {
@@ -59,6 +61,26 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (command === '/mcp-proposals' || command === '/apply-mcp' || command === '/decline-mcp') {
+        if (!this.taskId) throw new Error('先用 /attach 选择会话。');
+        const path = `/v1/tasks/${this.taskId}/mcp-proposals`;
+        if (command === '/mcp-proposals') {
+          const proposals = await this.client.request<McpSettingsProposal[]>(path);
+          this.info(proposals.length ? proposals.map(proposal => {
+            const { id, state } = proposal;
+            const details = 'tools' in proposal
+              ? `当前项目工具 ${proposal.previous === null ? '继承全局选择' : proposal.previous.map(item => `${item.id}/${item.tool}`).join('、') || '空名单'}\n建议 ${proposal.tools === null ? '继承全局选择 · ' : ''}${proposal.effective.map(item => `${item.id}/${item.tool}`).join('、') || '空名单'}`
+              : `${proposal.connectionId}\n${proposal.endpoint}`;
+            return `${id} · ${state} · ${details}` + (state === 'pending' ? `\n/apply-mcp ${id} · /decline-mcp ${id}` : '');
+          }).join('\n\n') : '当前会话没有 MCP 设置建议。');
+        } else {
+          if (!argument || !/^[1-9]\d{0,19}$/.test(argument)) throw new Error(`用法：${command} 建议ID`);
+          const proposal = await this.client.request<McpSettingsProposal>(`${path}/${argument}`, 'POST', { decision: command === '/apply-mcp' ? 'apply' : 'decline' });
+          this.info(proposal.state === 'registered' ? `连接 ${proposal.connectionId} 已登记，可用 npm run harness -- mcp test ${proposal.connectionId} 测试。`
+            : proposal.state === 'applied' ? '项目工具范围已更新，供新任务使用。' : '已拒绝 MCP 设置建议。');
+        }
+        return true;
+      }
       if (command === '/model-proposals' || command === '/apply-model' || command === '/decline-model') {
         if (!this.taskId) throw new Error('先用 /attach 选择会话。');
         const path = `/v1/tasks/${this.taskId}/model-proposals`;
@@ -184,7 +206,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n'+THREAD_HELP+'\n'+MODEL_PROPOSAL_HELP+'\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n'+THREAD_HELP+'\n'+MODEL_PROPOSAL_HELP+'\n'+MCP_PROPOSAL_HELP+'\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
@@ -353,6 +375,19 @@ export class ChatSession {
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     if (this.taskId !== id) return;
     for (const message of status.goal ? [] : status.messages) {
+      if (message.role === 'toolResult' && ['propose_mcp_connection', 'propose_project_mcp_tools'].includes(message.toolName) && !message.isError) {
+        const block = message.content.find(item => item.type === 'text');
+        if (block?.type !== 'text') continue;
+        let proposal: McpSettingsProposal;
+        try { proposal = JSON.parse(block.text); } catch { continue; }
+        if (proposal?.sourceTaskId !== id || !/^[1-9]\d{0,19}$/.test(proposal.id)) continue;
+        const key = `mcp-proposal:${proposal.id}`;
+        if (!this.printed.has(key)) {
+          this.printed.add(key);
+          this.info(`MCP 设置建议 ${proposal.id} · /mcp-proposals`);
+        }
+        continue;
+      }
       if (message.role === 'toolResult' && message.toolName === 'propose_model' && !message.isError) {
         const block = message.content.find(item => item.type === 'text');
         if (block?.type !== 'text') continue;

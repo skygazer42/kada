@@ -174,6 +174,8 @@ npm run harness -- skills rollback 方法名 版本
 
 ## MCP
 
+在新本机普通聊天中，可请助手建议登记一个 HTTP MCP 地址，或者调整项目使用的工具。用 `/mcp-proposals` 核对地址或新旧工具范围，再用 `/apply-mcp 建议ID` 应用或 `/decline-mcp 建议ID` 拒绝。登记后的连接沿下面的测试、登录和工具启用入口设置。项目工具建议应用到新任务。[契约与实测](superpowers/plans/2026-11-26-chat-mcp-proposals.md)
+
 使用既有服务的配置文件，例如：
 
 ```json

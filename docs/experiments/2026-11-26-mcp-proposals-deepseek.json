@@ -1,0 +1,32 @@
+{
+  "model": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+  "runner": "scripts/live-assistant-memory.ts",
+  "cases": [
+    {
+      "at": "2026-11-26T19:13:54.528Z",
+      "case": "T06-mcp-proposals",
+      "requests": 4,
+      "taskTokens": 15410,
+      "passed": true,
+      "proposalSavedBeforeOwnerDecision": true,
+      "registeredWithoutNetwork": true,
+      "testedAndSelectedTools": ["status"],
+      "realModelToolCalls": 1,
+      "originalChatScopePreserved": true
+    },
+    {
+      "at": "2026-11-26T19:23:40.624Z",
+      "case": "T07-mcp-scope-proposals",
+      "requests": 4,
+      "taskTokens": 27384,
+      "passed": true,
+      "projectScopeReviewedAndApplied": true,
+      "newTaskHadEmptyScope": true,
+      "oldTaskPinned": true,
+      "otherProjectUnchanged": true,
+      "mcpNetworkCallsDuringChange": 0
+    }
+  ],
+  "estimatedCostUsd": null,
+  "scope": "Synthetic local projects, a localhost Streamable HTTP MCP service, and real hosted model calls."
+}
