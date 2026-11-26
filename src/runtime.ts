@@ -1,9 +1,9 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { access, mkdir, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { Harness, LiveDoc, UserEntry, AssistantEntry, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
+import { Harness, LiveDoc, UserEntry, AssistantEntry, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Models } from "@earendil-works/pi-ai";
@@ -39,6 +39,7 @@ import { approvalExtension, approvalViews, approvalReport, decideApproval, reque
 import type { GithubIssue, GithubPullRequest } from './github-routine-events.js';
 import { modelAccountRefusal, type AccountRefusal } from './routine-account-backoff.js';
 import { reminderExtension } from './reminders.js';
+import { historyExtension, historyInstructions, historyMatch, historyQuery, type HistoryMessage } from './history.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -66,6 +67,7 @@ export interface TaskMeta {
   /** Absent on historical/explicit tasks. A chat creates GoalDoc only on task_prepare. */
   entrypoint?: "chat";
   chatReminders?: true;
+  historyRecall?: true;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
   chatBudget?: { costLimit: number; tokenLimit: number | null };
   learning?: boolean;
@@ -381,6 +383,7 @@ export class LocalRuntime {
         ...(options.prepare || options.chat ? { preparation: true } : {}),
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && !options.remote ? { chatReminders: true as const } : {}),
+        ...(!options.remote ? { historyRecall: true as const } : {}),
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
@@ -446,6 +449,63 @@ export class LocalRuntime {
       return { cursor: latest ?? null, messages, progressEvents, messageEntries };
     });
   }
+  private async historyProject(callerId: string) {
+    const caller = await this.metadata(callerId);
+    const project = !caller.remotePolicy && caller.historyRecall ? await memoryProject(caller.workspace) : undefined;
+    if (!project) throw new Error('Project history is unavailable for this task.');
+    return project;
+  }
+  private async *historyMessages(meta: TaskMeta): AsyncGenerator<HistoryMessage> {
+    const existing = this.active.get(meta.id)?.storage, path = join(this.directory(meta.id), 'session.sqlite');
+    if (!existing) await access(path);
+    const storage = existing ?? await openNodeSqliteStorage(path), seen = new Set<number>();
+    try {
+      if (!await storage.conversation(ROOT_CONVERSATION_ID, ctx)) throw new Error('Historical Pi conversation is missing.');
+      let cursor: Cursor | undefined;
+      do {
+        const page = await storage.scanSubmissions({ conversationId: ROOT_CONVERSATION_ID, order: 'descending' }, 200, cursor, ctx);
+        for (const submission of page.items) {
+          if (submission.type !== 'input' || !(submission.requestId?.startsWith('user:') || submission.requestId === 'initial' && !meta.routineOccurrenceId)) continue;
+          for (const id of [submission.entry, submission.status === 'done' ? submission.answer : undefined]) {
+            if (id === undefined || seen.has(id)) continue;
+            seen.add(id);
+            const entry = (await storage.entry(ROOT_CONVERSATION_ID, id, ctx))?.entry;
+            if (!UserEntry.is(entry) && !AssistantEntry.is(entry)) continue;
+            for (const message of entry.model ?? []) {
+              const text = message.role === 'user' ? typeof message.content === 'string' ? message.content : message.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : conversationAnswer(message);
+              if (text && (message.role === 'user' || message.role === 'assistant')) yield { taskId: meta.id, entryId: id, role: message.role, timestamp: message.timestamp, text };
+            }
+          }
+        }
+        cursor = page.next;
+      } while (cursor);
+    } finally { if (!existing) await storage.close(ctx); }
+  }
+  async searchHistory(callerId: string, query: string, limit = 8) {
+    const terms = historyQuery(query, limit);
+    // shortcut: scan original Pi history; add a derived index only if measured project-history latency warrants it.
+    return this.changes.run(async () => {
+      const project = await this.historyProject(callerId), hits: NonNullable<ReturnType<typeof historyMatch>>[] = [];
+      for (const meta of await this.metadataList()) {
+        if (meta.id === callerId || meta.remotePolicy || await memoryProject(meta.workspace) !== project) continue;
+        for await (const message of this.historyMessages(meta)) {
+          const hit = historyMatch(message, terms);
+          if (hit) { hits.push(hit); hits.sort((a, b) => b.score - a.score || b.timestamp - a.timestamp || a.taskId.localeCompare(b.taskId) || b.entryId - a.entryId); hits.length = Math.min(hits.length, limit); }
+        }
+      }
+      return hits.map(({ score: _score, ...hit }) => hit);
+    });
+  }
+  async readHistory(callerId: string, taskId: string, entryId: number) {
+    return this.changes.run(async () => {
+      const project = await this.historyProject(callerId);
+      const meta = (await this.metadataList()).find(meta => meta.id === taskId && meta.id !== callerId && !meta.remotePolicy);
+      if (meta && Number.isSafeInteger(entryId) && entryId > 0 && await memoryProject(meta.workspace) === project) {
+        for await (const message of this.historyMessages(meta)) if (message.entryId === entryId) return { ...message, text: message.text.slice(0, 8000), truncated: message.text.length > 8000 };
+      }
+      throw new Error('History message not found.');
+    });
+  }
   private async open(meta: TaskMeta, run: boolean): Promise<Active> {
 
     if (this.closing) throw new Error("Runtime is shutting down");
@@ -456,6 +516,7 @@ export class LocalRuntime {
       const remote=meta.remotePolicy==='workspace';
       const policy=remote ? remoteFilePolicy(workspace) : undefined;
       const imagePolicy = remote ? inputImageExtension(meta.model) : undefined;
+      const history = !remote && meta.historyRecall ? historyExtension((query, limit) => this.searchHistory(meta.id, query, limit), (taskId, entryId) => this.readHistory(meta.id, taskId, entryId)) : undefined;
       const nativeSkills = meta.resourcePolicy === "pi-skills";
       const localContext = !remote && meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective).catch(() => undefined) : undefined;
       const statements = () => this.userStatements(this.active.get(meta.id)!);
@@ -488,7 +549,7 @@ export class LocalRuntime {
       } satisfies Partial<GenerationHooks>}]}) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const preparation = preparationExtension(workspace, this.defaultBudget(meta), { remote });
-      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(history ? [history] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { remote, startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -496,6 +557,7 @@ export class LocalRuntime {
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
       const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now)] : []), ...(memory ? [memory] : []),
+        ...(history ? [history] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(policy ? [policy] : []),...(!remote && this.config.web !== false ? [webExtension(workspace)] : [])];
@@ -513,7 +575,7 @@ export class LocalRuntime {
       const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp).extension : undefined;
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined)}));
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...(history ? [history] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
@@ -527,6 +589,7 @@ export class LocalRuntime {
         ...(approvals ? [approvals] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
+        ...(history ? [history] : []),
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
         ...(meta.preparation && !remote ? [verification] : []),
@@ -544,7 +607,7 @@ export class LocalRuntime {
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: meta.entrypoint === "chat" ? chatExtensions : meta.preparation ? preparationExtensions : extensions,
-          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote && meta.chatReminders === true) : this.instructions(meta, !!meta.preparation) } });
+          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote && meta.chatReminders === true, !remote && meta.historyRecall === true) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
         this.active.set(meta.id, active);
@@ -669,7 +732,7 @@ export class LocalRuntime {
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
-        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy && active.meta.chatReminders === true) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
+        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy && active.meta.chatReminders === true, !active.meta.remotePolicy && active.meta.historyRecall === true) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
     const preparing = !!active.meta.preparation && !state?.confirmation;
@@ -685,7 +748,7 @@ export class LocalRuntime {
     await active.root.configure({ extensions: preparing ? active.preparationExtensions : active.executionExtensions,
       modelTools: !preparing && active.meta.resourcePolicy === "pi-skills" && !active.meta.remotePolicy && !state?.skills?.pins.length
         ? { remove: [runSkillScript] } : null,
-      instructions: this.instructions(active.meta, preparing) + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
+      instructions: this.instructions(active.meta, preparing) + (!active.meta.remotePolicy && active.meta.historyRecall ? '\n' + historyInstructions : '') + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
         (!preparing && active.meta.resourcePolicy === "pi-skills" ? skillInstructions(state?.skills, !!active.skills) : "") +
         (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
   }

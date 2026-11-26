@@ -62,7 +62,11 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 本机新聊天以可选元数据 chatReminders 固定通知工具能力，历史和远程任务不因升级得到它。工具只包装原 LocalRoutines 的 notify/once，项目身份复用 memoryProject；不把调用者提供的工作区或 action 透传。创建 ID 由原聊天和 Pi 工具 taskId 派生，重放即使已到期也返回同一规则。取消参数固定原修订，先读项目范围，再由原取消事务比较修订；否则规则在检查后被编辑成执行型任务时，原取消会跨过工具范围。 [OpenMausBot 原触发器工具](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L596) · [Pots 固定请求 ID](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/gateway/timers.ts#L429)
 
+项目历史工具以新任务的 historyRecall 标记固定能力，远程和旧任务不自动获得。来源范围复用 memoryProject，按 Pi 原提交身份筛选 initial/user 输入及最终助手正文；自动规则首次输入、监督、子任务回传和工具正文不能成为用户讨论。返回 taskId 与原 entryId，回读仍核对项目与提交归属。关闭的来源直接读取原 Pi Storage，不创建 Harness 或运行时；打开的来源复用已有 storage。分页保留压缩前原消息，片段与原文输出有界。 [OpenMausBot 历史工具](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L568) · [原文归属](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/index.ts#L13390)
+
 ## Alternatives considered
+
+另建 FTS 或向量索引能改善大规模检索和排序，但当前 Pi 已保存完整可分页历史；先从原存储做有限结果的字面查询，避免索引同步和恢复。复用整个旧任务 open 更短，却会装载工具、配置并让检索影响运行时；只取 Pi Storage，必要的已有格式迁移仍交给 Pi。直接把所有上下文条目当历史更全面，却会混入监督和工具结果，所以以原用户提交与回答身份作范围。
 
 只要求用户使用 `/remind` 无须增加模型工具，却不能完成普通中文对话里的提醒要求。把所有例行任务接口暴露给聊天能覆盖更多功能，但同时带来未来执行和预算权限；本次只给通知型单次提醒三个薄工具。另建提醒存储更方便做专用页面，却会重复原 Pi 定时与通知恢复，因此复用既有规则和 inbox。
 
@@ -129,6 +133,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+历史检索的模型输入只包含命中片段和按需原文，不把旧讨论提升为指令。原 Pi 提交跨 200 条分页、原生压缩、重置及重启后的身份均有回归；关闭来源不再被检索装载成 active 任务。DeepSeek V3.2 用 4 次请求找回原讨论并读原文，实际金额未知。当前为同项目其他本机对话的字面查询，尚未验证大规模历史性能、语义搜索或跨设备历史共享。
 
 聊天提醒的时间理解依赖所选模型。硅基流动 DeepSeek V3.2 以 6 次请求完成中文保存及重启后取消；7B 模型产生无效参数而失败，原工具拒绝并未保存提醒。实际 SIGKILL 覆盖创建后未回执、取消后未回执和取消前被编辑三种情况；普通聊天无 Goal，其他项目与远程会话不开放。模型费用未知，结果只证明所列场景，不能代表所有自然语言时间或模型。
 

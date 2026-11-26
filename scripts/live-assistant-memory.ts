@@ -38,7 +38,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'F11-chat-reminder' ? 8 : 32;
+const maxRequests = ['F11-chat-reminder','H01-project-history'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -206,6 +206,22 @@ try {
     assert.equal(new Set(history.messages.map((message:{sequence:number})=>message.sequence)).size,history.messages.length);
     assert.equal(requests-before,1,'reconnect must not generate a second response');
     evidence.disconnect = {taskId:status.id,requestId:recovered.requestId,clientClosedDuringRequest:true,modelRequests:requests-before,assistantReplies:1};
+  });
+  await check('H01-project-history',async()=>{
+    const {status:source} = await chat(alpha,'项目回顾：NEBULA_842 的数据库选择是 SQLite。只回复“已记下这次讨论”，不要调用记忆工具。');
+    const beforeRestart = requests;
+    await server.close(); server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'history_restart_no_model');
+    const {status:recalled,answer} = await chat(alpha,'这个项目之前的对话里，我们为 NEBULA_842 选择了什么数据库？请检索历史并读取原消息后回答。');
+    const search = recalled.messages.find(message=>message.role==='toolResult' && message.toolName==='history_search' && !message.isError);
+    const read = recalled.messages.find(message=>message.role==='toolResult' && message.toolName==='history_read' && !message.isError);
+    assert(search && read,'history_tools_succeeded');
+    const original = JSON.parse(read.content.filter(block=>block.type==='text').map(block=>block.text).join(''));
+    assert.equal(original.taskId,source.id,'history_original_task');
+    assert.match(original.text,/NEBULA_842.*SQLite/,'history_original_text');
+    assert.match(answer,/SQLite/i,'history_answer');
+    assert.equal(recalled.goal,undefined);
+    evidence.projectHistory={sourceTaskId:source.id,recalledTaskId:recalled.id,entryId:original.entryId,sourceRead:true,answerVerified:true,goalCreated:false,requests};
   });
   await check('F11-chat-reminder',async()=>{
     const due = Date.parse('2026-12-01T22:00:00Z');

@@ -75,7 +75,7 @@ test("clarify once, confirm standards and total budget, then repair and verify a
 test("preparation has no execution tools, revisions invalidate old consent, and execution cannot rewrite the confirmed brief", async () => {
   const f = await scriptedFixture(c => {
     if (hasTool(c, "task_prepare")) {
-      assert.deepEqual(getCurrentTools(c.messages).map(t => t.name).sort(), ["list_files", "read", "task_prepare", "task_status"]);
+      assert.deepEqual(getCurrentTools(c.messages).map(t => t.name).sort(), ["history_read", "history_search", "list_files", "read", "task_prepare", "task_status"]);
       if (!results(c, "write").length) return call("write", { path: "unauthorized.txt", content: "must not exist" });
       assert.equal(results(c, "write")[0]?.isError, true);
       return call("task_prepare", proposal({ budget: { maxEstimatedCostUsd: userText(c).includes("0.2") ? .2 : .5, maxDurationMs: 20000 } }));
