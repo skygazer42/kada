@@ -8,7 +8,7 @@ import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
 import type { Models } from "@earendil-works/pi-ai";
-import type { Config, ModelRef } from "./config.js";
+import { modelRef, type Config, type ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
 import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildInputs, firstChildQuestion, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, SerialQueue } from "./util.js";
@@ -55,7 +55,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
-import { ThreadReports, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
+import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
   type ReceivedThreadReport, type TaskThread, type ThreadOrigin, type ThreadReport } from './task-threads.js';
 import { TurnWorkspaceSnapshot, WorkspaceSnapshots, WorkspaceSnapshotError, containsWorkspacePath } from './workspace-snapshots.js';
 
@@ -528,10 +528,13 @@ export class LocalRuntime {
         }
       }
       const projectWorkspace = workspace === undefined || options.remote ? undefined : requestedWorkspace;
-      const inherited = thread?.openedBy === 'assistant' ? source : undefined;
+      const selectedModel = thread?.modelSelection;
+      const inherited = thread?.openedBy === 'assistant' || selectedModel ? source : undefined;
       const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : inherited?.assistant;
-      const projectModel = !role?.model || collaboratorRefs ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
-      const model = validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
+      const projectModel = (!selectedModel && !role?.model) || collaboratorRefs
+        ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
+      const model = selectedModel ? await selectThreadModel(this.options.models, selectedModel)
+        : validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
       const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(async ref => {
         const { id, revision, project, name, description, instructions, tools, model } = await this.assistants.select(requestedWorkspace, ref);
         return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? projectModel) };
@@ -589,16 +592,17 @@ export class LocalRuntime {
   }
 
   async startThread(sourceTaskId: string, input: Record<string, unknown>, sourceInput?: SubmissionId) {
-    if (Object.keys(input).some(key => !['title', 'message', 'requestId', 'reportBack'].includes(key)) ||
-      input.reportBack !== undefined && typeof input.reportBack !== 'boolean') throw new Error('Provide a thread title, message, request ID and optional boolean reportBack.');
+    if (Object.keys(input).some(key => !['title', 'message', 'requestId', 'reportBack', 'modelSelection'].includes(key)) ||
+      input.reportBack !== undefined && typeof input.reportBack !== 'boolean') throw new Error('Provide a thread title, message, request ID and optional reportBack or modelSelection.');
     const title = threadTitle(input.title);
+    const modelSelection = modelRef(input.modelSelection, 'Thread model selection');
     if (typeof input.message !== 'string' || input.message.includes('\0')) throw new Error('Provide the first thread message.');
     const requestId = sourceInput === undefined ? input.requestId : String(sourceInput);
     if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(requestId)) throw new Error('Provide an original thread request ID.');
     const openedBy = sourceInput === undefined ? 'owner' : 'assistant';
     const task = await this.create(input.message, undefined, [], { id: threadTaskId(sourceTaskId, openedBy, requestId), prepare: true,
-      openedThread: { sourceTaskId, title, openedBy, ...(input.reportBack ? { reportBack: true } : {}) }, sourceInput });
-    return { id: task.id, thread: task.thread!, confirmationRequired: true };
+      openedThread: { sourceTaskId, title, openedBy, ...(input.reportBack ? { reportBack: true } : {}), ...(modelSelection ? { modelSelection } : {}) }, sourceInput });
+    return { id: task.id, thread: task.thread!, model: task.model, confirmationRequired: true };
   }
 
   async editThread(id: string, input: Record<string, unknown>) {
@@ -902,7 +906,7 @@ export class LocalRuntime {
           select: (id, tools) => this.proposeMcpProjectTools(meta.id, id, tools),
           catalog: () => this.mcpSettingsCatalog(meta.id),
         })] : []),
-        ...(!remote && meta.threadTools ? [threadTools((args, input) => this.startThread(meta.id, args, input),
+        ...(!remote && meta.threadTools ? [threadTools(this.options.models, meta.model, (args, input) => this.startThread(meta.id, args, input),
           () => this.threadReportInProgress(this.active.get(meta.id)!))] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),
@@ -1524,7 +1528,7 @@ export class LocalRuntime {
         const reports = await tx.doc(ThreadReports);
         reports.outgoing ??= { taskId: id, sourceTaskId: thread.sourceTaskId, title: thread.title ?? 'Independent task',
           revision: state.revision, candidateId: state.candidate.id, completedAt: verification.completedAt,
-          summary: state.candidate.summary, artifacts: [...state.candidate.artifacts] };
+          summary: state.candidate.summary, artifacts: [...state.candidate.artifacts], model: active.meta.model };
       }
     });
     await this.queueThreadReport(active);

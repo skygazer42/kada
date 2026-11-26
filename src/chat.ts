@@ -19,7 +19,7 @@ export type ChatEvent = { kind: "info" | "answer" | "error"; text: string };
 function answerKey(message: Message, text: string): string { return `${message.timestamp}:${text}`; }
 const HELP = `直接输入消息：普通问答直接回复，需要实际交付时再提出任务说明与预算。\n\n/new [消息]       新建对话，原任务继续在后台运行\n/confirm          确认刚展示的任务说明与预算\n/run 目标         已有明确授权，沿用配置预算直接执行\n/memory list      查看当前项目记忆与来源\n/memory edit ID 内容 纠正一条记忆\n/memory forget ID 遗忘一条记忆\n/memory used      查看当前会话使用的记忆版本\n/tasks            列出最近的对话与任务\n/attach 任务ID    接回已有对话或任务\n/status           查看状态、预算、核验范围和进度\n/pause            暂停当前对话或任务\n/resume           恢复；显式补充一份配置/已确认预算，不代替目标确认\n/cancel           取消当前对话或任务\n/help             显示帮助\n/quit             退出聊天，后台任务继续运行`;
 const ASSISTANT_WORK_HELP = '/assistant-work [工作ID] 查看同事工作或原结果\n/reply-assistant 工作ID 问题ID 答复\n/guide-assistant 工作ID 补充说明\n/stop-assistant 工作ID 停止已查看的工作';
-const THREAD_HELP = '/thread 标题 | 任务说明  从当前会话打开独立工作\n/thread-report 标题 | 任务说明  独立工作验收后回传原会话\n/title 标题  修改当前会话的标题\n/archive  归档当前会话\n/unarchive  将当前会话移回列表\n/tasks archived  查找已归档会话';
+const THREAD_HELP = '/thread [--model provider/modelId] 标题 | 任务说明  从当前会话打开独立工作\n/thread-report [--model provider/modelId] 标题 | 任务说明  验收后回传原会话\n/title 标题  修改当前会话的标题\n/archive  归档当前会话\n/unarchive  将当前会话移回列表\n/tasks archived  查找已归档会话';
 const MODEL_PROPOSAL_HELP = '/model-proposals  查看当前会话的项目模型建议\n/apply-model 建议ID  检查连通性并应用\n/decline-model 建议ID  拒绝建议';
 const MCP_PROPOSAL_HELP = '/mcp-proposals  查看当前会话的 MCP 连接与范围建议\n/apply-mcp 建议ID  应用建议\n/decline-mcp 建议ID  拒绝建议';
 
@@ -31,7 +31,7 @@ export class ChatSession {
   private shownBrief?: { revision: number; digest: string };
   private shownApprovals = new Map<string, string>();
   private shownAssistantWork = new Map<string, string>();
-  private pendingThread?: { source: string; title: string; message: string; reportBack: boolean; requestId: string };
+  private pendingThread?: { source: string; title: string; message: string; reportBack: boolean; modelId?: string; requestId: string };
   constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef, private collaborators?: AssistantRef[]) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
   private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); this.shownAssistantWork.clear(); }
@@ -41,6 +41,7 @@ export class ChatSession {
     if (status.assistant) this.info(assistantText(status));
     this.info(`已接入${status.interaction === "chat" ? "对话" : "任务"} ${id}\n${status.interaction === "chat" ? "首条消息" : "目标"}：${status.objective}\n输出目录：${status.workspace}`);
     if (status.thread?.title) this.info(`标题 · ${status.thread.title}`);
+    if (status.thread?.modelSelection) this.info(`独立工作模型 · ${status.model.provider}/${status.model.modelId}`);
     if (status.thread?.sourceTaskId) this.info(`原会话 · /attach ${status.thread.sourceTaskId}`);
     if (status.thread?.archivedAt) this.info('会话已归档。输入 /unarchive 恢复后可继续。');
     if (!status.goal) {
@@ -102,20 +103,26 @@ export class ChatSession {
       if (reportBack || command === '/thread' || command === '/title' || command === '/archive' || command === '/unarchive') {
         const source = this.taskId;
         if (!source) throw new Error('先用 /attach 选择会话。');
-        if (!await this.client.healthy(reportBack ? 'thread-reports' : 'local-threads')) throw new Error('请连接支持该会话操作的当前版本后台。');
         const path = `/v1/tasks/${source}`;
         if (command === '/thread' || reportBack) {
-          const separator = argument?.indexOf('|') ?? -1;
-          if (!argument || separator < 1) throw new Error(`用法：${command} 标题 | 任务说明`);
-          const title = argument.slice(0, separator).trim(), message = argument.slice(separator + 1).trim();
+          const option = /^--model\s+([^/\s]+)\/(\S+)\s+([\s\S]+)$/.exec(argument ?? '');
+          const modelSelection = option ? { provider: option[1]!, modelId: option[2]! } : undefined;
+          const thread = option?.[3] ?? argument;
+          const separator = thread?.indexOf('|') ?? -1;
+          if (!thread || separator < 1 || !option && /^--model(?:\s|$)/.test(thread)) throw new Error(`用法：${command} [--model provider/modelId] 标题 | 任务说明`);
+          if (!await this.client.healthy(modelSelection ? 'thread-models' : reportBack ? 'thread-reports' : 'local-threads')) throw new Error('请连接支持该会话操作的当前版本后台。');
+          const title = thread.slice(0, separator).trim(), message = thread.slice(separator + 1).trim();
+          const modelId = modelSelection ? `${modelSelection.provider}/${modelSelection.modelId}` : undefined;
           const pending = this.pendingThread;
-          const requestId = pending?.source === source && pending.title === title && pending.message === message && pending.reportBack === reportBack ? pending.requestId : randomUUID();
-          this.pendingThread = { source, title, message, reportBack, requestId };
-          const task = await this.client.request<{ id: string }>(`${path}/threads`, 'POST', { title, message, requestId, ...(reportBack ? { reportBack } : {}) });
+          const requestId = pending?.source === source && pending.title === title && pending.message === message && pending.reportBack === reportBack && pending.modelId === modelId ? pending.requestId : randomUUID();
+          this.pendingThread = { source, title, message, reportBack, modelId, requestId };
+          const task = await this.client.request<{ id: string }>(`${path}/threads`, 'POST', { title, message, requestId,
+            ...(reportBack ? { reportBack } : {}), ...(modelSelection ? { modelSelection } : {}) });
           this.pendingThread = undefined;
           this.info(`已打开独立工作 · /attach ${task.id}`);
           await this.attach(task.id);
         } else {
+          if (!await this.client.healthy('local-threads')) throw new Error('请连接支持该会话操作的当前版本后台。');
           if (command === '/title' ? !argument : argument) throw new Error(command === '/title' ? '用法：/title 标题' : `用法：${command}`);
           const status = await this.client.request<TaskStatus>(path);
           const patch = command === '/title' ? { title: argument } : { archived: command === '/archive' };
@@ -379,7 +386,8 @@ export class ChatSession {
       const key = `thread-report:${report.taskId}`;
       if (this.printed.has(key)) continue;
       this.printed.add(key);
-      this.info(`独立工作回传 · ${report.title}\n${report.summary}\n/attach ${report.taskId}`);
+      const model = report.model ? ` · ${report.model.provider}/${report.model.modelId}` : '';
+      this.info(`独立工作回传 · ${report.title}${model}\n${report.summary}\n/attach ${report.taskId}`);
     }
     for (const message of status.goal ? [] : status.messages) {
       if (message.role === 'toolResult' && ['propose_mcp_connection', 'propose_project_mcp_tools'].includes(message.toolName) && !message.isError) {

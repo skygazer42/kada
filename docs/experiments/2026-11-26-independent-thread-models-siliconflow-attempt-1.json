@@ -1,0 +1,50 @@
+{
+  "at": "2026-11-26T21:06:26.641Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "T09-thread-models"
+  ],
+  "fullSuite": false,
+  "passed": false,
+  "maxRequests": 10,
+  "modelRequests": 2,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "T09-thread-models": {
+      "passed": false,
+      "detail": "independent_assertion_failed"
+    }
+  },
+  "evidence": {
+    "threadModels": {
+      "dispatches": [
+        "deepseek-ai/DeepSeek-V3.2",
+        "Qwen/Qwen2.5-7B-Instruct"
+      ],
+      "childToolsSpecifiedByFixture": true,
+      "source": "61c2e442-efc5-4dcc-a09a-eb6fab325e35",
+      "child": "2af02564-587a-8212-bb77-bd5901856095",
+      "preparation": "failed"
+    }
+  },
+  "tasks": [
+    {
+      "id": "61c2e442-efc5-4dcc-a09a-eb6fab325e35",
+      "tokens": 9307,
+      "input": 9301,
+      "output": 6,
+      "cached": 0
+    },
+    {
+      "id": "2af02564-587a-8212-bb77-bd5901856095",
+      "tokens": 0,
+      "input": 0,
+      "output": 0,
+      "cached": 0
+    }
+  ],
+  "totalTaskTokens": 9307,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

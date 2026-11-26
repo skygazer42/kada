@@ -40,13 +40,23 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? template : undefined;
+const chatChoosesThreadModel = process.env.KADA_LIVE_CASES === 'T09-thread-models-chat';
+const threadModelTest = chatChoosesThreadModel || process.env.KADA_LIVE_CASES === 'T09-thread-models';
+const otherModel = proposalModel ?? (threadModelTest ? template : undefined);
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['A02-chat-assistants','T08-thread-reports'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['A02-chat-assistants','T08-thread-reports'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadModelTest || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
-const options = (input:any) => {
+const threadDispatches: string[] = [];
+const options = (input:any, selected: string, context: TranscriptContext) => {
   assert(requests < maxRequests,'Live request limit reached.');requests++;
-  return {...input,maxTokens:Math.min(input?.maxTokens ?? 1536,1536),signal:AbortSignal.any([deadline,...(input?.signal ? [input.signal] : [])])};
+  const request = {...input,maxTokens:Math.min(input?.maxTokens ?? 1536,1536),signal:AbortSignal.any([deadline,...(input?.signal ? [input.signal] : [])])};
+  if (!threadModelTest) return request;
+  threadDispatches.push(selected);
+  if (selected !== template.id) return request;
+  const stage = getCurrentTools(context.messages).some(tool => tool.name === 'task_submit') ? 'task_submit' : 'task_prepare';
+  const done = context.messages.some(message => message.role === 'toolResult' && message.toolName === stage && !message.isError);
+  return { ...request, toolChoice: done ? 'none' : { type: 'function', function: { name: stage } } };
 };
 function observe<T>(stream: T): T {
   onModelRequest?.();
@@ -56,9 +66,9 @@ const models = createModels();
 let protectedMarker: string | undefined;
 let onModelContext: ((context: TranscriptContext) => void) | undefined;
 function protectedContext(context: TranscriptContext) { assert(!protectedMarker || !JSON.stringify(context).includes(protectedMarker),'protected_value_absent_from_model_context'); onModelContext?.(context); }
-models.setProvider(createProvider({id:'siliconflow',models:proposalModel && proposalModel.id !== model.id ? [model, proposalModel] : [model],baseUrl:model.baseUrl,
+models.setProvider(createProvider({id:'siliconflow',models:otherModel && otherModel.id !== model.id ? [model, otherModel] : [model],baseUrl:model.baseUrl,
   auth:{apiKey:{name:'SiliconFlow live validation',resolve:async()=>({auth:{apiKey}})}},
-  api:{stream:(selected,context,config)=>{protectedContext(context);return observe(native.stream(selected,context,options(config)));},streamSimple:(selected,context,config)=>{protectedContext(context);return observe(native.streamSimple(selected,context,options(config)));}}}));
+  api:{stream:(selected,context,config)=>{protectedContext(context);return observe(native.stream(selected,context,options(config, selected.id, context)));},streamSimple:(selected,context,config)=>{protectedContext(context);return observe(native.streamSimple(selected,context,options(config, selected.id, context)));}}}));
 const directory = resolve('.harness/live-assistant-memory',randomUUID());
 const home = join(directory,'home'),alpha=join(directory,'alpha'),beta=join(directory,'beta');
 await Promise.all([home,join(directory,'.git'),join(alpha,'.git'),join(beta,'.git')].map(path=>mkdir(path,{recursive:true})));
@@ -604,6 +614,73 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(requests, beforeRestore);
     evidence.workspaceSnapshots = { originalFile: filename, automaticBeforeTurn: true, editVerified: true, stoppedAfterWrite: edited.status !== 'completed', previewBoundRestore: true,
       daemonRestarted: true, undoRecoveredEditedBytes: true, restoreRequests: requests - beforeRestore, requests };
+  });
+  if (threadModelTest) await check(chatChoosesThreadModel ? 'T09-thread-models-chat' : 'T09-thread-models', async () => {
+    assert.notEqual(modelId, template.id, 'Set the source model to DeepSeek for this two-model fixture.');
+    const checks: Record<string, unknown> = { dispatches: threadDispatches, childToolsSpecifiedByFixture: true };
+    evidence.threadModels = checks;
+    const terminal = new ChatSession(client, () => {}, alpha);
+    await terminal.handle('这是合成验收的原会话。请只回复 SOURCE_READY_614。');
+    const source = terminal.taskId!;
+    tasks.add(source);
+    checks.source = source;
+    const ready = await until(() => server.runtime.status(source), state => state.status === 'answered', 95_000);
+    assert.equal(ready.goal, undefined);
+    assert.deepEqual([...new Set(threadDispatches)], [modelId]);
+    const beforeChild = threadDispatches.length;
+    const task = '纯文本报告。先 task_prepare，outcome 为“核对合成数值”，deliverables 为 ["文本"]，inputs 和 assumptions 和 questions 为空数组，scope 为 ["合成验收"]，criteria 只有 {"text":"结果是 42","method":"inspect"}。确认后直接 task_submit，summary 为 "SECOND_OPINION_42"，artifacts 为空数组，criteria 为 [{"id":1,"status":"passed","evidence":"19+23=42"}]。';
+    let child: string;
+    if (chatChoosesThreadModel) {
+      await terminal.handle('合成验收，请先使用 list_models 搜索 Qwen2.5-7B-Instruct，再用 start_thread 开一个名为“聊天选模型”的独立任务。将目录返回的精确 provider 和 modelId 填入 model_selection，并开启 report_back。新任务是' + task + '开好后简短回复。');
+      const opened = await until(() => server.runtime.status(source), state => state.messages.some(message => message.role === 'toolResult' && message.toolName === 'start_thread' && !message.isError), 155_000);
+      const listing = opened.messages.find(message => message.role === 'toolResult' && message.toolName === 'list_models');
+      assert(listing?.role === 'toolResult' && !listing.isError);
+      const catalog = JSON.parse(listing.content.map(part => part.type === 'text' ? part.text : '').join(''));
+      assert(catalog.items.some((item: {provider: string; modelId: string}) => item.provider === 'siliconflow' && item.modelId === template.id));
+      const receipt = opened.messages.find(message => message.role === 'toolResult' && message.toolName === 'start_thread' && !message.isError);
+      assert(receipt?.role === 'toolResult');
+      const admitted = JSON.parse(receipt.content.map(part => part.type === 'text' ? part.text : '').join(''));
+      assert.equal(admitted.model.modelId, template.id);
+      assert.equal(admitted.thread.reportBack, true);
+      child = admitted.id;
+      checks.chatCatalogAndStart = true;
+      await terminal.attach(child);
+    } else {
+      await terminal.handle(`/thread-report --model siliconflow/${template.id} 模型分流 | ${task}`);
+      child = terminal.taskId!;
+    }
+    tasks.add(child);
+    checks.child = child;
+    const selected = await until(() => server.runtime.status(child), state => ['awaiting_confirmation','failed','budget_limited'].includes(state.status), 115_000);
+    checks.preparation = selected.status;
+    assert.equal(selected.status, 'awaiting_confirmation');
+    assert.equal(selected.model.modelId, template.id);
+    assert.equal(selected.goal?.confirmation, undefined);
+    if (chatChoosesThreadModel) {
+      assert(threadDispatches.slice(beforeChild).includes(template.id));
+      await until(() => server.runtime.status(source), state => state.status === 'answered', 100_000);
+    } else assert.deepEqual([...new Set(threadDispatches.slice(beforeChild))], [template.id]);
+    const beforeConfirm = threadDispatches.length;
+    await terminal.poll();
+    await terminal.handle('/confirm');
+    const delivered = await until(() => server.runtime.status(child), state => ['completed','failed','needs_attention','budget_limited'].includes(state.status), 145_000);
+    checks.execution = delivered.status;
+    assert.equal(delivered.status, 'completed');
+    assert.match(delivered.goal?.candidate?.summary ?? '', /SECOND_OPINION_42/);
+    const returned = await until(() => server.runtime.status(source), state => state.status === 'answered' && state.submission?.requestId === 'thread-report:' + child, 105_000);
+    const modelsAfterConfirm = threadDispatches.slice(beforeConfirm);
+    assert.deepEqual([...new Set(modelsAfterConfirm)], [template.id, modelId]);
+    assert.equal(modelsAfterConfirm.at(-1), modelId);
+    assert.equal(returned.model.modelId, modelId);
+    assert.equal(returned.threadReports[0]?.model?.modelId, template.id);
+    assert.equal(returned.threadReports[0]?.candidateId, delivered.goal?.candidate?.id);
+    assert(returned.messages.map(conversationAnswer).filter(Boolean).at(-1));
+    const beforeRestart = requests;
+    await server.close(); server = await serve(config, serverOptions);
+    assert.deepEqual((await server.runtime.status(source)).threadReports, returned.threadReports);
+    assert.equal((await server.runtime.status(child)).model.modelId, template.id);
+    assert.equal(requests, beforeRestart);
+    Object.assign(checks, { preparationModel: template.id, executionAndReturnModels: modelsAfterConfirm, originalModel: modelId, receiptSurvivedRestart: true });
   });
   const reportThread = selectedCases.includes('T08-thread-reports');
   if (reportThread || selectedCases.includes('T03-local-threads')) await check(reportThread ? 'T08-thread-reports' : 'T03-local-threads', async () => {

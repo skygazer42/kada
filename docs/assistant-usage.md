@@ -20,6 +20,8 @@
 
 要在验收后回到原会话看结果，可用 `/thread-report 独立核对 | 核对这一份材料`，或在聊天里说明「做完后回到当前会话告诉我结果」。回传保留原任务的 `/attach` 入口。空闲的本机普通聊天会在剩余额度内续答。来源有待答、已进入执行任务或已停止时，可以在来源查看回传记录。[回传契约](superpowers/plans/2026-11-26-thread-report-back.md)
 
+需要第二种模型的意见时，可在标题前加 `--model provider/modelId`。例如 `/thread-report --model siliconflow/Qwen/Qwen2.5-7B-Instruct 独立复核 | 核对材料中的数值`。也可在普通聊天中请助手列出可用模型，再明确指定其中一个。回传会显示交付所用模型。 [模型选择与验收](superpowers/plans/2026-11-26-independent-thread-models.md)
+
 `/title 标题` 修改当前会话的显示名称。结清工作后用 `/archive` 归档，`/tasks archived` 查看列表，`/attach 任务ID` 阅读历史，`/unarchive` 恢复显示和继续输入。来源、原对话、交付和已耗额度随原任务保存。[会话管理契约](superpowers/plans/2026-11-26-local-threads.md)
 
 ## 工作区快照

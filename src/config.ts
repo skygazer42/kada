@@ -52,7 +52,7 @@ function optionalBoolean(value: unknown, name: string, fallback: boolean): boole
   return value;
 }
 
-function modelRef(value: unknown, name: string): ModelRef | undefined {
+export function modelRef(value: unknown, name: string): ModelRef | undefined {
   if (value === undefined) return;
   if (!value || typeof value !== "object") throw new Error(`${name} must contain provider and modelId`);
   const m = value as Record<string, unknown>;

@@ -4,7 +4,7 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
 import { ChatSession } from '../src/chat.js';
 import { createClient, type TaskStatus } from '../src/client.js';
 import { serve } from '../src/server.js';
@@ -28,6 +28,12 @@ test('the owner opens, names, archives and restores an independent task through 
     }
     return fauxAssistantMessage('这是原对话。');
   });
+  const alternate = { provider: 'terminal-alternate', modelId: 'catalog/selected' };
+  const second = fauxProvider({ provider: alternate.provider, models: [{ id: alternate.modelId }] });
+  second.setResponses(Array.from({ length: 6 }, () => context => hasTool(context, 'task_submit')
+    ? call('task_submit', { summary: '另一模型已核对。', artifacts: [], criteria: [{ id: 1, status: 'passed', evidence: '合成样本一致。' }] })
+    : call('task_prepare', brief)));
+  f.models.setProvider(second.provider);
   await f.runtime.close();
   const socket = createServer();
   await new Promise<void>(resolve => socket.listen(0, '127.0.0.1', resolve));
@@ -38,11 +44,16 @@ test('the owner opens, names, archives and restores an independent task through 
   t.after(async () => { await server.close(); await f.close(); });
   const client = createClient(settings), events: string[] = [];
   let acceptedRequest: string | undefined;
+  let acceptedModelRequest: string | undefined;
   const chat = new ChatSession({ healthy: client.healthy, async request<T>(path: string, method?: string, value?: unknown) {
     const result = await client.request<T>(path, method, value);
     if (path.endsWith('/threads') && !acceptedRequest) {
       acceptedRequest = (value as { requestId: string }).requestId;
       throw new Error('Lost thread response.');
+    }
+    if (path.endsWith('/threads') && (value as { modelSelection?: object }).modelSelection && !acceptedModelRequest) {
+      acceptedModelRequest = (value as { requestId: string }).requestId;
+      throw new Error('Lost model selection response.');
     }
     return result;
   } }, event => events.push(event.text), f.workspace);
@@ -94,16 +105,23 @@ test('the owner opens, names, archives and restores an independent task through 
   assert.equal((await server.runtime.status(parent)).status, 'answered');
   assert.deepEqual((await server.runtime.status(parent)).threadReports, []);
   await chat.attach(parent);
-  await chat.handle('/thread-report 带回报告 | 核对合成样本');
+  await assert.rejects(chat.handle('/thread --model invalid 带回报告 | 核对合成样本'), /用法/);
+  const command = '/thread-report --model terminal-alternate/catalog/selected 带回报告 | 核对合成样本';
+  await assert.rejects(chat.handle(command), /Lost model selection response/);
+  await chat.handle(command);
   const reporting = chat.taskId!;
   const pending = await until(() => server.runtime.status(reporting), status => status.status === 'awaiting_confirmation');
   assert.equal(pending.thread?.reportBack, true);
+  assert.equal(pending.thread?.title, '带回报告');
+  assert.deepEqual(pending.model, alternate);
+  assert.equal((await server.runtime.list()).length, 3);
   await chat.poll();
   await chat.handle('/confirm');
   await until(() => server.runtime.status(parent), status => status.threadReports.some(report => report.taskId === reporting));
   await chat.attach(parent);
   await chat.poll();
   assert.equal(events.filter(text => text.includes('独立工作回传') && text.includes(`/attach ${reporting}`)).length, 1);
+  assert(events.some(text => text.includes('独立工作回传') && text.includes('terminal-alternate/catalog/selected')));
 });
 
 test('the chat tool prepares one independent thread for its original Pi input', async t => {
