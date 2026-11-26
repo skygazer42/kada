@@ -1,0 +1,22 @@
+{
+  "targetCommit": "879af230801e700bc6dbae3da45a1a3260e73bd0",
+  "target": "immutable Git commit",
+  "credentialScan": {
+    "tool": "TruffleHog",
+    "version": "3.100.1",
+    "officialArchiveSha256Matched": true,
+    "status": "clean",
+    "durationSeconds": 27.1,
+    "adapter": "Only Windows drive file URI spelling normalized; all scanner flags and exit codes preserved."
+  },
+  "codeReview": {
+    "engine": "codex",
+    "requestedModel": "gpt-5.6-sol",
+    "completed": false,
+    "status": "engine_authentication_failed",
+    "httpStatus": 401,
+    "reason": "Missing bearer or basic authentication in header.",
+    "verdict": null,
+    "note": "The process ended without a code-review result. Scanner success is not code-review success; authentication configuration and safety checks were not modified."
+  }
+}

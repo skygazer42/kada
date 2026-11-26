@@ -66,4 +66,4 @@ owner：GET/POST `/v1/assistants`（GET 用 workspace 查询，POST 带 workspac
 
 DeepSeek V3.2 的首轮模型提议 30 秒执行预算，确认后因可选计划/进度调用到限，未写文件；安全边界没有被扩大。第二轮明确使用 180 秒、100,000 token、配置费用上限 1 并跳过可选计划，通过旧 v1/新 v2、原确认、写入一次、精确字节及实际模型上下文检查。首轮 6 次、第二轮 6 次，合计 12 次请求与 41,924 已知 token，金额及被中断请求费用未知。[失败记录](../experiments/2026-11-26-named-assistant-deepseek-attempt-1.json) · [通过记录](../experiments/2026-11-26-named-assistant-deepseek.json)
 
-独立审查的临时扫描器来自 TruffleHog 官方 3.100.1 发布且归档 SHA-256 与官方清单一致。Windows 本地快照路径把读取造成的 atime 变化判作修改，mtime、size 和 inode 未变；不修改审查器安全检查，改在本地提交后通过支持的 commit 模式审查不可变 Git 内容。审查结论另记，当前不声称已通过。
+独立审查针对不可变提交 `879af23`。临时扫描器来自 TruffleHog 官方 3.100.1，归档 SHA-256 与官方清单一致；Windows 本地读取的 atime 误判通过支持的 commit 模式避免，扫描器的 Windows drive URI 由薄适配只转换拼写，保留全部扫描参数和退出码。凭据扫描通过（27.1 秒）。审查模型随后因未携带认证访问 Responses API 返回 401，进程已结束，未产生代码审查结论；不修改安全检查或既有认证配置，不声称独立审查通过。[收尾记录](../experiments/2026-11-26-named-assistant-review.json)
