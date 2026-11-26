@@ -20,6 +20,16 @@
 
 原 CLI `work-items edit 工作项ID 文件.json` 也支持 `{ "revision": 1, "status": "done", "archived": true }`，标题和说明可同时修改；不删除原工作项或运行记录。
 
+待办还可保存 `low/normal/high/urgent` 优先级，以及日期或精确时刻截止。例如说“把这条待办设为高优先级，截止纽约时间 2026 年 12 月 1 日，先不要执行”。助手沿同一条记录保存；时间或时区不清楚时需先补齐。截止只用于规划，不会创建提醒；需要提醒时单独提出。
+
+CLI 创建/编辑的 JSON 可带 `priority`、`dueDate`、`dueAt`、`timeZone`。日期截止保留为 `YYYY-MM-DD`，精确时刻须带 `Z` 或 UTC 偏移；两种截止互斥。下面的修改将日期截止改成纽约时间 17:00：
+
+```json
+{ "revision": 1, "priority": "high", "dueDate": null, "dueAt": "2026-12-01T17:00:00-05:00", "timeZone": "America/New_York" }
+```
+
+用 `dueDate: null` 或 `dueAt: null` 清空相应截止；切换种类时明确清空原字段。未填写规划字段的旧记录按普通优先级、无截止、UTC 展示，读取不改原文件。已分享的手机卡片和详情可查看优先级、截止及逾期，仍无规划编辑权限。日期按保存的时区跨天才逾期；完成或归档后不显示逾期。修改规划保留原执行目标和运行修订。[源码及验收范围](superpowers/plans/2026-11-26-work-item-planning-research.md)
+
 ```text
 /memory list
 /memory edit 记忆ID 新的内容

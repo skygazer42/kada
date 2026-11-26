@@ -1,0 +1,17 @@
+{
+  "at": "2026-11-26T06:59:43.7808461Z",
+  "passed": true,
+  "surface": "Local Chromium",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "clientTimeZone": "Asia/Tokyo",
+  "storedTimeZone": "America/New_York",
+  "dateOnly": "2026-11-01",
+  "timedLocalDisplay": "11/1/2026, 1:30:00 AM EST",
+  "completedItemOverdueRemoved": true,
+  "draftPreserved": true,
+  "noHorizontalOverflow": true,
+  "scope": "Synthetic local task and real browser; no physical phone or macOS validation."
+}

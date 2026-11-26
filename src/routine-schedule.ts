@@ -24,7 +24,7 @@ const dayMs = 86_400_000;
 const minuteMs = 60_000;
 const wallTimePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
-function explicitInstant(value: string, label: string): number {
+export function explicitInstant(value: string, label: string): number {
   const at = typeof value === "string" ? Date.parse(value) : NaN;
   if (!Number.isFinite(at) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) {
     throw new Error(`${label} must have an ISO datetime with an explicit offset.`);

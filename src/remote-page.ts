@@ -418,6 +418,14 @@ function workItemState(item) {
   return { open: "To do", parked: "On hold", done: "Done" }[item.status] + (item.archived ? " · Archived" : "");
 }
 
+function workItemPlanning(item) {
+  const parts = ["Priority: " + item.priority];
+  if (item.dueDate) parts.push("Due " + item.dueDate + " (" + item.timeZone + ")");
+  else if (item.dueAt) parts.push("Due " + new Date(item.dueAt).toLocaleString("en-US", { timeZone: item.timeZone, timeZoneName: "short" }) + " (" + item.timeZone + ")");
+  if (item.overdue) parts.push("Overdue");
+  return parts.join(" · ");
+}
+
 async function refreshWorkItems() {
   const device = identity;
   if (!device?.workItems) return;
@@ -450,6 +458,7 @@ async function refreshWorkItems() {
     button.setAttribute("aria-controls", "work-item-detail");
     button.setAttribute("aria-expanded", String(row.id === selected));
     element("p", workItemState(row), item);
+    element("p", workItemPlanning(row), item);
   }
   workItemsPanel.hidden = !rows.length;
   if (selected) await refreshWorkItem(selected, device);
@@ -478,6 +487,7 @@ async function refreshWorkItem(id, device) {
   workItemDetail.replaceChildren();
   element("h3", workItem.title + " · Revision " + workItem.revision, workItemDetail);
   element("p", "Todo: " + workItemState(workItem), workItemDetail);
+  element("p", workItemPlanning(workItem), workItemDetail);
   element("p", workItem.objective, workItemDetail);
   if (!workItem.runs.some(run => run.id === selectedWorkItemRun)) selectedWorkItemRun = "";
   if (!workItem.runs.length) {

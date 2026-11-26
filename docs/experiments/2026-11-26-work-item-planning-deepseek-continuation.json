@@ -1,0 +1,18 @@
+{
+  "at": "2026-11-26T06:59:13.162Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "passed": true,
+  "continuedOriginalSession": "4f3c9f37-5afc-49e1-be57-4519828397c1",
+  "initialObserverTimedOutAfterCommittedUpdate": true,
+  "expiredWindowResumed": true,
+  "originalModelRequests": 5,
+  "continuationModelRequests": 3,
+  "combinedModelRequests": 8,
+  "totalKnownTaskTokens": 56332,
+  "estimatedCostUsd": null,
+  "state": {
+    "status": "answered",
+    "goalCreated": false
+  },
+  "note": "The first observer aborted a still-running final reply after 90 seconds. This continues the same original Pi conversation and item; the expired synthetic turn window was explicitly resumed if needed. No repeat create/update. Interrupted provider billing is unknown."
+}

@@ -3,10 +3,13 @@ import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { memoryProject } from "./memory-sources.js";
 import { atomicJson, readJson, SerialQueue } from "./util.js";
+import { explicitInstant } from './routine-schedule.js';
 
 export type WorkItemLink = { id: string; revision: number };
 export type WorkItemRun = { id: string; workItem?: WorkItemLink; preparation?: boolean };
 export type WorkItemStatus = 'open' | 'parked' | 'done';
+export type WorkItemPriority = 'low' | 'normal' | 'high' | 'urgent';
+type Planning = { priority: WorkItemPriority; dueDate: string | null; dueAt: string | null; timeZone: string };
 export type WorkItem = WorkItemLink & {
   project: string;
   workspace: string;
@@ -17,8 +20,9 @@ export type WorkItem = WorkItemLink & {
   completedAt: number | null;
   createdAt: number;
   updatedAt: number;
-};
-type StoredWorkItem = Omit<WorkItem, 'status' | 'archived' | 'completedAt'> & Partial<Pick<WorkItem, 'status' | 'archived' | 'completedAt'>> & {
+} & Planning;
+type LegacyFields = 'status' | 'archived' | 'completedAt' | keyof Planning;
+type StoredWorkItem = Omit<WorkItem, LegacyFields> & Partial<Pick<WorkItem, LegacyFields>> & {
   operations?: { requestId: string; fingerprint: string; result: WorkItem }[];
 };
 export type WorkItemRequest = { requestId: string; project: string };
@@ -26,6 +30,7 @@ export type WorkItemRequest = { requestId: string; project: string };
 function view(item: StoredWorkItem): WorkItem {
   const { id, revision, project, workspace, title, objective, createdAt, updatedAt } = item;
   return { id, revision, project, workspace, title, objective, createdAt, updatedAt,
+    priority: item.priority ?? 'normal', dueDate: item.dueDate ?? null, dueAt: item.dueAt ?? null, timeZone: item.timeZone ?? 'UTC',
     status: item.status ?? 'open', archived: item.archived ?? false, completedAt: item.completedAt ?? null };
 }
 
@@ -43,7 +48,7 @@ function requestKey(request?: WorkItemRequest) {
 function replay(items: StoredWorkItem[], requestId: string, fingerprint: string): WorkItem | undefined {
   for (const item of items) for (const operation of item.operations ?? []) if (operation.requestId === requestId) {
     if (operation.fingerprint !== fingerprint) throw new WorkItemError(409, 'This work item request already has different content.');
-    return operation.result;
+    return view(operation.result);
   }
 }
 
@@ -70,6 +75,46 @@ function text(value: unknown, label: string, limit: number): string {
     throw new WorkItemError(400, `Provide a work item ${label} of up to ${limit} characters.`);
   }
   return value.trim();
+}
+
+function planning(input: Record<string, unknown>): Partial<Planning> {
+  const value: Partial<Planning> = {};
+  if (input.priority !== undefined) {
+    if (!['low', 'normal', 'high', 'urgent'].includes(input.priority as string)) throw new WorkItemError(400, 'Priority must be low, normal, high or urgent.');
+    value.priority = input.priority as WorkItemPriority;
+  }
+  if (input.dueDate !== undefined) {
+    const day = input.dueDate;
+    if (day !== null && (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day) ||
+      !Number.isFinite(Date.parse(day + 'T00:00:00Z')) || new Date(day + 'T00:00:00Z').toISOString().slice(0, 10) !== day)) throw new WorkItemError(400, 'Provide a valid date-only deadline as YYYY-MM-DD, or null.');
+    value.dueDate = day as string | null;
+  }
+  if (input.dueAt !== undefined) {
+    if (input.dueAt === null) value.dueAt = null;
+    else {
+      if (typeof input.dueAt !== 'string') throw new WorkItemError(400, 'Provide a deadline with an explicit UTC offset, or null.');
+      try { value.dueAt = new Date(explicitInstant(input.dueAt, 'A deadline')).toISOString(); }
+      catch { throw new WorkItemError(400, 'Provide a valid deadline with an explicit UTC offset, or null.'); }
+    }
+  }
+  if (input.timeZone !== undefined) {
+    if (typeof input.timeZone !== 'string' || !input.timeZone || input.timeZone.length > 128 || /^[+-]/.test(input.timeZone)) throw new WorkItemError(400, 'Provide a valid IANA time zone.');
+    try { value.timeZone = new Intl.DateTimeFormat('en', { timeZone: input.timeZone }).resolvedOptions().timeZone; }
+    catch { throw new WorkItemError(400, 'Provide a valid IANA time zone.'); }
+  }
+  return value;
+}
+
+function deadline(item: Pick<Planning, 'dueDate' | 'dueAt'>) {
+  if (item.dueDate && item.dueAt) throw new WorkItemError(400, 'Choose a date-only or timed deadline; explicitly clear the previous kind when switching.');
+}
+
+export function workItemOverdue(item: Pick<WorkItem, 'status' | 'archived' | 'dueDate' | 'dueAt' | 'timeZone'>, now = Date.now()): boolean {
+  if (item.archived || item.status === 'done') return false;
+  if (item.dueAt) return Date.parse(item.dueAt) < now;
+  if (!item.dueDate) return false;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone: item.timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now).map(part => [part.type, part.value]));
+  return item.dueDate < `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function revision(value: unknown): number {
@@ -133,11 +178,14 @@ export class WorkItems<T extends WorkItemRun> {
 
   async create(input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
     requestKey(request);
-    const value = fields(input, ["workspace", "title", "objective", "status"]);
+    const value = fields(input, ["workspace", "title", "objective", "status", 'priority', 'dueDate', 'dueAt', 'timeZone']);
     const title = text(value.title, "title", 120);
     const objective = text(value.objective, "objective", 32_000);
     const workspace = text(value.workspace, 'workspace', 4096), state = value.status === undefined ? 'open' : status(value.status);
-    const fingerprint = createHash('sha256').update(JSON.stringify(['create', workspace, title, objective, state, request?.project])).digest('hex');
+    const plan = planning(value);
+    deadline({ dueDate: plan.dueDate ?? null, dueAt: plan.dueAt ?? null });
+    // Keep the original digest when planning fields are absent, including pre-upgrade replays.
+    const fingerprint = createHash('sha256').update(JSON.stringify(['create', workspace, title, objective, state, request?.project, ...(Object.keys(plan).length ? [plan] : [])])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load();
       const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
@@ -146,6 +194,7 @@ export class WorkItems<T extends WorkItemRun> {
       if (request && location.project !== request.project) throw new WorkItemError(409, 'The original work item project changed.');
       const now = Date.now();
       const item: WorkItem = { ...location, id: randomUUID(), title, objective, status: state, archived: false,
+        priority: 'normal', dueDate: null, dueAt: null, timeZone: 'UTC', ...plan,
         completedAt: state === 'done' ? now : null, revision: 1, createdAt: now, updatedAt: now };
       await atomicJson(this.path, [...items, { ...item, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: item }] } : {}) }]);
       return item;
@@ -154,15 +203,16 @@ export class WorkItems<T extends WorkItemRun> {
 
   async update(id: string, input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
     requestKey(request);
-    const value = fields(input, ["revision", "title", "objective", "status", "archived"]);
+    const value = fields(input, ["revision", "title", "objective", "status", "archived", 'priority', 'dueDate', 'dueAt', 'timeZone']);
     const expected = revision(value.revision);
     const title = value.title === undefined ? undefined : text(value.title, "title", 120);
     const objective = value.objective === undefined ? undefined : text(value.objective, "objective", 32_000);
     const state = value.status === undefined ? undefined : status(value.status);
     if (value.archived !== undefined && typeof value.archived !== 'boolean') throw new WorkItemError(400, 'The archived setting must be a boolean.');
     const archived = value.archived as boolean | undefined;
-    if (title === undefined && objective === undefined && state === undefined && archived === undefined) throw new WorkItemError(400, "Provide work item fields to update.");
-    const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, title, objective, state, archived, request?.project])).digest('hex');
+    const plan = planning(value);
+    if (title === undefined && objective === undefined && state === undefined && archived === undefined && !Object.keys(plan).length) throw new WorkItemError(400, "Provide work item fields to update.");
+    const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, title, objective, state, archived, request?.project, ...(Object.keys(plan).length ? [plan] : [])])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load();
       const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
@@ -171,8 +221,10 @@ export class WorkItems<T extends WorkItemRun> {
       if (request && item.project !== request.project) throw new WorkItemError(404, 'Work item not found in this project.');
       if (item.revision !== expected) throw new WorkItemError(409, "The work item changed. Read its latest revision.");
       const previous = view(item), next = { ...previous, title: title ?? previous.title, objective: objective ?? previous.objective,
-        status: state ?? previous.status, archived: archived ?? previous.archived };
-      const changed = next.title !== previous.title || next.objective !== previous.objective || next.status !== previous.status || next.archived !== previous.archived;
+        status: state ?? previous.status, archived: archived ?? previous.archived, ...plan };
+      deadline(next);
+      const changed = next.title !== previous.title || next.objective !== previous.objective || next.status !== previous.status || next.archived !== previous.archived ||
+        next.priority !== previous.priority || next.dueDate !== previous.dueDate || next.dueAt !== previous.dueAt || next.timeZone !== previous.timeZone;
       if (!changed && !request) return previous;
       if (changed) {
         next.revision++; next.updatedAt = Date.now();

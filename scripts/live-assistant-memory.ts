@@ -39,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -99,9 +99,9 @@ async function check(name:string,work:()=>Promise<void>) {
   catch(error) {results[name]={passed:false,detail:error instanceof assert.AssertionError ? (['chinese_project_reply','project_code_injected','english_project_reply','cross_project_code_excluded','project_fact_visible'].includes(error.message.split('\n')[0] ?? '') ? error.message.split('\n')[0] : 'independent_assertion_failed') : error instanceof Error && error.message.startsWith('Timed out waiting') ? 'state_timeout' : 'operation_failed'};}
   console.log(JSON.stringify({stage:name,...results[name],requests}));
 }
-async function chat(workspace:string,prompt:string) {
+async function chat(workspace:string,prompt:string,timeoutMs=90_000) {
   const task=await server.runtime.create(prompt,workspace,[],{chat:true});tasks.add(task.id);
-  const status=await until(()=>server.runtime.status(task.id),status=>['answered','failed','budget_limited','waiting_user'].includes(status.status),90_000);
+  const status=await until(()=>server.runtime.status(task.id),status=>['answered','failed','budget_limited','waiting_user'].includes(status.status),timeoutMs);
   assert.equal(status.status,'answered');
   assert.equal(status.goal,undefined);
   return {status,answer:status.messages.map(conversationAnswer).filter(text=>text!==undefined).at(-1) ?? '',memory:await server.runtime.taskMemory(task.id)};
@@ -313,6 +313,31 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.deepEqual(await server.runtime.workItems.runs(item.id),[],'todo_no_execution');
     assert.doesNotMatch(JSON.stringify(final),/operations|fingerprint|requestId/);
     evidence.chatWorkItems={itemId:item.id,chatId:created.id,created:true,renamed:true,completed:true,archived:true,originalIdKept:true,goalCreated:false,runs:0,requests};
+  });
+  await check('W02-work-item-planning',async()=>{
+    const {status:created}=await chat(alpha,'请只保存一条项目待办：标题“VEGA_812 规划”，说明“整理合成计划”，优先级 high，日期截止 2026-12-12，时区 America/New_York。这里只存规划，不执行、不创建提醒。',config.maxDurationMs+5000);
+    const initial=(await server.runtime.workItems.list(alpha)).filter(item=>item.title.includes('VEGA_812'));
+    assert.equal(initial.length,1,'planning_single_item');const item=initial[0]!;
+    assert.equal(item.priority,'high');assert.equal(item.dueDate,'2026-12-12');assert.equal(item.dueAt,null);assert.equal(item.timeZone,'America/New_York');
+    const beforeRestart=requests;await server.close();server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'planning_restart_no_model');
+    await server.runtime.followUp(created.id,'把 VEGA_812 这条待办改为 urgent，截止改为纽约时间 2026-12-13 17:00（UTC-05:00），明确清空原日期截止 dueDate，保留同一条记录。只改规划，不执行也不设提醒。','planning-time');
+    const timed=await until(()=>server.runtime.status(created.id),row=>['answered','failed','budget_limited','waiting_user','needs_attention','blocked'].includes(row.status) && row.submission?.requestId==='user:planning-time',config.maxDurationMs+5000);
+    assert.equal(timed.status,'answered');assert.equal(timed.goal,undefined);
+    const changed=await server.runtime.workItems.get(item.id);
+    assert.equal(changed.priority,'urgent');assert.equal(changed.dueDate,null);assert.equal(changed.dueAt,'2026-12-13T22:00:00.000Z');
+    await server.runtime.followUp(created.id,'清除这条 VEGA_812 待办的截止时间，把优先级改回 normal；保留原待办，不执行、不提醒。','planning-clear');
+    const done=await until(()=>server.runtime.status(created.id),row=>['answered','failed','budget_limited','waiting_user','needs_attention','blocked'].includes(row.status) && row.submission?.requestId==='user:planning-clear',config.maxDurationMs+5000);
+    assert.equal(done.status,'answered');assert.equal(done.goal,undefined);
+    const final=await server.runtime.workItems.get(item.id);
+    assert.equal(final.priority,'normal');assert.equal(final.dueDate,null);assert.equal(final.dueAt,null);assert.equal(final.timeZone,'America/New_York');
+    assert.equal((await server.runtime.workItems.list(alpha)).filter(row=>row.title.includes('VEGA_812')).length,1);
+    assert.deepEqual(await server.runtime.workItems.runs(item.id),[]);
+    const calls=done.messages.filter(message=>message.role==='toolResult');
+    assert.equal(calls.filter(message=>message.toolName==='work_item_create' && !message.isError).length,1);
+    assert.equal(calls.filter(message=>message.toolName==='work_item_update' && !message.isError).length,2);
+    assert(!calls.some(message=>/reminder_(?:create|update)|task_prepare/.test(message.toolName)),'planning_no_execution_or_reminder');
+    evidence.workItemPlanning={itemId:item.id,chatId:created.id,dateOnlySaved:true,timedDeadlineSaved:true,deadlineCleared:true,originalIdKept:true,restartNoModel:true,goalCreated:false,runs:0,requests};
   });
   await check('T01-project-tasks',async()=>{
     const source=await server.runtime.create('合成验收任务 ORBIT_542：用户尚未决定导出 CSV 还是 XLSX，不能自行选择。只调用 task_blocked，reason 说明缺少格式，question 提问 CSV 还是 XLSX，然后等待。不要执行命令、写文件或委派。',alpha);tasks.add(source.id);

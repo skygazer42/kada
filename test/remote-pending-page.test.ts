@@ -6,6 +6,7 @@ import { remoteScript } from "../src/remote-page.js";
 
 type Handler = (event: { preventDefault(): void }) => Promise<void> | void;
 class Element {
+  tagName = '';
   children: Element[] = [];
   parentNode: Element | null = null;
   dataset: Record<string, string> = {};
@@ -89,7 +90,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
         return nodes.get(id)!;
       };
       runInNewContext(remoteScript, {
-        document: { getElementById: field, createElement: () => new Element(), addEventListener() {} },
+        document: { getElementById: field, createElement: (tagName: string) => Object.assign(new Element(), { tagName }), addEventListener() {} },
         window: { addEventListener(type: string, handler: () => void) { windowHandlers.set(type, handler); } },
         ...(push ? { PushManager: {}, Notification: { requestPermission: push.permission } } : {}),
         location, history: { replaceState(_state: unknown, _title: string, path: string) {
@@ -362,10 +363,17 @@ test("late approval lists and decisions cannot change a replacement pairing", as
 });
 
 const workItemsUrl = "/remote/api/work-items";
-const workItemRow = { id: "release-notes", title: "Release notes", revision: 2, updatedAt: 10, status: 'open', archived: false, completedAt: null };
+const workItemRow = { id: "release-notes", title: "Release notes", revision: 2, updatedAt: 10, status: 'open', archived: false, completedAt: null,
+  priority: 'normal', dueDate: null, dueAt: null, timeZone: 'UTC', overdue: false };
 
 function visibleText(node: Element): string {
   return [node.textContent, ...node.children.map(visibleText)].join(" ");
+}
+
+function sharedRun(detail: Element): Element {
+  const run = detail.children.find(node => node.tagName === 'ul')?.children[0];
+  assert(run, 'The shared work item needs its original run list.');
+  return run;
 }
 
 test("shared work items display their revision and run status without changing conversations", async () => {
@@ -389,6 +397,19 @@ test("shared work items display their revision and run status without changing c
   await page.field("refresh-conversations").trigger("click");
   assert.equal(page.field("shared-work-items").hidden, true);
   assert.deepEqual(detail.children, []);
+});
+
+test('shared planning shows the original date and timezone, priority and overdue without editing access or losing a draft', async () => {
+  const row = { ...workItemRow, priority: 'urgent', dueDate: '2026-11-01', timeZone: 'America/New_York', overdue: true };
+  const page = await harness(undefined, undefined, undefined, undefined, url => Response.json(url === workItemsUrl ? [row] : {
+    ...row, objective: 'Plan only', runs: [],
+  })).open();
+  await page.type('Keep the unrelated draft');
+  assert.match(visibleText(page.field('work-item-list')), /urgent.*2026-11-01.*America\/New_York.*Overdue/);
+  await page.field('work-item-list').children[0]!.children[0]!.trigger('click');
+  assert.match(visibleText(page.field('work-item-detail')), /urgent.*2026-11-01.*America\/New_York.*Overdue/);
+  assert.equal(page.field('prompt').value, 'Keep the unrelated draft');
+  assert(!visibleText(page.field('work-item-detail')).includes('Edit deadline'));
 });
 
 test("a late work item detail cannot restore revoked data after a list refresh", async () => {
@@ -471,7 +492,7 @@ test("opening a shared run shows its original goal and steps without switching c
   await page.type("Keep this chat draft");
   await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
   const detail = page.field("work-item-detail");
-  const run = detail.children[3]!.children[0]!.children[0]!;
+  const run = sharedRun(detail).children[0]!;
   await run.trigger("click");
   assert.match(visibleText(detail), /Current work-item goal.*Original run goal.*Draft the notes.*Done.*Reviewer.*Which date\?/);
   assert.equal(page.field("conversations").value, selectedConversation);
@@ -495,7 +516,7 @@ test("a late shared run response cannot restore a revoked work item", async () =
   }).open();
   await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
   const detail = page.field("work-item-detail");
-  const opening = detail.children[3]!.children[0]!.children[0]!.trigger("click");
+  const opening = sharedRun(detail).children[0]!.trigger("click");
   await Promise.race([requested.promise, opening]);
   shared = false;
   await page.field("refresh-conversations").trigger("click");
@@ -531,13 +552,13 @@ test("shared run answers preserve the original request on retry and leave chat d
   await page.type("Keep my chat draft");
   await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
   const detail = page.field("work-item-detail");
-  await detail.children[3]!.children[0]!.children[0]!.trigger("click");
-  const form = detail.children[3]!.children[0]!.children.at(-1)!.children.at(-1)!;
+  await sharedRun(detail).children[0]!.trigger("click");
+  const form = sharedRun(detail).children.at(-1)!.children.at(-1)!;
   const input = form.children[1]!;
   assert.ok(input, "The shared question needs an answer input.");
   input.value = "Use November 25.";
   await page.field("refresh-conversations").trigger("click");
-  const restored = detail.children[3]!.children[0]!.children.at(-1)!.children.at(-1)!;
+  const restored = sharedRun(detail).children.at(-1)!.children.at(-1)!;
   assert.equal(restored, form);
   assert.equal(input.value, "Use November 25.");
   await form.trigger("submit");
@@ -581,8 +602,8 @@ test("shared child answers keep their draft through run controls and retry the s
   await page.type("Keep my chat draft");
   await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
   const detail = page.field("work-item-detail");
-  await detail.children[3]!.children[0]!.children[0]!.trigger("click");
-  const panel = () => detail.children[3]!.children[0]!.children.at(-1)!;
+  await sharedRun(detail).children[0]!.trigger("click");
+  const panel = () => sharedRun(detail).children.at(-1)!;
   const button = (label: string) => panel().children.flatMap(row => row.children).find(node => node.textContent === label);
   const form = panel().children.at(-1)!;
   assert.equal(form.children[0]?.textContent, "Answer Currency worker");
@@ -629,8 +650,8 @@ test("refreshing a shared run during control delivery unlocks its latest control
   }).open();
   await page.field("work-item-list").children[0]!.children[0]!.trigger("click");
   const detail = page.field("work-item-detail");
-  await detail.children[3]!.children[0]!.children[0]!.trigger("click");
-  const buttons = () => detail.children[3]!.children[0]!.children.at(-1)!.children.flatMap(row => row.children);
+  await sharedRun(detail).children[0]!.trigger("click");
+  const buttons = () => sharedRun(detail).children.at(-1)!.children.flatMap(row => row.children);
   const stopping = buttons().find(button => button.textContent === "Pause")!.trigger("click");
   await requested.promise;
   await page.field("refresh-conversations").trigger("click");

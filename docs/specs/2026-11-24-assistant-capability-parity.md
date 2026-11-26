@@ -189,6 +189,16 @@ owner 专用 POST `/v1/tasks/:id/credentials/:questionId` 仅接受 `{ value }` 
 
 本地临时 CA 补验保留证书验证，正确主机名完成一次 TLS 请求，错误主机名在 HTTP 前被拒绝；测试注入仅负责本地路由与信任该 CA。Windows PTY 验证无回显、取消后重输与编辑缓存隔离，凭据输入完成/取消后重建 readline，避免私密文本经后续消息、undo 或 Ctrl+Y 泄露。全量 490 通过、4 项可选 Office 跳过，收尾相关 24 项再次通过；外部服务和 macOS 实机不由这些结果替代。[本地 TLS 记录](../experiments/2026-11-26-application-credential-local-tls.json)
 
+### 工作项优先级与截止日期
+
+原 WorkItems 增加 `priority`（low/normal/high/urgent）、`dueDate`、`dueAt` 和 `timeZone`。日期保留 YYYY-MM-DD，时刻通过原 `explicitInstant` 校验后保存规范 ISO；时区由 Intl 校验和规范化，合并当前记录后两种截止互斥，切换须明确清空旧字段。截止不创建提醒、Goal 或任务；原运行要求和 workItem 修订继续保留。[Suparagent schema](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/schemas/work_item.py#L7) · [实际更新](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_planner.py#L96) · [Rakazo 实际优先级保存](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/ticket-tools.ts#L160)
+
+旧记录读为 normal、无截止、UTC，不写回磁盘。没有新字段时保留原 fingerprint 数组，旧 create/update/no-op 回执仍返回当次结果并投影新字段缺省值。原队列核对 revision，操作回执与修改原子提交，恢复不会覆盖后来规划。聊天复用原四个待办工具和安全重放，准备、执行、远程与子任务仍不自动获得编辑工具。
+
+已分享的手机列表与详情只增加规划投影；逾期由服务端按保存时区判断，日期在当地跨天后才逾期，时刻按同一瞬间比较；done/archived 不显示逾期。Chromium 390 × 844 的 Tokyo 页面验证纽约日期与 EST 时刻、原草稿和完成后更新，无横向溢出。API/原运行与真实 SIGKILL 回归覆盖原 ID、修订和恢复；完整看板、自定义列、排序编辑及日历拖拽尚未实现。[浏览器记录](../experiments/2026-11-26-work-item-planning-browser.json)
+
+DeepSeek V3.2 经硅基流动保存日期截止，重启后读回并改为精确时刻；首轮 90 秒观察在修改已提交、模型仍生成最终答复时结束，保留失败。随后续接原 Pi 会话的过期合成聊天窗口，完成确认及清空截止；合计 8 次请求、56,332 已知 token，原记录只有一次创建、两次修改，没有 Goal、运行或提醒，金额及中断请求账单未知。观察时限改为每轮配置时限加 5 秒，未声称重新完成了不中断的全新样本。[首轮失败](../experiments/2026-11-26-work-item-planning-deepseek-attempt-1.json) · [原会话续验](../experiments/2026-11-26-work-item-planning-deepseek-continuation.json)
+
 ## 已定位的能力差距
 
 更广的任务规划、结构化提问、安全凭据、命名助手、跨助手协作、撤销及语音等差距见[参考能力核对表](2026-11-25-reference-capability-matrix.md)。下表保留原来已经定位的具体兼容性与实测缺口，不能视为所有剩余能力。

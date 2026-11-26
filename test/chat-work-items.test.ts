@@ -141,3 +141,38 @@ test('turning a chat into a confirmed Goal removes todo mutation tools from the 
   await until(() => f.runtime.status(task.id), row => row.status === 'completed');
   assert.equal(childCalls, 1); assert.deepEqual(await f.runtime.workItems.list(f.workspace), []);
 });
+
+test('ordinary chat planning survives restart and switches and clears deadlines without creating work or reminders', async t => {
+  let stage = 'create';
+  const f = await scriptedFixture(context => {
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult');
+    for (const result of results) assert.equal(result.isError, false);
+    const created = results.find(result => result.toolName === 'work_item_create');
+    if (!created) return call('work_item_create', { title: 'Plan only', objective: 'Keep a saved plan', priority: 'high', dueDate: '2099-12-01', timeZone: 'America/New_York' });
+    const item = value(created), updates = results.filter(result => result.toolName === 'work_item_update');
+    if (stage === 'switch' && !updates.length) return call('work_item_update', { id: item.id, revision: 1, dueDate: null, dueAt: '2099-12-02T17:00:00-05:00', priority: 'urgent' });
+    if (stage === 'clear' && updates.length === 1) return call('work_item_update', { id: item.id, revision: 2, dueAt: null, priority: 'normal' });
+    if (stage === 'clear' && !results.some(result => result.toolName === 'work_items_list')) return call('work_items_list', {});
+    return fauxAssistantMessage('The plan is saved; nothing started.');
+  });
+  let runtime = f.runtime;
+  t.after(async () => { await runtime.close(); await f.close(); });
+  const chat = await runtime.create('Save a plan, no execution or reminders.', f.workspace, [], { chat: true });
+  const first = await until(() => runtime.status(chat.id), row => ['answered', 'failed'].includes(row.status));
+  assert.equal(first.status, 'answered'); assert.equal(first.goal, undefined);
+  const [item] = await runtime.workItems.list(f.workspace);
+  assert.equal(item.priority, 'high'); assert.equal(item.dueDate, '2099-12-01');
+  await runtime.close(); runtime = new LocalRuntime(f.settings, { models: f.models }); await runtime.recover();
+  stage = 'switch'; await runtime.followUp(chat.id, 'Switch to the timed deadline.', 'planning-switch');
+  const switched = await until(() => runtime.status(chat.id), row => row.status === 'answered' && row.submission?.requestId === 'user:planning-switch');
+  assert.equal(switched.goal, undefined); assert.equal((await runtime.workItems.get(item.id)).dueAt, '2099-12-02T22:00:00.000Z');
+  stage = 'clear'; await runtime.followUp(chat.id, 'Clear the deadline and normalize priority.', 'planning-clear');
+  const cleared = await until(() => runtime.status(chat.id), row => row.status === 'answered' && row.submission?.requestId === 'user:planning-clear');
+  assert.equal(cleared.goal, undefined);
+  const list = cleared.messages.find((message): message is ToolResultMessage => message.role === 'toolResult' && message.toolName === 'work_items_list')!;
+  assert.equal(value(list).items[0].priority, 'normal'); assert.equal(value(list).items[0].dueDate, null);
+  assert.equal(value(list).items[0].dueAt, null); assert.equal(value(list).items[0].overdue, false);
+  assert.equal(value(list).items[0].timeZone, 'America/New_York');
+  assert.deepEqual(await runtime.workItems.runs(item.id), []); assert.equal((await runtime.list()).length, 1);
+  assert(!cleared.messages.some(message => message.role === 'toolResult' && /reminder|task_prepare/.test(message.toolName)));
+});

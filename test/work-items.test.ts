@@ -40,7 +40,7 @@ test("the authenticated work item API replays original tasks after editing and r
     const request = (path: string, method = "GET", value?: object) => fetch(base + path, {
       method, headers, ...(value ? { body: JSON.stringify(value) } : {}),
     });
-    const item = { workspace, title: "Audit inventory", objective: "Verify the inventory" };
+    const item = { workspace, title: "Audit inventory", objective: "Verify the inventory", priority: 'high', dueDate: '2099-12-01', timeZone: 'America/New_York' };
     assert.equal((await fetch(base, { method: "POST", body: JSON.stringify(item) })).status, 401);
     const created = await request("", "POST", item);
     assert.equal(created.status, 201);
@@ -102,7 +102,7 @@ test("a paired phone reads shared runs and answers only their authorized current
     const pair = async (deviceId: string) => (await (await owner("/v1/remote/devices", "POST", { accountId: "owner", deviceId })).json()).token;
     const phone = await pair("phone");
     const tablet = await pair("tablet");
-    const item = await server.runtime.workItems.create({ workspace, title: "Inventory", objective: "Verify the inventory" });
+    const item = await server.runtime.workItems.create({ workspace, title: "Inventory", objective: "Verify the inventory", priority: 'high', dueDate: '2000-12-01', timeZone: 'America/New_York' });
     const privateItem = await server.runtime.workItems.create({ workspace, title: "Private item", objective: "Private objective" });
     const waiting = await server.runtime.workItems.run(item.id, { revision: item.revision, requestId: "early-run", confirmed: true });
     await until(() => server.runtime.status(waiting.id), status => status.status === "waiting_user");
@@ -127,8 +127,9 @@ test("a paired phone reads shared runs and answers only their authorized current
     await server.close();
     server = await open();
     const { id, title, revision, updatedAt, objective, status, archived, completedAt } = updated;
-    assert.deepEqual(await (await request(phone, remote)).json(), [{ id, title, revision, updatedAt, status, archived, completedAt }]);
-    assert.deepEqual(await (await request(phone, details)).json(), { id, title, revision, updatedAt, objective, status, archived, completedAt,
+    const planning = { priority: 'high', dueDate: '2000-12-01', dueAt: null, timeZone: 'America/New_York', overdue: true };
+    assert.deepEqual(await (await request(phone, remote)).json(), [{ id, title, revision, updatedAt, status, archived, completedAt, ...planning }]);
+    assert.deepEqual(await (await request(phone, details)).json(), { id, title, revision, updatedAt, objective, status, archived, completedAt, ...planning,
       runs: [
         { id: waiting.id, revision: item.revision, status: "waiting_user", reason: "Inventory date missing", question: "Which date should I use?", summary: null },
         { id: run.id, revision, status: "completed", reason: null, question: null, summary: "Inventory verified" },
@@ -149,7 +150,7 @@ test("a paired phone reads shared runs and answers only their authorized current
     assert.equal((await request(phone, details + "/runs/" + privateItem.id)).status, 404);
     await server.runtime.workItems.update(id, { revision, status: 'done', archived: true }, { requestId: 'owner-close', project: item.project });
     const closed = await (await request(phone, details)).json();
-    assert.equal(closed.status, 'done'); assert.equal(closed.archived, true); assert.equal(typeof closed.completedAt, 'number');
+    assert.equal(closed.status, 'done'); assert.equal(closed.archived, true); assert.equal(typeof closed.completedAt, 'number'); assert.equal(closed.overdue, false);
     assert.equal(closed.runs.find((row: { id: string }) => row.id === waiting.id).status, 'waiting_user');
     assert.doesNotMatch(JSON.stringify(closed), /operations|fingerprint|owner-close/);
     const readStatus = t.mock.method(server.runtime, "status");
