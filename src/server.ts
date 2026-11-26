@@ -299,6 +299,13 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           return send(200, await runtime.decideApproval(approvalRoute[1]!, approvalRoute[2], approvalRoute[3] as 'allow' | 'deny', digest));
         }
       }
+      const questionAnswer = /^\/v1\/tasks\/([a-f0-9-]{36})\/questions\/(\d+)\/answer$/.exec(url.pathname);
+      if (questionAnswer && req.method === 'POST') {
+        const { requestId, answer } = await body(req);
+        if (typeof requestId !== 'string' || typeof answer !== 'string') throw new Error('Provide requestId and answer strings.');
+        await runtime.answerQuestion(questionAnswer[1]!, questionAnswer[2]!, requestId, answer);
+        return send(200, { requestId });
+      }
       const match = /^\/v1\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|cancel|messages|confirm|view|memory))?$/.exec(url.pathname);
       if (!match) return send(404, { error: "Not found" });
       const id = match[1]!;

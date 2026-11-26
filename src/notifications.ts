@@ -10,6 +10,8 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(valu
 const visible = new Set(['completed','failed','waiting_user','blocked','needs_attention','clarifying','awaiting_confirmation','budget_limited']);
 
 export function taskNotifications(status: TaskStatus): Notification[] {
+  if (!status.goal && status.userQuestion) return [{ id: hash([status.id, 'question', status.userQuestion.id]), taskId: status.id,
+    revision: 1, event: 'waiting_user', at: status.userQuestion.createdAt, detail: status.userQuestion.text, readAt: null }];
   return (status.goal?.events ?? []).filter(event => visible.has(event.type)).map(event => ({
     id:hash([status.id,event.at,event.type,event.detail,event.revision ?? 1]),taskId:status.id,revision:event.revision ?? 1,
     event:event.type,at:event.at,detail:event.detail,readAt:null,

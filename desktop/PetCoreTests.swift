@@ -92,6 +92,12 @@ import AppKit
         }
         let chat = try decode(object)
         try expect(chat.reply?.text == "你好，可以直接聊。" && chat.confirmation == nil, "normal answer is visible without a brief or confirmation")
+        object["status"] = "waiting_user"
+        object["userQuestion"] = ["id": "57", "text": "Choose format", "options": ["CSV", "XLSX"], "detail": "No execution"]
+        let choices = try decode(object)
+        try expect(choices.mode == .clarify && choices.userQuestion?.options == ["CSV", "XLSX"], "ordinary choices keep original question identity without confirmation")
+        try expect(choices.confirmation == nil && choices.attentionKey != chat.attentionKey, "a choice card is never task authorization")
+        object.removeValue(forKey: "userQuestion"); object["status"] = "answered"
         object["reply"] = ["timestamp": 2345, "text": "好的，有需要再叫我。"]
         try expect(try decode(object).attentionKey != chat.attentionKey, "a new chat reply can notify even with unchanged status")
         object.removeValue(forKey: "interaction"); object.removeValue(forKey: "reply")

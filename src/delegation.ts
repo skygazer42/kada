@@ -7,6 +7,7 @@ import { taskUsage } from "./budget.js";
 import type { ModelRef } from "./config.js";
 import { mapConcurrent, SerialQueue } from "./util.js";
 import type { Workspace } from "./workspace.js";
+import { ChoiceFields, questionChoices } from './questions.js';
 
 type OwnerTaskId = Parameters<Harness["abortTask"]>[0];
 type OwnedConversation = {
@@ -23,7 +24,7 @@ export interface DelegationSummary {
   directory: string;
   mode?: "background";
   status: "queued" | "running" | "waiting_input" | "completed" | "cancelled" | "failed";
-  question?: { id: string; text: string };
+  question?: { id: string; text: string; options?: string[]; detail?: string };
   answer?: string;
   truncated?: true;
   reason?: string;
@@ -38,7 +39,7 @@ const BackgroundDelegations = defineDoc<{ batches: Record<string, BackgroundBatc
 });
 
 type ChildAnswer = { requestId: string; text: string };
-type ChildQuestion = { id: string; text: string; submissionId: SubmissionId; answer?: ChildAnswer };
+type ChildQuestion = { id: string; text: string; options?: string[]; detail?: string; submissionId: SubmissionId; answer?: ChildAnswer };
 type ChildInstruction = { requestId: string; text: string };
 const ChildQuestions = defineDoc<{
   current?: string; questions: Record<string, ChildQuestion>; stopped?: true; instructions?: ChildInstruction[];
@@ -345,7 +346,8 @@ async function childResult(tx: Tx, id: ConversationId, taskId: OwnerTaskId) {
           return { mode: "background" as const, status: cancelled ? "cancelled" as const : "failed" as const };
         }
       } else if (!current.answer) {
-        return { mode: "background" as const, status: "waiting_input" as const, question: { id: current.id, text: current.text } };
+        return { mode: "background" as const, status: "waiting_input" as const, question: { id: current.id, text: current.text,
+          ...(current.options ? { options: [...current.options] } : {}), ...(current.detail ? { detail: current.detail } : {}) } };
       }
       if (!answered) return { mode: "background" as const, status: "running" as const };
       if (!submission || answered.id > submission.id) submission = answered;
@@ -425,7 +427,7 @@ const Delegation = defineDoc<{ children: { id: ConversationId; name: string; ins
   scope: "task", kind: "local.delegation", version: 1, initial: () => ({ children: [] }), checkpointWhen: () => true,
 });
 
-export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue(), scopedWorkspace?: Workspace, onQuestion?: (tx: Tx, parent: ConversationId, timestamp: number) => Promise<void>): Extension {
+export function delegationExtension(workspace: string, maxSubagents: number, model?: ModelRef, coordinatorOnly: Extension[] = [], backgroundGoal?: (tx: Tx) => Promise<GoalRevision | undefined>, admission = new SerialQueue(), scopedWorkspace?: Workspace, onQuestion?: (tx: Tx, parent: ConversationId, timestamp: number) => Promise<void>, structured = false): Extension {
   const batchTask = backgroundBatchTask(admission, scopedWorkspace);
   const permittedExtensions = async (api: ToolExecutionApi, context: Context) =>
     (await api.agent(context)).extensions.filter(e => e.name !== "local_delegation" && !coordinatorOnly.some(c => c.name === e.name));
@@ -433,11 +435,13 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
   const ask = defineTool({
     name: "delegation_ask",
     description: "Ask the user a concrete question when missing information prevents progress. Invoke this tool on its own, then wait for the answer. The question and answer use this child conversation.",
-    parameters: Type.Object({ question: Type.String({ minLength: 1, maxLength: 2_000 }) }),
+    parameters: Type.Unsafe<{ question: string; options?: string[]; detail?: string }>(Type.Object({ question: Type.String({ minLength: 1, maxLength: 2_000 }), ...(structured ? { options: Type.Optional(ChoiceFields.options), detail: ChoiceFields.detail } : {}) })),
     replay: "safe", deferred: true, executionMode: "sequential", callers: ["model"],
     execute: async (args, api, context) => {
       const question = args.question.trim();
       if (!question) throw new Error("Provide a concrete question.");
+      const choices = structured && args.options ? questionChoices(question, args.options, args.detail) : undefined;
+      if (structured && args.detail !== undefined && !choices) throw new Error('Question detail requires choices.');
       const receipt = await admission.run(() => api.commit(async tx => {
         const child = await tx.conversation(api.conversationId);
         const owner = child?.owner;
@@ -460,7 +464,7 @@ export function delegationExtension(workspace: string, maxSubagents: number, mod
         const submissionId = live.run?.inputs.at(-1);
         if (live.tools?.length !== 1 || !submissionId) throw new Error("Invoke delegation_ask on its own.");
         state.current = id;
-        state.questions[id] = { id, text: question, submissionId };
+        state.questions[id] = { id, text: question, submissionId, ...(choices ? { options: choices.options, ...(choices.detail ? { detail: choices.detail } : {}) } : {}) };
         await onQuestion?.(tx, owner.conversationId, api.now());
         return { id };
       }, context));

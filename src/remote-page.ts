@@ -182,6 +182,7 @@ const workItemControlRequests = new Set();
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
+const questionAnswerForms = new Map();
 const pendingChildActions = new Map();
 let disconnected = false;
 let pushSettings;
@@ -602,15 +603,18 @@ function workItemAnswerForm(workItemId, run, child) {
   submit.type = "submit";
   const feedback = element("p", "", form);
   feedback.setAttribute("role", "status");
+  const question = child ?? run.userQuestion;
+  const options = [];
+  if (question?.detail) element("p", question.detail, form);
   let pending;
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
+  const sendAnswer = async () => {
     if (identity !== device || selectedWorkItem !== workItemId || selectedWorkItemRun !== run.id ||
       workItemAnswerForms.get(key)?.form !== form || submit.disabled || !form.parentNode) return;
     if (!input.value.trim()) { feedback.textContent = "Enter your answer."; return; }
     pending ??= { requestId: crypto.randomUUID(), answer: input.value,
       ...(child ? { childId: child.childId, questionId: child.questionId } : { version: run.answerVersion }) };
     submit.disabled = true;
+    options.forEach(button => button.disabled = true);
     input.readOnly = true;
     feedback.textContent = "Sending answer…";
     try {
@@ -624,6 +628,7 @@ function workItemAnswerForm(workItemId, run, child) {
           return;
         }
         input.readOnly = false;
+        options.forEach(button => button.disabled = false);
         pending = undefined;
         submit.textContent = "Send answer";
       } else {
@@ -637,7 +642,11 @@ function workItemAnswerForm(workItemId, run, child) {
     feedback.textContent = "Answer received.";
     try { await refreshWorkItems(); }
     catch (error) { if (identity === device) report(error); }
-  });
+  };
+  for (const option of question?.options ?? []) {
+    const button = action(option, form, () => { input.value = option; return sendAnswer(); }); button.type = "button"; options.push(button);
+  }
+  form.addEventListener("submit", event => { event.preventDefault(); return sendAnswer(); });
   return form;
 }
 
@@ -908,9 +917,10 @@ function childAnswerForm(id, question) {
   submit.type = "submit";
   const feedback = element("p", "", form);
   feedback.setAttribute("role", "status");
+  if (question.detail) element("p", question.detail, form);
+  const options = [];
   let pending;
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
+  const sendAnswer = async () => {
     if (device !== identity || id !== conversationId || submit.disabled || form.parentNode !== childQuestions) return;
     const answer = input.value.trim();
     if (!answer) {
@@ -919,6 +929,7 @@ function childAnswerForm(id, question) {
     }
     pending ??= { childId, questionId, requestId: crypto.randomUUID(), answer };
     submit.disabled = true;
+    options.forEach(button => button.disabled = true);
     input.readOnly = true;
     feedback.textContent = "";
     try { await post(conversationPath(id) + "/child-answers", pending); }
@@ -927,6 +938,7 @@ function childAnswerForm(id, question) {
       if (error instanceof RequestError && error.status < 500) {
         feedback.textContent = error.message;
         input.readOnly = false;
+        options.forEach(button => button.disabled = false);
         pending = undefined;
         submit.textContent = "Send answer";
       } else {
@@ -944,7 +956,11 @@ function childAnswerForm(id, question) {
     } catch (error) {
       if (device === identity && id === conversationId) report(error);
     }
-  });
+  };
+  for (const option of question.options ?? []) {
+    const button = action(option, form, () => { input.value = option; return sendAnswer(); }); button.type = "button"; options.push(button);
+  }
+  form.addEventListener("submit", event => { event.preventDefault(); return sendAnswer(); });
   return form;
 }
 
@@ -1017,6 +1033,47 @@ function presentChildActions(view, id) {
   }
 }
 
+function questionAnswerForm(id, question) {
+  const device = identity;
+  const form = document.createElement("form");
+  element("p", question.text, form);
+  if (question.detail) element("p", question.detail, form);
+  const choices = element("div", "", form);
+  const label = element("label", "Other answer", form);
+  const input = element("textarea", "", form);
+  input.id = "question-answer-" + question.id; input.maxLength = 32000; label.htmlFor = input.id;
+  const submit = element("button", "Send answer", form); submit.type = "submit";
+  const feedback = element("p", "", form); feedback.setAttribute("role", "status");
+  let pending;
+  const buttons = [];
+  const sendAnswer = async value => {
+    if (device !== identity || id !== conversationId || submit.disabled || !form.parentNode) return;
+    if (!pending && !value.trim()) { feedback.textContent = "Enter your answer."; return; }
+    pending ??= { questionId: question.id, requestId: crypto.randomUUID(), answer: value };
+    submit.disabled = true; input.readOnly = true; buttons.forEach(button => button.disabled = true);
+    feedback.textContent = "Sending answer…";
+    try { await post(conversationPath(id) + "/question-answers", pending); }
+    catch (error) {
+      if (device !== identity || id !== conversationId) return;
+      if (error instanceof RequestError && error.status < 500) {
+        feedback.textContent = error.message;
+        if ([401, 403, 404, 409].includes(error.status)) { submit.textContent = "Refresh required"; return; }
+        pending = undefined; input.readOnly = false; buttons.forEach(button => button.disabled = false);
+        submit.textContent = "Send answer";
+      } else { feedback.textContent = "Could not confirm delivery. Retry this answer."; submit.textContent = "Retry answer"; }
+      submit.disabled = false; return;
+    }
+    feedback.textContent = "Answer received.";
+    if (device === identity && id === conversationId) await refresh();
+    if (device === identity) await refreshList();
+  };
+  for (const option of question.options) {
+    const button = action(option, choices, () => sendAnswer(option)); button.type = "button"; buttons.push(button);
+  }
+  form.addEventListener("submit", event => { event.preventDefault(); return sendAnswer(input.value); });
+  return form;
+}
+
 function presentTask(view, id) {
   canSend = view?.status !== "paused" && view?.status !== "cancelled";
   updateComposer();
@@ -1024,7 +1081,13 @@ function presentTask(view, id) {
   task.hidden = !view;
   if (!view) return;
   element("h2", taskStatusLabel(view.status), task);
-  if (view.question) element("p", view.question, task);
+  if (view.userQuestion && ["waiting_user", "clarifying"].includes(view.status)) {
+    const key = identity.pairingId + ":" + id + ":" + view.userQuestion.id;
+    const prefix = identity.pairingId + ":" + id + ":";
+    for (const [old, form] of questionAnswerForms) if (old.startsWith(prefix) && old !== key) { form.remove(); questionAnswerForms.delete(old); }
+    const form = questionAnswerForms.get(key) ?? questionAnswerForm(id, view.userQuestion);
+    questionAnswerForms.set(key, form); task.append(form);
+  } else if (view.question) element("p", view.question, task);
   if (view.reason && view.reason !== view.question) element("p", view.reason, task);
   presentSteps(view.progress?.steps, task);
   if (view.progress?.tools?.length) {
@@ -1169,6 +1232,7 @@ async function connect(value) {
   token = value;
   identity = candidate;
   childAnswerForms.clear();
+  questionAnswerForms.clear();
   pushSettings = undefined;
   notifications.hidden = true;
   sessionStorage.setItem("kada-device-token", token);
@@ -1282,6 +1346,7 @@ signout.addEventListener("click", async () => {
   clearApprovals();
   clearWorkItems();
   childAnswerForms.clear();
+  questionAnswerForms.clear();
   try {
     if (pushSettings?.publicKey) {
       await request("/push", { method: "DELETE", signal: AbortSignal.timeout(3_000) }, bearer);
@@ -1434,6 +1499,7 @@ setInterval(async () => {
       clearApprovals();
       clearWorkItems();
       childAnswerForms.clear();
+      questionAnswerForms.clear();
       sessionStorage.removeItem("kada-device-token");
       assistant.hidden = true;
       pair.hidden = false;

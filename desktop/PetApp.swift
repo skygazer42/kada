@@ -211,6 +211,17 @@ import UniformTypeIdentifiers
             await self.refresh()
         }
     }
+    func answerQuestion(_ question: PetChildQuestion, taskID: String, text: String, requestID: UUID) {
+        guard let current = task, selectedID == taskID, current.id == taskID,
+              current.userQuestion == question, ["waiting_user", "clarifying"].contains(current.status),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf16.count <= 32000 else { return }
+        perform {
+            struct Receipt: Decodable { let requestId: String }
+            let _: Receipt = try await self.api.request("/v1/tasks/\(taskID)/questions/\(question.id)/answer", method: "POST",
+                body: ["requestId": requestID.uuidString, "answer": text])
+            await self.refresh()
+        }
+    }
     func stopChild(_ child: PetStoppableChild, taskID: String) {
         guard selectedID == taskID, let current = task, current.id == taskID,
               current.stoppableChildren?.contains(child) == true else { return }
@@ -291,7 +302,7 @@ import UniformTypeIdentifiers
         }
     }
     func retry() {
-        if mode != .childInput && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editing) { submit(); return }
+        if mode != .childInput && task?.userQuestion == nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editing) { submit(); return }
         Task {
             do { try await api.checkHealth(); error = nil; await refresh() }
             catch { self.error = "暂时联系不上本地后台。当前输入和任务会保留，请稍后重试。" }

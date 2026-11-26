@@ -43,6 +43,7 @@ import { reminderExtension } from './reminders.js';
 import { historyExtension, historyInstructions, historyMatch, historyQuery, type HistoryMessage } from './history.js';
 import { projectTasksExtension } from './project-tasks.js';
 import { chatWorkItemsExtension } from './chat-work-items.js';
+import { Questions, QuestionError, currentQuestion, questionExtension, recordQuestionAnswer } from './questions.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -73,6 +74,7 @@ export interface TaskMeta {
   chatWorkItems?: { project: string };
   historyRecall?: true;
   projectTaskCatalog?: true;
+  structuredQuestions?: true;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
   chatBudget?: { costLimit: number; tokenLimit: number | null };
   learning?: boolean;
@@ -396,6 +398,7 @@ export class LocalRuntime {
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
+        structuredQuestions: true,
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
@@ -418,7 +421,7 @@ export class LocalRuntime {
       if (submission) return required === "admitted" || submission.entry !== undefined ||
         (submission.status === "queued" && meta.control !== "cancelled");
       if (required === "recoverable" && requestId === "initial" && meta.initialImages?.length && meta.control !== "cancelled") return true;
-      const outbox = (await this.goalState(active))?.outbox?.requestId;
+      const outbox = (await this.goalState(active))?.outbox?.requestId ?? (meta.structuredQuestions ? (await active.harness.snapshot(Questions, active.root.id, ctx))?.outbox?.requestId : undefined);
       return (required === "admitted" || meta.control !== "cancelled") &&
         (outbox === requestId || outbox === "user:" + requestId);
     });
@@ -580,8 +583,9 @@ export class LocalRuntime {
         },
       } satisfies Partial<GenerationHooks>}]}) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
+      const questions = meta.structuredQuestions ? questionExtension(!!meta.preparation, remote) : undefined;
       const preparation = preparationExtension(workspace, this.defaultBudget(meta), { remote });
-      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
+      const preparationExtensions = [...(localContext ? [preparation, readObserver, ...(memory ? [memory] : [])] : [preparation]),...(questions ? [questions] : []),...(history ? [history] : []),...(projectTasks ? [projectTasks] : []),...(memoryUse ? [memoryUse] : []),...(policy ? [policy] : []), ...(imagePolicy ? [imagePolicy] : [])];
       const conversation = preparationExtension(workspace, this.defaultBudget(meta), { remote, startGoal: async () => {
         const messages = await statements();
         return { objective: messages.at(-1) ?? meta.objective, userMessages: messages.slice(0, -1),
@@ -589,6 +593,7 @@ export class LocalRuntime {
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
       const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now, meta.chatReminders === 'managed')] : []), ...(memory ? [memory] : []),
+        ...(questions ? [questions] : []),
         ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
@@ -610,7 +615,7 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...(questions ? [questions] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
@@ -618,7 +623,7 @@ export class LocalRuntime {
           if (state.phase === "working" && (!meta.preparation || state.confirmation)) return { revision: state.revision, epoch: state.epoch };
         } : undefined, childAdmission, remote ? workspace : undefined, remote ? async (tx, parent, timestamp) => {
           await tx.appendEntry(parent, { kind: remoteProgressKind, data: { event: "child_waiting_input", timestamp } });
-        } : undefined),
+        } : undefined, meta.structuredQuestions === true),
         ...(policy ? [policy] : []),
         ...(imagePolicy ? [imagePolicy] : []),
         ...(approvals ? [approvals] : []),
@@ -628,6 +633,7 @@ export class LocalRuntime {
         ...(projectTasks ? [projectTasks] : []),
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
+        ...(questions ? [questions] : []),
         ...(meta.preparation && !remote ? [verification] : []),
         ...(learning ? [learning] : []),
         ...(!remote && meta.schemaVersion === 3 && this.config.web !== false ? [webExtension(workspace)] : []), ...extra];
@@ -660,6 +666,11 @@ export class LocalRuntime {
     }
     if (run && meta.control === "active") {
       const goal = await this.goalState(active);
+      if (!goal && meta.structuredQuestions && (await active.harness.snapshot(Questions, active.root.id, ctx))?.outbox) {
+        const budgetReason = await this.budgetReason(active);
+        if (Date.now() >= meta.deadlineAt || budgetReason) { await this.limit(active, budgetReason ?? 'Task time budget exhausted'); return active; }
+        await this.dispatchQuestionOutbox(active);
+      }
       if (goal && meta.schemaVersion === 3) await restoreChildStops(active.harness, ctx);
       const latest = goal ? undefined : await this.latest(active);
       if (goal && ["clarifying", "awaiting_confirmation"].includes(goal.phase)) {
@@ -670,6 +681,17 @@ export class LocalRuntime {
       }
       const finished = goal ? ["completed", "blocked", "waiting_user", "needs_attention", "failed"].includes(goal.phase) : latest?.status === "done" || latest?.status === "unanswered";
       if (finished) {
+        if (goal?.phase === 'waiting_user' && meta.structuredQuestions) {
+          const asking = await this.latestInput(active);
+          const question = await currentQuestion(active.harness, active.root.id, asking?.id, goal);
+          const live = question ? await active.harness.snapshot(LiveDoc, active.root.id, ctx) : undefined;
+          if (question && asking?.status === 'placed' && live?.tools?.length === 1 && live.tools[0]?.name === 'ask_user' && String(live.tools[0].taskId) === question.id) {
+            await stopObsoleteDelegations(active.harness, undefined, ctx);
+            active.enabled = false;
+            active.harness.resume();
+            return active;
+          }
+        }
         if (goal?.phase === 'waiting_user' && (await approvalViews(active.harness)).some(approval => approval.status === 'pending' || approval.status === 'expired')) {
           const { tasks, submissions } = await active.harness.inspect(ctx);
           for (const submission of submissions) await active.harness.abortSubmission(submission.id, ctx);
@@ -829,12 +851,20 @@ export class LocalRuntime {
   }
   private async updateGoal(active: Active, change: GoalChange<void>): Promise<GoalState> {
     return active.harness.commit(tx => changeGoal(tx, async (goal, record) => {
-      await change(goal, record);
+      await change(goal, record, tx);
       return plain(goal);
     }, active.meta.remotePolicy === "workspace" ? active.root.id : undefined), ctx);
   }
   private async latest(active: Active, conversationId = active.root.id) {
     return (await active.storage.scanSubmissions({ conversationId, order: "descending" }, 1, undefined, ctx)).items[0];
+  }
+  private async latestInput(active: Active) {
+    let cursor: Cursor | undefined;
+    do {
+      const page = await active.storage.scanSubmissions({ conversationId: active.root.id, order: 'descending' }, 200, cursor, ctx);
+      for (const submission of page.items) if (submission.type === 'input') return submission;
+      cursor = page.next;
+    } while (cursor);
   }
   private async budgetReason(active: Active, goal?: GoalState): Promise<string | undefined> {
     if (!goal && active.meta.entrypoint !== "chat") return;
@@ -852,6 +882,20 @@ export class LocalRuntime {
       this.options.models.getModel(active.meta.model.provider, active.meta.model.modelId)!), requestId: outbox.requestId, whenBusy: "steer" }, ctx);
     await this.updateGoal(active, goal => { if (goal.outbox?.requestId === outbox.requestId) goal.outbox = null; });
   }
+  private async dispatchQuestionOutbox(active: Active): Promise<void> {
+    const outbox = (await active.harness.snapshot(Questions, active.root.id, ctx))?.outbox;
+    if (!outbox) return;
+    if (!await active.harness.commit(tx => tx.submissionByRequest(active.root.id, outbox.requestId), ctx)) {
+      if (Date.now() >= active.meta.deadlineAt || await this.budgetReason(active)) throw new QuestionError(409, 'The saved answer needs the host to resume the exhausted task budget.');
+      await active.root.submit({ type: 'input', content: await imageInput(outbox.content, outbox.images,
+        this.options.models.getModel(active.meta.model.provider, active.meta.model.modelId)!), requestId: outbox.requestId, whenBusy: 'followUp' }, ctx);
+    }
+    await active.harness.commit(async tx => {
+      const state = await tx.doc(Questions, active.root.id);
+      if (state.outbox?.requestId === outbox.requestId) delete state.outbox;
+    }, ctx);
+    active.enabled = true;
+  }
   private async supervise(active: Active): Promise<void> {
     if (active.meta.control !== "active") return;
     let { tasks, submissions } = await active.harness.inspect(ctx);
@@ -863,6 +907,15 @@ export class LocalRuntime {
       if (!busy) { active.enabled = false; return; }
       if (Date.now() >= active.meta.deadlineAt) await this.limit(active, "Task time budget exhausted");
       return;
+    }
+    if (busy && active.meta.structuredQuestions && ['waiting_user', 'clarifying'].includes(goal.phase)) {
+      const asking = await this.latestInput(active);
+      const question = await currentQuestion(active.harness, active.root.id, asking?.id, goal);
+      const live = question ? await active.harness.snapshot(LiveDoc, active.root.id, ctx) : undefined;
+      if (question && live?.tools?.length === 1 && live.tools[0]?.name === 'ask_user' && String(live.tools[0].taskId) === question.id) {
+        active.enabled = false;
+        return;
+      }
     }
     if (["clarifying", "awaiting_confirmation"].includes(goal.phase)) {
       if (busy) await this.abortAll(active);
@@ -1096,16 +1149,17 @@ export class LocalRuntime {
     const inspection = await active.harness.inspect(ctx);
     const busy = inspection.tasks.length > 0 || inspection.submissions.length > 0;
     const goal = await this.goalState(active);
+    const userQuestion = meta.structuredQuestions ? await currentQuestion(active.harness, active.root.id, (await this.latestInput(active))?.id, goal) : null;
     const status = meta.control !== "active" ? meta.control : goal ?
       goal.phase === "working" ? busy ? "running" : "pending" : ["clarifying", "awaiting_confirmation"].includes(goal.phase) && busy ? "running" : goal.phase === "submitted" ? "verifying" : goal.phase :
-      busy ? "running" : submission?.status === "done" ? "answered" : submission?.status === "unanswered" ? "failed" : "pending";
-    return { submission, inspection, goal, status };
+      busy ? "running" : userQuestion ? "waiting_user" : submission?.status === "done" ? "answered" : submission?.status === "unanswered" ? "failed" : "pending";
+    return { submission, inspection, goal, status, userQuestion };
   }
   async taskOverview(id: string) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
-      const { status, goal, submission } = await this.taskState(active, meta);
+      const { status, goal, submission, userQuestion } = await this.taskState(active, meta);
       let modelRefusal: { code: AccountRefusal; at: number; submissionId: number } | undefined;
       if (meta.routineOccurrenceId && status === 'failed' && submission?.status === 'unanswered' && submission.reason === 'model_error') {
         let cursor: Cursor | undefined;
@@ -1122,7 +1176,7 @@ export class LocalRuntime {
       const childQuestion = status === "running" && goal?.phase === "working"
         ? await firstChildQuestion(active.harness, active.root.id, goal, ctx) : undefined;
       return {
-        status, createdAt: meta.createdAt, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? null, childQuestion,
+        status, createdAt: meta.createdAt, reason: goal?.reason ?? meta.initializationError ?? null, question: goal?.question ?? userQuestion?.text ?? null, childQuestion,
         summary: status === "completed" ? goal?.candidate?.summary ?? null : null,
         ...(modelRefusal ? { modelRefusal } : {}),
       };
@@ -1153,7 +1207,7 @@ export class LocalRuntime {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
-      const { submission, inspection, goal, status } = await this.taskState(active, meta);
+      const { submission, inspection, goal, status, userQuestion } = await this.taskState(active, meta);
       const context = await active.root.context(ctx);
       const conversations = await this.conversations(active);
       const usage = await active.harness.usage(ctx);
@@ -1189,7 +1243,7 @@ export class LocalRuntime {
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
         workItemAnswerVersion: workItemAnswerVersion(meta, goal),
         remoteControls, remoteControlVersion: remotelyControlled ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
-        activeTools, interruptibleChildTools, delegations, approvals,
+        activeTools, interruptibleChildTools, delegations, approvals, userQuestion,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
         compactions: compactions.total, rootCompactions: compactions.root,
@@ -1326,19 +1380,40 @@ export class LocalRuntime {
       active.harness.resume();
     });
   }
-  async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[], answerVersion?: string): Promise<void> {
+  async answerQuestion(id: string, questionId: string, requestId: string, answer: string, remoteWorkspace?: string): Promise<void> {
+    if (!/^\d{1,20}$/.test(questionId) || !/^[A-Za-z0-9_-]{1,120}$/.test(requestId) || typeof answer !== 'string' || !answer.trim() || answer.length > 32000 || answer.includes('\0')) throw new QuestionError(400, 'Provide a question, request ID and nonblank answer.');
+    await this.followUp(id, answer, requestId, undefined, undefined, { id: questionId, workspace: remoteWorkspace });
+  }
+  async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[], answerVersion?: string, question?: { id: string; workspace?: string }): Promise<void> {
     await this.changes.run(async () => {
       if (!message.trim() || message.length > 32000) throw new Error("Provide a message between 1 and 32000 characters");
       if (!requestId.trim() || requestId.length > 200) throw new Error("requestId must contain 1 to 200 characters");
       const meta = await this.metadata(id);
+      if (question && (question.workspace === undefined ? meta.remotePolicy : meta.remotePolicy !== 'workspace' || meta.workspace !== question.workspace)) throw new QuestionError(404, 'Question not found.');
       if (images?.length && meta.remotePolicy !== "workspace") throw new Error("Image references require a scoped remote submission.");
       if (meta.control !== "active") {
-        if (answerVersion !== undefined) throw new TaskConflictError(`Task is ${meta.control}; the host must resume it first.`);
+        if (answerVersion !== undefined || question) throw new TaskConflictError(`Task is ${meta.control}; the host must resume it first.`);
         throw new Error(`Task is ${meta.control}; resume it first`);
       }
       const active = await this.open(meta, false);
       const key = `user:${requestId}`;
       const before = await this.goalState(active);
+      if (!before && meta.structuredQuestions) await this.dispatchQuestionOutbox(active);
+      const questions = meta.structuredQuestions ? await active.harness.snapshot(Questions, active.root.id, ctx) : undefined;
+      const saved = question ? questions?.questions[question.id] : undefined;
+      if (question && saved?.answer) {
+        if (saved.answer.requestId !== key || saved.answer.text !== message) throw new QuestionError(409, 'This question already has a different answer.');
+        if (before?.outbox?.requestId === key) {
+          if (Date.now() >= this.deadline(active, before) || await this.budgetReason(active, before)) throw new QuestionError(409, 'The saved answer needs the host to resume the exhausted task budget.');
+          await this.dispatchOutbox(active); active.enabled = true;
+        }
+        if (!before) await this.dispatchQuestionOutbox(active);
+        return;
+      }
+      const input = questions?.current ? await this.latestInput(active) : undefined;
+      const asking = questions?.current ? await currentQuestion(active.harness, active.root.id, input?.id, before) : null;
+      if (question && asking?.id !== question.id) throw new QuestionError(409, 'This question changed. Read the current question before answering.');
+      if (question && input?.status !== 'done') throw new QuestionError(409, 'The question is still being saved. Refresh before answering.');
       const fingerprint = answerVersion === undefined ? undefined : createHash("sha256").update(JSON.stringify([answerVersion, message])).digest("hex");
       if (fingerprint !== undefined) {
         const receipt = before?.sharedAnswers?.[key];
@@ -1350,7 +1425,11 @@ export class LocalRuntime {
         if (workItemAnswerVersion(meta, before) !== answerVersion) throw new TaskConflictError("This question changed. Read the current run before answering.");
         if (await this.budgetReason(active, before)) throw new TaskConflictError("The task budget is exhausted; the host must resume it before answering.");
       }
-      if (await active.harness.commit(tx => tx.submissionByRequest(active.root.id, key), ctx)) return;
+      if (await active.harness.commit(tx => tx.submissionByRequest(active.root.id, key), ctx)) {
+        if (question) throw new QuestionError(409, 'This request ID already belongs to another input.');
+        return;
+      }
+      if (question && before && await this.budgetReason(active, before)) throw new QuestionError(409, 'The task budget is exhausted; resume it before answering.');
       if (!before) {
         const reason = await this.budgetReason(active);
         if (reason) { await this.limit(active, reason); throw new Error(reason); }
@@ -1360,6 +1439,16 @@ export class LocalRuntime {
           active.meta = meta;
           await atomicJson(this.metaFile(id), meta);
         } else if (Date.now() >= meta.deadlineAt) throw new Error("Task time budget has expired; resume with a fresh budget first");
+        if (questions?.current) {
+          await active.harness.commit(async tx => {
+            const state = await tx.doc(Questions, active.root.id);
+            if (asking) {
+              await recordQuestionAnswer(tx, active.root.id, asking.id, key, message);
+              state.outbox = { questionId: asking.id, requestId: key, content: message, ...(images?.length ? { images: structuredClone(images) } : {}) };
+            } else if (state.current) state.questions[state.current]!.retired = true;
+          }, ctx);
+          if (asking) { await this.dispatchQuestionOutbox(active); return; }
+        }
         await active.root.submit({ type: "input", content: await imageInput(message, images,
           this.options.models.getModel(meta.model.provider, meta.model.modelId)!), requestId: meta.entrypoint === "chat" ? key : requestId,
           ...(meta.entrypoint === "chat" ? { whenBusy: "steer" as const } : {}) }, ctx);
@@ -1367,7 +1456,7 @@ export class LocalRuntime {
       }
       const preparing = meta.preparation && !before.confirmation;
       if (!preparing && Date.now() >= this.deadline(active, before)) {
-        if (answerVersion !== undefined) throw new TaskConflictError("Task time budget has expired; the host must resume it before answering.");
+        if (answerVersion !== undefined || question) throw new TaskConflictError("Task time budget has expired; the host must resume it before answering.");
         throw new Error("Task time budget has expired; resume with a fresh budget first");
       }
       if (before.outbox?.requestId === key) { await this.dispatchOutbox(active); active.enabled = true; return; }
@@ -1379,7 +1468,9 @@ export class LocalRuntime {
         await atomicJson(this.metaFile(id), meta);
       }
       if (before.review) await (await active.harness.conversation(before.review.conversationId, ctx))?.abort(ctx, { background: true });
-      const updated = await this.updateGoal(active, (goal, record) => {
+      const updated = await this.updateGoal(active, async (goal, record, tx) => {
+        if (asking) await recordQuestionAnswer(tx, active.root.id, asking.id, key, message, goal);
+        else if (questions?.current) (await tx.doc(Questions, active.root.id)).questions[questions.current]!.retired = true;
         if (fingerprint !== undefined) {
           if (workItemAnswerVersion(meta, goal) !== answerVersion) throw new TaskConflictError("This question changed. Read the current run before answering.");
           goal.sharedAnswers ??= {};

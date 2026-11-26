@@ -12,6 +12,7 @@ import { remotePage, remoteScript } from "./remote-page.js";
 import { remoteManifest, remoteWorker } from "./remote-worker.js";
 import { RemotePush, RemotePushError, type PushEvent, type PushScope, type PushSender } from "./remote-push.js";
 import { taskGroup, taskView } from "./task-view.js";
+import { QuestionError } from './questions.js';
 import { readJson, SerialQueue } from "./util.js";
 import { Workspace } from "./workspace.js";
 
@@ -464,11 +465,12 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }),
       receipts: await Promise.all(conversation.receipts.map((receipt) => receiptView(conversation, receipt, status))),
       task: status && view ? {
-        status: view.status, reason: view.reason, question: view.question, brief: view.brief,
+        status: view.status, reason: view.reason, question: view.question, userQuestion: view.userQuestion, brief: view.brief,
         briefDigest: view.briefDigest, confirmed: view.confirmed, progress: view.progress, delivery, budget:view.budget,
         controls: status.remoteControls, controlVersion: status.remoteControlVersion,
         childQuestions: status.status === "running" ? status.delegations.flatMap(child => child.question
-          ? [{ childId: child.conversationId, questionId: child.question.id, name: child.name, text: child.question.text }] : []) : [],
+          ? [{ childId: child.conversationId, questionId: child.question.id, name: child.name, text: child.question.text,
+            ...(child.question.options ? { options: child.question.options } : {}), ...(child.question.detail ? { detail: child.question.detail } : {}) }] : []) : [],
         stoppableChildren: view.stoppableChildren, interruptibleChildTools: view.interruptibleChildTools,
       } : null,
     };
@@ -757,10 +759,12 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             const run = await runtime.status(runId);
             const childQuestions = run.status === "running" ? run.delegations.flatMap(child => child.question
               ? [{ name: child.name, text: child.question.text,
+                ...(child.question.options ? { options: child.question.options } : {}), ...(child.question.detail ? { detail: child.question.detail } : {}),
                 ...(canReply ? { childId: child.conversationId, questionId: child.question.id } : {}) }] : []) : [];
             return {
               id: run.id, revision: meta.workItem.revision, objective: run.objective, status: run.status,
               reason: run.goal?.reason ?? run.initializationError ?? null, question: run.goal?.question ?? null,
+              ...(run.userQuestion ? { userQuestion: run.userQuestion } : {}),
               summary: run.status === "completed" ? run.goal?.candidate?.summary ?? null : null,
               steps: (run.goal?.plan ?? []).map(({ id, title, status }) => ({ id, title, status })),
               childQuestions,
@@ -816,7 +820,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
-        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|child-answers|child-stop|child-interrupt|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
+        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|question-answers|child-answers|child-stop|child-interrupt|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
         const conversationId = match?.[1];
         if (!conversationId || !idPattern.test(conversationId)) throw new HttpError(404, "Remote endpoint not found.");
         const action = match?.[2];
@@ -861,6 +865,14 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
                 }
               });
               send(response, 200, { updated: true });
+            } else if (method === 'POST' && action === 'question-answers') {
+              const { questionId, requestId, answer } = await json(request);
+              if (typeof questionId !== 'string' || typeof requestId !== 'string' || typeof answer !== 'string') throw new HttpError(400, 'Provide questionId, requestId and answer strings.');
+              await exclusive(path, async () => {
+                const workspace = await privateWorkspace(row, false);
+                await runtime.answerQuestion(row.taskId, questionId, requestId, answer, workspace.root);
+              });
+              send(response, 200, { questionId, requestId });
             } else if (method === "POST" && action === "child-interrupt") {
               const { childId, toolTaskId } = await json(request);
               if (typeof childId !== "number" || typeof toolTaskId !== "number") throw new HttpError(400, "Invalid child or tool task ID.");
@@ -901,7 +913,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;

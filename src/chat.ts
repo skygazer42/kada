@@ -48,6 +48,16 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (command === '/choose') {
+        if (!this.taskId) throw new Error('先用 /attach 选择任务。');
+        const selected = /^(\d+)\s+([1-4])$/.exec(argument ?? '');
+        const status = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`), question = status.userQuestion;
+        if (!selected || !question || question.id !== selected[1] || !question.options[Number(selected[2]) - 1]) throw new Error('请用当前问题 ID 和显示的选项编号。');
+        await this.client.request(`/v1/tasks/${this.taskId}/questions/${question.id}/answer`, 'POST', {
+          requestId: 'terminal-question-' + question.id, answer: question.options[Number(selected[2]) - 1],
+        });
+        await this.poll(); return true;
+      }
       if (command === "/children") {
         if (!this.taskId) throw new Error("先用 /attach 选择任务。");
         const { delegations } = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`);
@@ -81,7 +91,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
@@ -259,7 +269,14 @@ export class ChatSession {
       const key = `child-question:${child.conversationId}:${child.question.id}`;
       if (this.printed.has(key)) continue;
       this.printed.add(key);
-      this.info(`子任务 ${child.name} 等待答复：${child.question.text}\n/reply-child ${child.conversationId} ${child.question.id} 答复`);
+      this.info(`子任务 ${child.name} 等待答复：${child.question.text}${child.question.detail ? '\n' + child.question.detail : ''}${child.question.options ? '\n' + child.question.options.map((option, i) => `${i + 1}. ${option}`).join('\n') : ''}\n/reply-child ${child.conversationId} ${child.question.id} 答复`);
+    }
+    if (status.userQuestion) {
+      const question = status.userQuestion, key = 'question:' + question.id;
+      if (!this.printed.has(key)) {
+        this.printed.add(key);
+        this.info(`${question.text}${question.detail ? '\n' + question.detail : ''}\n${question.options.map((option, index) => `${index + 1}. ${option}`).join('\n')}\n/choose ${question.id} 编号，或直接输入其他答复。`);
+      }
     }
     if (["clarifying", "awaiting_confirmation"].includes(status.status) && goal?.brief) {
       const key = `brief:${goal.brief.revision}:${status.briefDigest}`;
@@ -288,7 +305,7 @@ export class ChatSession {
       this.info(status.interaction === "chat" ? "正在回复…" : status.preparation && !goal?.confirmation ? "正在整理目标、交付标准与预算…" : goal?.reworks ? `正在修正验收问题，第 ${goal.reworks} 次自动返工…` : status.workerCount ? `正在处理，已创建 ${status.workerCount} 个子 Agent…` : "正在处理…");
     } else if (status.status === "verifying") this.info(status.schemaVersion === 3 && !status.review ? "已提交结果，正在检查交付物…" : "已提交结果，正在检查交付物并独立评审…");
     else if (status.status === "completed" && !goal?.candidate) this.info(`已提交结果。\n${verificationText(status)}`);
-    else if (status.status === "waiting_user") this.info(`需要补充信息：${goal?.question ?? goal?.reason}`);
+    else if (status.status === "waiting_user" && !status.userQuestion) this.info(`需要补充信息：${goal?.question ?? goal?.reason}`);
     else if (["blocked", "needs_attention"].includes(status.status)) this.info(`任务已停止自动推进：${goal?.reason}\n可补充要求，或输入 /resume 重试。`);
     else if (status.status === "failed") this.emit({ kind: "error", text: `执行失败：${goal?.reason ?? (status.submission?.status === "unanswered" ? status.submission.reason : "未知原因")}。可以补充要求重试，或输入 /resume。` });
     else if (status.status === "budget_limited") this.info(`任务预算已耗尽：${goal?.reason ?? "达到时限"}。输入 /resume 可按配置补充一份任务预算后继续。`);

@@ -56,6 +56,30 @@ function pairing(accountId = "owner", deviceId = "phone") {
   return { token, device: { accountId, deviceId, tokenHash } };
 }
 
+test('a paired remote chat answers only its original structured question and replays the answer', async t => {
+  const fixture = await scriptedFixture(context => context.messages.some(message => message.role === 'user' && message.content === 'CSV')
+    ? fauxAssistantMessage('Selected CSV.') : fauxAssistantMessage(fauxToolCall('ask_user', { question: 'Which format?', options: ['CSV', 'XLSX'], detail: 'Choose a format.' }), { stopReason: 'toolUse' }));
+  t.after(() => fixture.close());
+  const owner = pairing(), stranger = pairing('stranger', 'tablet');
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, 'remote'), [owner.device, stranger.device]);
+  const path = '/conversations/choice-chat';
+  const receipt = await (await call(owner.token, path + '/messages', turn('initial-choice', 'Ask a format.'))).json();
+  const waiting = await until(async () => (await call(owner.token, path)).json(), row => row.task?.status === 'waiting_user');
+  assert.deepEqual(waiting.task.userQuestion.options, ['CSV', 'XLSX']);
+  assert.equal((await fixture.runtime.status(receipt.taskId)).goal, undefined);
+  const answer = { questionId: waiting.task.userQuestion.id, requestId: 'remote-choice', answer: 'CSV' };
+  const post = (input: object) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  assert.equal((await call(stranger.token, path + '/question-answers', post(answer))).status, 404);
+  assert.equal((await call(owner.token, path + '/question-answers', post({ ...answer, questionId: '99999' }))).status, 409);
+  assert.equal((await call(owner.token, path + '/question-answers', post(answer))).status, 200);
+  await until(async () => (await call(owner.token, path)).json(), row => row.task?.status === 'answered');
+  assert.equal((await call(owner.token, path + '/question-answers', post(answer))).status, 200);
+  assert.equal((await call(owner.token, path + '/question-answers', post({ ...answer, answer: 'XLSX' }))).status, 409);
+  const done = await fixture.runtime.status(receipt.taskId);
+  assert.equal(done.messages.filter(message => message.role === 'user' && message.content === 'CSV').length, 1);
+  assert.equal(done.goal, undefined);
+});
+
 test("a vision model receives uploaded images on the original and follow-up Pi submissions", async t => {
   const fixture = await scriptedFixture(() => fauxAssistantMessage("placeholder"));
   t.after(() => fixture.close());

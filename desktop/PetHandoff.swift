@@ -253,16 +253,22 @@ struct PetBubble: View {
     private var clarification: some View {
         VStack(alignment: .leading, spacing: 18) {
             heading("还差一项资料")
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    let questions = model.task?.brief?.questions ?? []
-                    if questions.isEmpty { Text(model.task?.question ?? "请补充影响结果的必要信息。") }
-                    else { ForEach(Array(questions.enumerated()), id: \.offset) { _, text in Text(text) } }
-                }.lineSpacing(6).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            if let task = model.task, let question = task.userQuestion {
+                PetQuestionReply(question: question, busy: model.busy) { text, requestID in
+                    model.answerQuestion(question, taskID: task.id, text: text, requestID: requestID)
+                }.id(task.id + ":" + question.id)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        let questions = model.task?.brief?.questions ?? []
+                        if questions.isEmpty { Text(model.task?.question ?? "请补充影响结果的必要信息。") }
+                        else { ForEach(Array(questions.enumerated()), id: \.offset) { _, text in Text(text) } }
+                    }.lineSpacing(6).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                }
+                editor("补充说明，或添加所需资料…", height: 88)
+                attachments
+                HStack { addFilesButton; Spacer(); sendButton("补充并继续") }
             }
-            editor("补充说明，或添加所需资料…", height: 88)
-            attachments
-            HStack { addFilesButton; Spacer(); sendButton("补充并继续") }
         }.padding([.horizontal, .bottom], 24).padding(.top, 10)
     }
     private func childInput(_ task: PetTask) -> some View {
@@ -588,18 +594,59 @@ private struct PetChildReply: View {
     let send: (String, UUID) -> Void
     @State private var draft = ""
     @State private var requestID = UUID()
+    @State private var pending: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(input.name).font(.system(size: 13, weight: .medium)).foregroundColor(Palette.muted)
             Text(input.question.text).textSelection(.enabled)
+            if let detail = input.question.detail { Text(detail).textSelection(.enabled) }
+            if pending == nil {
+                ForEach(input.question.options ?? [], id: \.self) { option in
+                    Button(option) { pending = option; send(option, requestID) }.buttonStyle(PetButton(primary: false))
+                }
+            }
             TextField("回复子任务", text: $draft, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
                 .accessibilityLabel("回复 \(input.name)")
-            Button("发送答复") { send(draft, requestID) }
+                .disabled(pending != nil)
+            Button(pending == nil ? "发送答复" : "重试原答复") {
+                let text = pending ?? draft
+                pending = text; send(text, requestID)
+            }
                 .buttonStyle(PetButton())
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 4000)
+                .disabled(pending == nil && (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 4000))
+        }.disabled(busy)
+    }
+}
+
+private struct PetQuestionReply: View {
+    let question: PetChildQuestion
+    let busy: Bool
+    let send: (String, UUID) -> Void
+    @State private var draft = ""
+    @State private var requestID = UUID()
+    @State private var pending: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(question.text).textSelection(.enabled)
+                if let detail = question.detail { Text(detail).textSelection(.enabled) }
+                if pending == nil {
+                    ForEach(question.options ?? [], id: \.self) { option in
+                        Button(option) { pending = option; send(option, requestID) }.buttonStyle(PetButton(primary: false))
+                    }
+                }
+                TextField("其他答复", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(2...5).disabled(pending != nil)
+                Button(pending == nil ? "发送答复" : "重试原答复") {
+                    let text = pending ?? draft
+                    pending = text; send(text, requestID)
+                }.buttonStyle(PetButton())
+                    .disabled(pending == nil && (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.utf16.count > 32000))
+            }.frame(maxWidth: .infinity, alignment: .leading)
         }.disabled(busy)
     }
 }

@@ -87,7 +87,7 @@ export function remoteProgressLabel(event: string): string | undefined {
   if (Object.hasOwn(remoteProgressLabels, event)) return remoteProgressLabels[event];
 }
 
-export type GoalChange<T> = (goal: GoalState, record: (type: string, detail: string, workspace?: string) => void) => T | Promise<T>;
+export type GoalChange<T> = (goal: GoalState, record: (type: string, detail: string, workspace?: string) => void, tx: Tx) => T | Promise<T>;
 
 export async function changeGoal<T>(tx: Tx, change: GoalChange<T>, remoteConversation?: ConversationId): Promise<T> {
   const goal = await tx.doc(GoalDoc);
@@ -95,7 +95,7 @@ export async function changeGoal<T>(tx: Tx, change: GoalChange<T>, remoteConvers
   const result = await change(goal, (event, detail, workspace) => {
     const timestamp = goalEvent(goal, event, detail, workspace);
     if (remoteConversation && remoteProgressLabel(event)) events.push({ event, timestamp });
-  });
+  }, tx);
   if (remoteConversation) for (const data of events) {
     // The mobile history carries stable stage names without the local event's free-form detail.
     await tx.appendEntry(remoteConversation, { kind: remoteProgressKind, data });
@@ -115,7 +115,7 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
         throw new Error("Background delegation has not returned. End this turn when your independent work is done.");
       }
       if (submitting && await outstandingApproval(tx, api.conversationId)) throw new Error('An action approval is still outstanding. Wait for its result before submitting.');
-      await action(goal, record);
+      await action(goal, record, tx);
       goal.appliedTools[key] = true;
     }
     return { ok: true, revision: goal.revision, phase: goal.phase, candidateId: goal.candidate?.id ?? null };

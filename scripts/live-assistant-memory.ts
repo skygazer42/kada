@@ -38,7 +38,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['F11-chat-reminder-management','W01-chat-work-items'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['F11-chat-reminder-management','W01-chat-work-items'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -236,6 +236,25 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  await check('Q01-structured-question',async()=>{
+    const source=await server.runtime.create('只问我一个普通选择题：周末想读书还是散步？请用 ask_user 提供“读书”和“散步”两个选项，然后等待。不创建任务说明，不执行工作。',alpha,[],{chat:true});tasks.add(source.id);
+    const waiting=await until(()=>server.runtime.status(source.id),row=>['waiting_user','failed','answered','budget_limited'].includes(row.status),90_000);
+    assert.equal(waiting.status,'waiting_user','question_waiting');assert.equal(waiting.goal,undefined);
+    const question=waiting.userQuestion!;assert.deepEqual(question.options,['读书','散步'],'question_choices');
+    const beforeRestart=requests;
+    await server.close();server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'question_reopen_no_model');
+    assert.deepEqual((await server.runtime.status(source.id)).userQuestion,question,'question_original_identity');
+    await server.runtime.answerQuestion(source.id,question.id,'live-question-choice','读书');
+    const done=await until(()=>server.runtime.status(source.id),row=>['answered','failed','budget_limited'].includes(row.status),90_000);
+    assert.equal(done.status,'answered');assert.equal(done.goal,undefined);assert.equal(done.userQuestion,null);
+    assert.match(done.messages.map(conversationAnswer).filter(Boolean).at(-1) ?? '',/读书|书/);
+    const afterAnswer=requests;
+    await server.runtime.answerQuestion(source.id,question.id,'live-question-choice','读书');
+    assert.equal(requests,afterAnswer,'question_one_answer');
+    assert.equal(done.messages.filter(message=>message.role==='user' && message.content==='读书').length,1);
+    evidence.structuredQuestion={taskId:source.id,questionId:question.id,choicesVerified:true,identityAfterRestart:true,answerOnce:true,goalCreated:false,requests};
   });
   await check('W01-chat-work-items',async()=>{
     const {status:created}=await chat(alpha,'请给这个项目保存一条待办：标题“LYRA_613 周报”，说明“整理本周的合成项目进展”。只存待办，先不要执行，不要设提醒。');

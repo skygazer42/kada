@@ -1,0 +1,41 @@
+{
+  "at": "2026-11-26T05:06:40.847Z",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "customCatalog": false,
+  "selection": [
+    "Q01-structured-question"
+  ],
+  "fullSuite": false,
+  "passed": true,
+  "maxRequests": 8,
+  "modelRequests": 2,
+  "maxOutputTokensPerRequest": 1536,
+  "estimatedCostUsd": null,
+  "results": {
+    "Q01-structured-question": {
+      "passed": true
+    }
+  },
+  "evidence": {
+    "structuredQuestion": {
+      "taskId": "a0dd17c4-8ded-471f-92b5-468b020b43cb",
+      "questionId": "13",
+      "choicesVerified": true,
+      "identityAfterRestart": true,
+      "answerOnce": true,
+      "goalCreated": false,
+      "requests": 2
+    }
+  },
+  "tasks": [
+    {
+      "id": "a0dd17c4-8ded-471f-92b5-468b020b43cb",
+      "tokens": 11962,
+      "input": 6106,
+      "output": 96,
+      "cached": 5760
+    }
+  ],
+  "totalTaskTokens": 11962,
+  "note": "Task ledger includes owned workers; the standalone reminder parsing call is additionally bounded by the request counter. Deterministic kill/clock/permission tests are separate."
+}

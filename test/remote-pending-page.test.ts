@@ -422,6 +422,36 @@ test('a shared completed and archived todo keeps its original run visible and pr
   assert.equal(page.field('prompt').value, 'Keep my current draft');
 });
 
+test('a question choice retries its original answer after a lost receipt and preserves the chat draft', async () => {
+  const answers: { questionId: string; requestId: string; answer: string }[] = [];
+  let answered = false;
+  let lists = 0;
+  const device = harness(async (url, init) => {
+    if (url.pathname.endsWith('/question-answers')) {
+      answers.push(JSON.parse(init.body as string));
+      if (answers.length === 1) throw new TypeError('Lost answer response');
+      answered = true; return Response.json({ requestId: answers[0].requestId });
+    }
+    return Response.json({ conversationId, messages: [], receipts: [], task: { status: answered ? 'answered' : 'waiting_user',
+      question: 'Which format?', userQuestion: answered ? null : { id: '42', text: 'Which format?', options: ['CSV', 'XLSX'], detail: 'Choose a format.', createdAt: 12 } } });
+  }, undefined, () => { lists++; return Response.json([{ conversationId, title: 'Choose format' }]); });
+  const page = await device.open('#conversation=' + conversationId);
+  await page.type('Keep unsent draft');
+  const findButtons = (node: Element): Element[] => node.children.flatMap(child => [child, ...findButtons(child)]);
+  const csv = () => findButtons(page.field('task')).find(node => node.textContent === 'CSV')!;
+  assert(csv(), 'CSV choice button is available');
+  await csv().trigger('click');
+  assert.equal(answers.length, 1);
+  await page.poll();
+  const retry = findButtons(page.field('task')).find(node => node.textContent === 'Retry answer')!;
+  assert(retry, 'Original answer retry stays available after refresh');
+  const before = lists;
+  await retry.parentNode!.trigger('submit');
+  assert.deepEqual(answers[1], answers[0]); assert.equal(answers[0].answer, 'CSV');
+  assert.equal(page.field('prompt').value, 'Keep unsent draft');
+  assert(lists > before, 'Answer delivery refreshes the pending conversation list');
+});
+
 test("opening a shared run shows its original goal and steps without switching chats", async () => {
   const itemPath = workItemsUrl + "/" + workItemRow.id;
   const device = harness(undefined, undefined, undefined, undefined, (url) => {

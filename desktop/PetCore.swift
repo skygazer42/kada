@@ -106,6 +106,8 @@ struct PetApproval: Decodable, Equatable {
 struct PetChildQuestion: Decodable, Equatable {
     let id: String
     let text: String
+    var options: [String]?
+    var detail: String?
 }
 struct PetDelegation: Decodable, Equatable {
     let conversationId: Int
@@ -148,6 +150,7 @@ struct PetTask: Decodable, Equatable {
     var delegations: [PetDelegation]?
     var stoppableChildren: [PetStoppableChild]?
     var interruptibleChildTools: [PetChildTool]?
+    var userQuestion: PetChildQuestion?
 
     var childQuestions: [PetChildInput] {
         guard status == "running" else { return [] }
@@ -178,7 +181,7 @@ struct PetTask: Decodable, Equatable {
         }
     }
     var attentionKey: String {
-        "\(id):\(mode.rawValue):\(brief?.revision ?? 0):\(question ?? ""):\(reason ?? ""):\(reply?.timestamp ?? 0):\(childQuestions.map(\.id).joined(separator: ","))"
+        "\(id):\(mode.rawValue):\(brief?.revision ?? 0):\(question ?? ""):\(userQuestion?.id ?? ""):\(reason ?? ""):\(reply?.timestamp ?? 0):\(childQuestions.map(\.id).joined(separator: ","))"
     }
     var confirmation: [String: Any]? {
         guard mode == .confirm, !confirmed, let brief = brief, brief.questions.isEmpty,

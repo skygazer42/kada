@@ -11,7 +11,8 @@ export function taskView(status: TaskStatus) {
     interaction: status.interaction,
     reply: message ? { timestamp: message.timestamp, text: conversationAnswer(message)! } : null,
     brief: goal?.brief ?? null, briefDigest: status.briefDigest,
-    confirmed: Boolean(goal?.confirmation), question: goal?.question ?? null, reason: goal?.reason ?? status.initializationError ?? null,
+    confirmed: Boolean(goal?.confirmation), question: goal?.question ?? status.userQuestion?.text ?? null, userQuestion: status.userQuestion,
+    reason: goal?.reason ?? status.initializationError ?? null,
     budget: { estimatedCostUsd: status.budget.estimatedCostUsd, costLimit: status.budget.costLimit,priceKnown:status.budget.priceKnown,totalTokens:status.budget.totalTokens },
     consumption: {
       inputTokens: status.budget.inputTokens, cachedTokens: status.budget.cachedTokens,
@@ -47,7 +48,7 @@ export function taskHandoff(status:TaskStatus) {
   const child = status.status === "running" ? status.delegations.find(item => item.status === "waiting_input") : undefined;
   const group = child ? "pending" : taskGroup(status.status);
   const step = goal?.plan.find(step => step.status === 'running')?.title;
-  const question = goal?.question ?? child?.question?.text ?? null;
+  const question = goal?.question ?? status.userQuestion?.text ?? child?.question?.text ?? null;
   const summary = group === 'pending' ? question ?? goal?.reason ?? (status.status === 'awaiting_confirmation' ? '等待确认任务说明和预算' : status.status)
     : goal?.candidate?.summary ?? step ?? (status.interaction === 'chat' ? '普通对话' : '执行目标');
   return {group,summary:summary.slice(0,2000),question,step:step ?? null,
