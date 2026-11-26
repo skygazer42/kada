@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BACKGROUND_CONTEXT as ctx } from '@earendil-works/chord/context';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type TranscriptContext } from '@earendil-works/pi-ai';
-import { AssistantEntry, configure, createRegistry, defineDoc, defineExtension, defineTask, defineTool, Harness, hook, section, ToolTask, UsageDoc,
+import { AssistantEntry, configure, createRegistry, defineDoc, defineExtension, defineTask, defineTool, Harness, hook, LiveDoc, section, ToolTask, UsageDoc,
   type ConversationId, type EntryId, type TaskId } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { taskUsage } from '../src/budget.js';
@@ -229,4 +229,36 @@ test('one Pi registry resolves different peer role pins from their own committed
     }));
     assert.equal(effects, requestId === 'first' ? 1 : 2, 'only the writer peer may produce the synthetic effect');
   }
+});
+
+test('native selective generation abort preserves the next queued peer job and a passive boundary starts it without another input', async t => {
+  const entered = Promise.withResolvers<void>(); let stopped = false, secondRuns = 0;
+  const hold = defineTool({ name: 'hold', description: 'Wait for selective native stop.', parameters: Type.Object({}), replay: 'safe', execute: async (_args, _api, context) => {
+    const signal = context.abortSignal; assert(signal); entered.resolve();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => { stopped = true; resolve(); }, { once: true }));
+    return { output: [] };
+  } });
+  const f = await fixture(t, context => {
+    const last = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (peerContext(context)) {
+      const user = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+      if (user === 'CANCEL_FIRST_JOB') return fauxAssistantMessage(fauxToolCall('hold', {}), { stopReason: 'toolUse' });
+      assert.equal(user, 'KEEP_SECOND_JOB'); secondRuns++; return fauxAssistantMessage('SECOND_JOB_SURVIVED_817');
+    }
+    if (last.role === 'user' && (last.content === 'CANCEL_FIRST_JOB' || last.content === 'KEEP_SECOND_JOB')) return fauxAssistantMessage(fauxToolCall('peer_send', { text: last.content }), { stopReason: 'toolUse' });
+    return fauxAssistantMessage('Original job receipts retained.');
+  }, [defineExtension({ name: 'native_selective_stop_probe', tools: [hold] })]);
+  await (await f.root.submit({ type: 'input', content: 'CANCEL_FIRST_JOB' }, ctx)).wait(ctx); await entered.promise;
+  await (await f.root.submit({ type: 'input', content: 'KEEP_SECOND_JOB' }, ctx)).wait(ctx);
+  const state = (await f.harness.snapshot(Peers, f.root.id, ctx))!; assert(state.conversation);
+  const queued = await until(() => f.storage.scanSubmissions({ conversationId: state.conversation! }, 100, undefined, ctx), page => page.items.length === 2);
+  assert.deepEqual(queued.items.map(input => input.status).sort(), ['placed', 'queued']);
+  const current = (await f.harness.snapshot(LiveDoc, state.conversation, ctx))?.run; assert(current);
+  await f.harness.abortTask(current.taskId, ctx); await f.harness.waitForTask(current.taskId, ctx); assert.equal(stopped, true);
+  const peer = await f.harness.conversation(state.conversation, ctx); assert(peer);
+  await (await peer.submit({ type: 'write', entry: { kind: 'test.peer_work_stopped', model: [], data: { stopped: current.taskId } } }, ctx)).wait(ctx);
+  for (const taskId of Object.values(state.deliveries)) await f.harness.waitForTask(taskId, ctx); await f.root.waitForIdle(ctx);
+  const inputs = (await f.storage.scanSubmissions({ conversationId: peer.id }, 100, undefined, ctx)).items.filter(input => input.type === 'input');
+  assert.equal(inputs.length, 2); assert.equal(inputs[0]!.status, 'unanswered'); assert.equal(inputs[1]!.status, 'done'); assert.equal(secondRuns, 1);
+  assert.equal((await f.root.context(ctx)).messages.filter(message => message.role === 'user' && String(message.content) === 'PEER_REPORT SECOND_JOB_SURVIVED_817').length, 1);
 });

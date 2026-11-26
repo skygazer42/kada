@@ -13,7 +13,7 @@ export type AssistantSeat = {
 export type AssistantWorkResult = { status: 'done'; submission: SubmissionId; answer: EntryId } | { status: 'unanswered'; submission: SubmissionId; reason: string };
 export type AssistantWork = {
   id: string; fingerprint: string; root: ConversationId; source: ConversationId; target: ConversationId; taskId: TaskId;
-  origin: AssistantPeerEpoch; parentId?: string; lineage: string[]; depth: number; assistant: AssistantRef; brief: string; files: FileSnapshot[];
+  origin: AssistantPeerEpoch; parentId?: string; reworkOf?: string; lineage: string[]; depth: number; assistant: AssistantRef; brief: string; files: FileSnapshot[];
   inputRequests: string[]; messageRequestId: string; reportRequestId: string; createdAt: number;
   result?: AssistantWorkResult; stop?: { requestId: string; at: number; confirmed: boolean; ancestor?: string };
 };
@@ -27,7 +27,7 @@ export type AssistantAdmission = {
 };
 export type AssistantWorkIntent = {
   requestId: string; assistant: AssistantPin; instructions: string; tools: string[]; files: FileSnapshot[];
-  mode: 'standing' | 'new' | ConversationId;
+  mode: 'standing' | 'new' | ConversationId; reworkOf?: string;
 };
 type NativeWork = { conversation: ConversationRecord; anchor: TaskId; taskId: TaskId };
 export class AssistantPeerError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message); } }
@@ -41,7 +41,7 @@ function validate(intent: AssistantWorkIntent) {
   const modeValid = intent.mode === 'standing' || intent.mode === 'new' || typeof intent.mode === 'number' && Number.isSafeInteger(intent.mode) && intent.mode > 0;
   if (typeof intent.requestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,119}$/.test(intent.requestId) ||
     typeof intent.instructions !== 'string' || !intent.instructions.trim() || intent.instructions.length > 32_000 || intent.instructions.includes('\0') ||
-    !modeValid ||
+    !modeValid || intent.reworkOf !== undefined && (typeof intent.reworkOf !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,119}$/.test(intent.reworkOf)) ||
     !Array.isArray(intent.tools) || new Set(intent.tools).size !== intent.tools.length || intent.tools.some(tool => typeof tool !== 'string' || !intent.assistant.tools.includes(tool)) ||
     !Array.isArray(intent.files) || intent.files.length > 5 || intent.files.some(file => !isAbsolute(file.path) || !Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(file.sha256))) {
     throw new AssistantPeerError(400, 'Provide an original assistant request, explicit tool intersection and up to five bounded file snapshots.');
@@ -53,7 +53,8 @@ export async function claimAssistantWork(tx: Tx, authority: AssistantAdmission, 
   create: (seat: AssistantSeat | undefined) => Promise<NativeWork>): Promise<AssistantWork> {
   validate(intent);
   const tools = [...intent.tools].sort(), origin = { revision: authority.goal.revision, epoch: authority.goal.epoch };
-  const fingerprint = digest([authority.root, authority.source, authority.project, origin, authority.parentId, intent.assistant, tools, intent.instructions, intent.mode, intent.files]);
+  const fingerprint = digest([authority.root, authority.source, authority.project, origin, authority.parentId, intent.assistant, tools, intent.instructions, intent.mode, intent.files,
+    ...(intent.reworkOf ? ['rework', intent.reworkOf] : [])]);
   const state = await tx.doc(AssistantPeers), old = ownWork(state, intent.requestId);
   if (old) {
     if (old.fingerprint !== fingerprint) throw new AssistantPeerError(409, 'This assistant request already has different content.');
@@ -62,6 +63,13 @@ export async function claimAssistantWork(tx: Tx, authority: AssistantAdmission, 
   if (!authority.enabled || !authority.goal.initialized || authority.goal.phase !== 'working' || authority.requiresConfirmation && !authority.goal.confirmation ||
     authority.now >= authority.deadlineAt || authority.maxPeers < 1) throw new AssistantPeerError(409, 'Assistant work requires the original active execution goal and budget.');
   if (intent.assistant.project !== authority.project) throw new AssistantPeerError(404, 'Assistant not found in the original project.');
+  if (intent.reworkOf) {
+    const original = ownWork(state, intent.reworkOf), seat = original && state.seats[String(original.target)];
+    if (!original || original.root !== authority.root || original.source !== authority.source || !seat) throw new AssistantPeerError(404, 'Original assistant work not found in this source.');
+    if (!original.result || original.stop || intent.mode !== original.target || digest(intent.assistant) !== digest(seat.pin) || digest(tools) !== digest(seat.tools)) {
+      throw new AssistantPeerError(409, 'Rework requires a settled original work and its exact conversation, role and tool scope.');
+    }
+  }
   if (tools.some(tool => !authority.tools.includes(tool))) throw new AssistantPeerError(400, 'The assistant tool ceiling exceeds its source scope.');
   const root = await tx.conversation(authority.root), source = await tx.conversation(authority.source);
   if (!root || !source) throw new AssistantPeerError(404, 'Assistant source conversation not found.');
@@ -106,7 +114,7 @@ export async function claimAssistantWork(tx: Tx, authority: AssistantAdmission, 
     anchor: native.anchor, key, kind: intent.mode === 'new' ? 'new' : 'standing', pin: copy(intent.assistant), tools, createdAt: authority.now };
   const id = intent.requestId, messageRequestId = 'assistant-work:' + id, reportRequestId = 'assistant-report:' + id;
   const work: AssistantWork = { id, fingerprint, root: authority.root, source: authority.source, target: target.id, taskId: native.taskId,
-    origin, ...(parent ? { parentId: parent.id } : {}), lineage: [...ancestors, intent.assistant.id], depth, assistant: { id: intent.assistant.id, revision: intent.assistant.revision },
+    origin, ...(parent ? { parentId: parent.id } : {}), ...(intent.reworkOf ? { reworkOf: intent.reworkOf } : {}), lineage: [...ancestors, intent.assistant.id], depth, assistant: { id: intent.assistant.id, revision: intent.assistant.revision },
     brief: intent.instructions, files: copy(intent.files), inputRequests: [messageRequestId], messageRequestId, reportRequestId, createdAt: authority.now };
   state.work[id] = work;
   if (parent && !parent.inputRequests.includes(reportRequestId)) parent.inputRequests.push(reportRequestId);
@@ -144,7 +152,7 @@ export function assistantWorkView(state: AssistantPeerState | undefined, id: str
   const work = state && ownWork(state, id); if (!work) return;
   const seat = state!.seats[String(work.target)];
   if (!seat) throw new AssistantPeerError(409, 'The original assistant conversation record is missing.');
-  return { id: work.id, source: work.source, conversationId: work.target, conversationKind: seat.kind, nativeTaskId: work.taskId, origin: copy(work.origin), parentId: work.parentId ?? null, depth: work.depth,
+  return { id: work.id, source: work.source, conversationId: work.target, conversationKind: seat.kind, nativeTaskId: work.taskId, origin: copy(work.origin), parentId: work.parentId ?? null, reworkOf: work.reworkOf ?? null, depth: work.depth,
     assistant: { ...work.assistant, name: seat.pin.name }, brief: work.brief.slice(0, 1000), truncated: work.brief.length > 1000,
     files: copy(work.files), result: work.result ? copy(work.result) : null, stop: work.stop ? copy(work.stop) : null, controlVersion: controlVersion(work) };
 }

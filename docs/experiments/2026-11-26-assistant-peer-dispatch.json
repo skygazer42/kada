@@ -1,0 +1,64 @@
+{
+  "baseCommit": "14641696fa243dd8ecdd87000224c4167b49a509",
+  "scope": "Internal persistent-assistant dispatch, original result reporting, linked original-pin rework and read-only tools; Runtime product entry not enabled",
+  "references": {
+    "pi": "4a080252f06caf63a525d7873c5d94d3c23887e0",
+    "OpenMausBot": "3aec210054cd",
+    "Rakazo": "e64d73292179"
+  },
+  "focused": {
+    "command": "npx tsx --test test/assistant-peers.test.ts test/assistant-peer-recovery.test.ts test/assistant-peer-state.test.ts",
+    "passed": 35,
+    "failed": 0,
+    "core": 21,
+    "dispatcher": 11,
+    "realProcessKill": 3
+  },
+  "fullSuite": {
+    "command": "npm test",
+    "total": 582,
+    "passed": 578,
+    "failed": 0,
+    "skipped": 4,
+    "skipReason": "Optional Office fixture dependencies",
+    "durationMs": 1170769.6299,
+    "note": "Production implementation unchanged during run. An additional native selective-stop characterization was added after that file had run and verified separately."
+  },
+  "additionalNativeProbe": {
+    "name": "native selective generation abort preserves the next queued peer job and a passive boundary starts it without another input",
+    "passed": 1,
+    "failed": 0,
+    "contract": "Aborting the current LiveDoc generation settles its placed input while preserving queued followUp; an empty-model passive write advances the original Pi boundary without another user input. Business stop integration is still pending."
+  },
+  "checks": {
+    "productionTypecheck": "passed",
+    "productionBuild": "passed",
+    "strictPublicTestTypes": "passed for dispatcher, recovery fixture, recovery test and native probes",
+    "noteTree": "passed",
+    "noteFormat": "passed",
+    "archivedNotes": "passed",
+    "commitReadiness": "passed; 439 candidate files"
+  },
+  "recovery": {
+    "windows": ["assignment-before-receipt", "effect-before-receipt", "report-before-receipt"],
+    "assertions": "One original work, seat, peer input, actual effect and source report; original revision remains 1 after catalog edit/archive to revision 2",
+    "uncertainEffect": "Native non-replay-safe effect is not repeated after the crash; an uncertain receipt is not proof of rollback."
+  },
+  "review": {
+    "completed": false,
+    "subagent": "Gateway omitted the task payload twice; no files reviewed",
+    "autoreviewLocal": "Rejected before scanner/model because the Windows snapshot reported file changed while reading",
+    "diagnosis": "Reproduced unchanged file read changing st_atime_ns, making the helper fallback full-stat comparison fail",
+    "verdict": null
+  },
+  "realProviderRun": false,
+  "remaining": [
+    "Work-specific guidance and user questions",
+    "Immutable input/output file transfer and hashes",
+    "Scoped original-work stop and subtree reconciliation",
+    "Runtime original budget, pause/cancel and revision lifecycle integration",
+    "Owner API, terminal and task views",
+    "Additional SIGKILL windows and real-provider/native-Pi comparison",
+    "Full capability parity remains unachieved"
+  ]
+}
