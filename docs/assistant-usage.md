@@ -20,6 +20,19 @@
 
 `/title 标题` 修改当前会话的显示名称。结清工作后用 `/archive` 归档，`/tasks archived` 查看列表，`/attach 任务ID` 阅读历史，`/unarchive` 恢复显示和继续输入。来源、原对话、交付和已耗额度随原任务保存。[会话管理契约](superpowers/plans/2026-11-26-local-threads.md)
 
+## 工作区快照
+
+保存快照后可预览工作区的文件差异，再提交显示的 `version`。恢复会保存一个撤销快照，回执给出 `undoSnapshotId`，用同一预览与恢复入口可撤销这次操作。重叠任务还在执行或工作区在预览后发生编辑时，恢复返回当前冲突。[实现与验收](superpowers/plans/2026-11-26-workspace-snapshots.md)
+
+在后台配置加入 `"workspaceSnapshots": true` 后，新本机任务会在确认后的每个执行回合保存一个快照。默认保留最近十份自动快照，并保留手工快照与恢复历史引用的快照。
+
+```powershell
+npm run harness -- snapshots save 任务ID "修改前"
+npm run harness -- snapshots list 任务ID
+npm run harness -- snapshots preview 任务ID 快照ID
+npm run harness -- snapshots restore 任务ID 快照ID 预览版本
+```
+
 新本机聊天可直接说“保存待办：整理周报，先不要执行”“把这条待办标为完成”或“归档，保留记录”。助手用 `work_item_create` 保存，`work_items_list` 分页查询，`work_item_read` 回读原 ID 与修订，`work_item_update` 修改文字、open/parked/done 状态或归档。默认列表只显示未归档的 open/parked 项，查询已完成/归档记录时可分别开启 includeDone/includeArchived。列表说明最多 500 字，回读最多 8,000 字，均标注截断。
 
 待办状态是用户的规划记录：完成或归档不会开始、取消或证明原运行完成，已分享给手机的工作项仍可查看原运行。新运行前需恢复已完成/归档项；原运行请求重试保留原身份。聊天转为 Goal 后不再提供待办管理工具。旧聊天、远程、准备、执行与子任务不自动获得这些工具。修改回执在重放时返回当次结果，最新状态应重新查询。

@@ -285,6 +285,23 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (route === 'thread' && req.method === 'PATCH') return send(200, await runtime.editThread(taskId!, await body(req)));
         return send(405, { error: 'Method not allowed' });
       }
+      const snapshotRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/snapshots(?:\/([a-f0-9-]{36})\/(preview|restore))?$/.exec(url.pathname);
+      if (snapshotRoute) {
+        const [, taskId, snapshotId, operation] = snapshotRoute;
+        if (!operation && req.method === 'GET') return send(200, await runtime.workspaceSnapshots(taskId!));
+        if (!operation && req.method === 'POST') {
+          const { label } = await body(req);
+          if (typeof label !== 'string') throw new Error('Provide a snapshot label.');
+          return send(201, await runtime.saveWorkspaceSnapshot(taskId!, label));
+        }
+        if (operation === 'preview' && req.method === 'GET') return send(200, await runtime.previewWorkspaceRestore(taskId!, snapshotId!));
+        if (operation === 'restore' && req.method === 'POST') {
+          const { version } = await body(req);
+          if (typeof version !== 'string') throw new Error('Provide the displayed preview version.');
+          return send(200, await runtime.restoreWorkspace(taskId!, snapshotId!, version));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       const assistantWork = /^\/v1\/tasks\/([a-f0-9-]{36})\/assistant-work(?:\/(assign-(?:[a-f0-9-]{36}-)?\d+)(?:\/(stop|guide|questions\/(\d+)\/answer))?)?$/.exec(url.pathname);
       if (assistantWork) {
         const [, taskId, id, action, questionId] = assistantWork;

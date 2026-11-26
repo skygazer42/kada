@@ -41,6 +41,7 @@ try {
     console.log('work-items edit 的 JSON 可带 revision、title/objective、status（open/parked/done）、archived（布尔值）、priority（low/normal/high/urgent）、dueDate（YYYY-MM-DD）或 dueAt（带 UTC 偏移的 ISO 时刻）及 timeZone（IANA）。截止用 null 清空，切换种类须清空旧字段。保存、完成或设截止不启动/取消原运行，也不创建提醒。');
     console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
     console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
+    console.log('\n工作区快照（本机）\n  snapshots save 任务ID "快照名称"\n  snapshots list 任务ID\n  snapshots preview 任务ID 快照ID\n  snapshots restore 任务ID 快照ID 预览版本');
     console.log('\nrun 或 chat 接受可重复的 --collaborator ID@修订。确认任务后，主助手可向选定的同事派活。用 /assistant-work 查看工作，/reply-assistant 答复，/guide-assistant 补充说明，/stop-assistant 停止原工作。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
@@ -96,7 +97,7 @@ try {
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
-  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants'].includes(command)) {
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants','snapshots'].includes(command)) {
     const {ensureDaemon} = await import('./daemon.js');
     await ensureDaemon(config,args.values.config);
     const action = id ?? 'list';
@@ -127,6 +128,15 @@ try {
       else throw new Error('Use credentials list or credentials remove NAME REVISION --workspace PATH.');
     }
     else if (command === 'tasks') result = await request('/v1/tasks?filter='+encodeURIComponent(args.values.filter ?? 'all'));
+    else if (command === 'snapshots') {
+      const [taskId, value, version] = rest;
+      const path = '/v1/tasks/' + segment(taskId) + '/snapshots';
+      if (id === 'list' && rest.length === 1) result = await request(path);
+      else if (id === 'save' && value && rest.length === 2) result = await request(path, 'POST', { label: value });
+      else if (id === 'preview' && rest.length === 2) result = await request(path + '/' + segment(value) + '/preview');
+      else if (id === 'restore' && version && rest.length === 3) result = await request(path + '/' + segment(value) + '/restore', 'POST', { version });
+      else throw new Error('Use snapshots list TASK, save TASK LABEL, preview TASK SNAPSHOT or restore TASK SNAPSHOT VERSION.');
+    }
     else if (command === 'work-items') {
       const path = '/v1/work-items';
       if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));

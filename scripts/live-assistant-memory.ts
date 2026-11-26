@@ -39,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -65,7 +65,8 @@ await writeFile(join(beta,'AGENTS.md'),'日报回复语言 language 偏好：英
 const socket=createServer();await new Promise<void>(done=>socket.listen(0,'127.0.0.1',done));
 const port=(socket.address() as {port:number}).port;await new Promise<void>(done=>socket.close(()=>done()));
 const longLiveCases = ['A02-chat-assistants', 'A03-assistant-collaboration'];
-const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true};
+const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true,
+  workspaceSnapshots:process.env.KADA_LIVE_CASES === 'T04-workspace-snapshots'};
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
   beforeTool(call) {
@@ -466,6 +467,36 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(calls.filter(message=>message.toolName==='work_item_update' && !message.isError).length,2);
     assert(!calls.some(message=>/reminder_(?:create|update)|task_prepare/.test(message.toolName)),'planning_no_execution_or_reminder');
     evidence.workItemPlanning={itemId:item.id,chatId:created.id,dateOnlySaved:true,timedDeadlineSaved:true,deadlineCleared:true,originalIdKept:true,restartNoModel:true,goalCreated:false,runs:0,requests};
+  });
+  if (selectedCases.includes('T04-workspace-snapshots')) await check('T04-workspace-snapshots', async () => {
+    const filename = 'snapshot-demo.txt', file = join(alpha, filename);
+    await writeFile(file, 'BEFORE_SNAPSHOT_357');
+    const edit = await client.request<{ id: string }>('/v1/tasks', 'POST', { workspace: alpha, confirmed: true,
+      objective: `Use the write tool to replace ${filename} with the exact contents AFTER_SNAPSHOT_357. Then call task_submit, supplying ${filename} as the sole artifact.`,
+      acceptance: [{ type: 'file_contains', path: filename, text: 'AFTER_SNAPSHOT_357' }] });
+    tasks.add(edit.id);
+    const edited = await until(() => server.runtime.status(edit.id), status => status.messages.some(message =>
+      message.role === 'toolResult' && message.toolName === 'write' && !message.isError), 120_000);
+    assert.equal((await readFile(file, 'utf8')).trim(), 'AFTER_SNAPSHOT_357');
+    if (edited.status !== 'completed') await server.runtime.cancel(edit.id);
+    const path = `/v1/tasks/${edit.id}/snapshots`;
+    const undoPoints = await client.request<{ id: string; automatic: boolean }[]>(path);
+    assert.equal(undoPoints.length, 1);
+    const [saved] = undoPoints;
+    assert(saved?.automatic);
+    const preview = await client.request<{ version: string; changes: { path: string; action: string }[] }>(`${path}/${saved.id}/preview`);
+    assert.deepEqual(preview.changes.map(change => [change.path, change.action]), [[filename, 'replace']]);
+    const beforeRestore = requests;
+    await server.close(); server = await serve(config, serverOptions);
+    const report = await client.request<{ undoSnapshotId: string; restored: number; removed: number }>(`${path}/${saved.id}/restore`, 'POST', { version: preview.version });
+    assert.equal(report.restored, 1);
+    assert.equal(await readFile(file, 'utf8'), 'BEFORE_SNAPSHOT_357');
+    const undo = await client.request<{ version: string }>(`${path}/${report.undoSnapshotId}/preview`);
+    await client.request(`${path}/${report.undoSnapshotId}/restore`, 'POST', { version: undo.version });
+    assert.equal((await readFile(file, 'utf8')).trim(), 'AFTER_SNAPSHOT_357');
+    assert.equal(requests, beforeRestore);
+    evidence.workspaceSnapshots = { originalFile: filename, automaticBeforeTurn: true, editVerified: true, stoppedAfterWrite: edited.status !== 'completed', previewBoundRestore: true,
+      daemonRestarted: true, undoRecoveredEditedBytes: true, restoreRequests: requests - beforeRestore, requests };
   });
   if (selectedCases.includes('T03-local-threads')) await check('T03-local-threads', async () => {
     const filename = 'thread-evidence.txt', expected = 'THREAD_ARTIFACT_728';

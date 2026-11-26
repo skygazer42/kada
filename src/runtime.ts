@@ -54,6 +54,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
 import { threadTaskId, threadTitle, threadTools, type TaskThread, type ThreadOrigin } from './task-threads.js';
+import { TurnWorkspaceSnapshot, WorkspaceSnapshots, WorkspaceSnapshotError, containsWorkspacePath } from './workspace-snapshots.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -90,6 +91,7 @@ export interface TaskMeta {
   projectCatalog?: true;
   threadTools?: true;
   thread?: TaskThread;
+  snapshotBeforeTurn?: true;
   structuredQuestions?: true;
   credentialProject?: string;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
@@ -152,6 +154,7 @@ export class LocalRuntime {
   readonly workItems: WorkItems<TaskMeta>;
   readonly credentials: ApplicationCredentials;
   readonly assistants: Assistants;
+  private readonly snapshots: WorkspaceSnapshots;
   private inbox: NotificationStore;
   private active = new Map<string, Active>();
   private changes = new SerialQueue();
@@ -166,6 +169,7 @@ export class LocalRuntime {
     this.mcp = new McpTools(config.dataDir);
     this.credentials = new ApplicationCredentials(config.dataDir, options.credentialNetwork);
     this.assistants = new Assistants(config.dataDir, options.models);
+    this.snapshots = new WorkspaceSnapshots(config.dataDir);
     this.workItems = new WorkItems<TaskMeta>(config.dataDir, {
       task: async id => {
         try { return await this.metadata(id); }
@@ -331,6 +335,29 @@ export class LocalRuntime {
     return this.inbox.mark(notifications.filter(event => event.taskId === id).map(event => event.id),notifications);
   }
   async artifacts(id:string) { return artifactList(await this.status(id)); }
+  private async snapshotWorkspace(id: string) {
+    const meta = await this.metadata(id);
+    if (meta.remotePolicy) throw new WorkspaceSnapshotError(404, 'Workspace snapshots belong to local tasks.');
+    return meta.workspace;
+  }
+  async workspaceSnapshots(id: string) { return this.snapshots.list(await this.snapshotWorkspace(id)); }
+  async saveWorkspaceSnapshot(id: string, label: string) { return this.snapshots.create(await this.snapshotWorkspace(id), label); }
+  async previewWorkspaceRestore(id: string, snapshotId: string) { return this.snapshots.preview(await this.snapshotWorkspace(id), snapshotId); }
+  async restoreWorkspace(id: string, snapshotId: string, version: string) {
+    return this.changes.run(async () => {
+      const workspace = (await Workspace.open(await this.snapshotWorkspace(id), { create: false })).root;
+      return this.snapshots.restore(workspace, snapshotId, version, async () => {
+        for (const task of this.active.values()) {
+          if (task.meta.control !== 'active' || task.meta.thread?.archivedAt ||
+            !containsWorkspacePath(workspace, task.workspace.root) && !containsWorkspacePath(task.workspace.root, workspace)) continue;
+          const { tasks, submissions } = await task.harness.inspect(ctx);
+          if (task.enabled || tasks.length || submissions.length) {
+            throw new WorkspaceSnapshotError(409, `Task ${task.meta.id} is still active in an overlapping workspace.`);
+          }
+        }
+      });
+    });
+  }
   async skillCatalog(workspace:string) {
     const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
     return store.catalog(await Workspace.open(workspace,{create:false}),await this.discoveredSkills(workspace));
@@ -443,6 +470,7 @@ export class LocalRuntime {
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
         ...(thread ? { thread: { ...thread, revision: 1 } } : {}),
         ...(collaborators ? { collaborators } : {}),
+        ...(this.config.workspaceSnapshots && !options.remote ? { snapshotBeforeTurn: true as const } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
           instructions: role.instructions, tools: [...role.tools], model: { ...model } } } : {}),
         mcpPins,
@@ -751,6 +779,19 @@ export class LocalRuntime {
         },
       } satisfies Partial<GenerationHooks>}]}) : undefined;
       const team = remote ? undefined : meta.collaborators;
+      const snapshots = !remote && meta.snapshotBeforeTurn ? defineExtension({ name: 'local_workspace_snapshots', hooks: [{ task: 'pi.generation', handlers: {
+        beforeRequest: async (_request, api, context) => {
+          if (api.conversationId !== ROOT_CONVERSATION_ID || context.abortSignal?.aborted) return;
+          const goal = await api.snapshot(GoalDoc, context);
+          if (goal?.phase !== 'working' || meta.preparation && !goal.confirmation) return;
+          const input = (await api.snapshot(LiveDoc, api.conversationId, context))?.run?.inputs.at(-1);
+          if (!input || (await api.snapshot(TurnWorkspaceSnapshot, context))?.input === input) return;
+          try { await this.snapshots.captureTurn(meta.workspace, meta.id, input); }
+          catch (error) { console.warn(`Workspace snapshot skipped for task ${meta.id}: ${errorText(error)}`); }
+          const active = this.active.get(meta.id);
+          await active?.harness.commit(async tx => { (await tx.doc(TurnWorkspaceSnapshot)).input = input; }, ctx);
+        },
+      } satisfies Partial<GenerationHooks> }] }) : undefined;
       const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote, assistantPeers: !!team }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const questions = meta.structuredQuestions ? questionExtension(!!meta.preparation, remote) : undefined;
       const credentialManagement = !remote && meta.credentialProject ? credentialTools(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
@@ -797,7 +838,7 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
-      const coordinatorOnly = [goal, verification, ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...(snapshots ? [snapshots] : []), ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {
@@ -813,6 +854,7 @@ export class LocalRuntime {
         ...(nativeSkills && !remote ? [readObserver,defineExtension({name:'local_skill_scripts',tools:[runSkillScript]})] : []),
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
+        ...(snapshots ? [snapshots] : []),
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
         ...(questions ? [questions] : []),

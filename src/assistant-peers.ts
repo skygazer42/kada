@@ -32,7 +32,7 @@ type Attachment = { id: string; origin: AssistantPeerEpoch; files: AssistantFile
 type Availability = 'active' | 'waiting' | 'inactive';
 const output = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 const idSchema = Type.String({ minLength: 1, maxLength: 120 });
-const privateExtensions = new Set(['local_goal', 'local_delegation', assistantPolicyName, 'local_chat_assistants', 'local_conversation', 'local_preparation',
+const privateExtensions = new Set(['local_goal', 'local_delegation', assistantPolicyName, 'local_chat_assistants', 'local_conversation', 'local_preparation', 'local_workspace_snapshots',
   'local_verification', 'local_user_questions', 'local_user_memory', 'local_memory_use', 'local_project_history', 'local_project_tasks', 'local_learning',
   'local_computer', 'local_credential_management', 'local_credential_requests', 'local_skills', 'local_skill_scripts']);
 const sameEpoch = (a: AssistantPeerEpoch, b: AssistantPeerEpoch) => a.revision === b.revision && a.epoch === b.epoch;

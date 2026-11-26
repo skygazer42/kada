@@ -1,0 +1,41 @@
+{
+  "model": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+  "case": "T04-workspace-snapshots",
+  "runner": "scripts/live-assistant-memory.ts",
+  "attempts": [
+    {
+      "at": "2026-11-26T18:30:00.705Z",
+      "requests": 5,
+      "totalTokens": 28107,
+      "passed": false,
+      "modelEditedFile": true,
+      "reason": "The real model wrote and read back the edited file. Its final generation was still pending at the runner timeout."
+    },
+    {
+      "scope": "Continuation of the existing edit and manual snapshot through the compiled CLI",
+      "modelRequestsDuringRestore": 0,
+      "passed": true,
+      "originalEditStopped": true,
+      "previewSurvivedDaemonRestart": true,
+      "savedBytesRestored": true,
+      "undoRecoveredEditedBytes": true
+    },
+    {
+      "at": "2026-11-26T18:39:38.148Z",
+      "requests": 3,
+      "totalTokens": 13040,
+      "inputTokens": 6607,
+      "outputTokens": 161,
+      "cachedTokens": 6272,
+      "passed": true,
+      "automaticSnapshotBeforeEdit": true,
+      "originalEditStopped": true,
+      "previewSurvivedDaemonRestart": true,
+      "savedBytesRestored": true,
+      "undoRecoveredEditedBytes": true,
+      "modelRequestsDuringRestore": 0
+    }
+  ],
+  "estimatedCostUsd": null,
+  "scope": "Synthetic local workspaces, an explicitly enabled automatic checkpoint, and the ordinary owner restore API and CLI."
+}
