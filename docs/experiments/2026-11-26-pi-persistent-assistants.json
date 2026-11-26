@@ -1,0 +1,23 @@
+{
+  "at": "2026-11-26T12:18:50.4948947Z",
+  "installedPiVersion": "1.4.0",
+  "officialTag": "v1.4.0",
+  "officialCommit": "4a080252f06caf63a525d7873c5d94d3c23887e0",
+  "officialExample": "packages/durable/test/examples/23-subagent-background.ts",
+  "nativeCases": 4,
+  "relatedRegressionPassed": 22,
+  "relatedRegressionFailed": 0,
+  "strictPublicTypes": "Passed with ES2024, NodeNext, strict, no emit",
+  "storage": "Actual native Node SQLite in isolated temporary directories",
+  "model": "Pi faux provider; no live model requests",
+  "verified": [
+    "Same peer transcript reused after close/reopen with no new model request on reopen",
+    "Stable original request IDs and one report per settled answer",
+    "Second job queued until first final answer, preserving distinct submissions and answers",
+    "Nonzero peer token usage included in the original Harness total",
+    "Ordinary abort skips background boundary; full background subtree abort stops tool and report work",
+    "Single registry uses each conversation document for role prompt and action scope before and after restart"
+  ],
+  "productionIntegrated": false,
+  "limitations": "No Kada peer UI/API, full role assignment lifecycle, SIGKILL for new peer reporters, live provider comparison or physical-device qualification yet. These remain explicit product acceptance requirements."
+}

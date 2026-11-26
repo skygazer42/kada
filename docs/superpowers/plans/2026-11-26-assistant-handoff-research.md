@@ -31,3 +31,18 @@ OpenMausBot 的 Coordinator 接口明确 standing/new/原线程、结果回传�
 6. 用户补充答复、完成结果和失败/返工沿原交接身份回传；重启和结果回执丢失不能重新派发未知副作用。单向通知和等待返回也应区分。
 
 下一份实施Spec需覆盖以上完整路径与测试，并明确仍未实现的群组、站立会话/记忆或平台能力。研究不等于功能已交付；优先复用Pi，若公开接口不足，先用实际原生实验给出证据。
+
+## Pi 1.4.0 的实际扩展点验证
+
+已核对官方tag `v1.4.0`解析为提交`4a080252f06caf63a525d7873c5d94d3c23887e0`，与本机安装版本一致。官方[持久后台子助手示例23](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/durable/test/examples/23-subagent-background.ts#L37)使用原Pi文档保存同事会话映射，以已完成的后台锚点任务作为conversation owner，再用原生持久任务的deliver/report阶段投递消息和回传结果；稳定requestId避免恢复后重投。可复用此机制，不需要新的调度器或消息总线。
+
+本机已安装Pi上的四个原生回归通过，测试使用合成模型和真实SQLite：[验证代码](../../../test/pi-persistent-assistants.test.ts)。
+
+- 同一同事会话在关闭/重开后保留前一次用户消息，第二次工作复用同一conversation；重开没有模型调用，重复原来源requestId没有新请求或用量，原结果回传各一次。
+- 第二次投递在第一份工作未完成时保持queued，在第一份最终答复后才执行；保留两个不同submission/answer和两份原结果回执，没有用steer覆盖原工作。
+- 普通root.abort跳过后台边界，完整`abort({background:true})`能够越过已完成锚点，停止同事实际工具及持久回传任务；取消后不回传结果。原用量文档的非零子会话token包含在同一Harness汇总，未给同事另加预算。
+- 同一个registry使用同一扩展，从每个同事自己的已提交conversation文档读取提示和权限；读/写角色并行执行及重启后不串配置，只有写角色产生合成效果。由`input.read.snapshot`和原`ToolTask`钩子实现，不需要给每个角色复制registry或运行时。
+
+测试另外按公开类型做独立严格检查（ES2024，对应本机Node24支持Promise.withResolvers）；锚点定义补齐公开API必需的abort处理。与原Pi hooks、临时委派及固定角色回归合并的22项通过。没有产品代码改动，这些结果不能冒充Kada已支持命名同事派活。[验收摘要](../../experiments/2026-11-26-pi-persistent-assistants.json)
+
+官方示例中的普通Esc继续后台工作，不直接作为Kada默认停止政策。当前Kada的abortAll已调用完整background子树停止，产品接入还须覆盖暂停、预算到限、目标修订、用户停止后不被自动重派及迟到报告处理。正式产品契约见[持久协作Spec](../../specs/2026-11-26-assistant-collaboration.md)，该Spec的验收清单尚未实现。
