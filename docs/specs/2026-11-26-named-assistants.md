@@ -23,7 +23,7 @@ Pi 已公开每会话 `configure()`、`tools`、`modelTools`、固定指令、�
 
 ## 首个完整产品路径
 
-用户在现有项目中创建“研究员”等具名配置，明确指令、模型与工具名称；通过 `chat --assistant ID@REVISION` 或 `run --assistant ID@REVISION` 开始工作。复用原聊天转 Goal、预算、确认、执行、恢复与交付。CLI 和 owner API 先承担配置管理，模型自行创建/修改角色和跨助手交接继续单独补齐。
+用户在现有项目中创建“研究员”等具名配置，明确指令、模型与工具名称；通过 `chat --assistant ID@REVISION` 或 `run --assistant ID@REVISION` 开始工作。复用原聊天转 Goal、预算、确认、执行、恢复与交付。CLI 和 owner API 提供配置管理，后续已接入[普通聊天角色管理](2026-11-26-chat-assistants.md)；跨助手交接仍单独补齐。
 
 - 记录：id、project、name、description、instructions、model（明确 ModelRef 或 null 表示使用当前项目模型）、tools（明确名称数组）、revision、archived、createdAt、updatedAt。项目由现有 memoryProject 规范化；同项目名称规范化后不可重复。工具数组不接受通配符；空数组表示无额外动作工具。
 - name 为 1–80 字符的单行标签，拒绝终端控制字符；description 最多 1,000，instructions 为 1–16,000 非空字符，拒绝 NUL，指令字符串保留原空白和 Unicode 码点。工具名最多 128 个、每个 256 字符且不重复。输入拒绝未知字段。模型引用沿原已安装目录校验，不存凭据或自动换供应商。

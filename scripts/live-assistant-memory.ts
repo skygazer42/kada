@@ -39,7 +39,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -64,7 +64,7 @@ await writeFile(join(alpha,'AGENTS.md'),'日报回复语言 language 偏好：�
 await writeFile(join(beta,'AGENTS.md'),'日报回复语言 language 偏好：英文。');
 const socket=createServer();await new Promise<void>(done=>socket.listen(0,'127.0.0.1',done));
 const port=(socket.address() as {port:number}).port;await new Promise<void>(done=>socket.close(()=>done()));
-const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:100_000,review:false,web:false,discovery:true};
+const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:process.env.KADA_LIVE_CASES==='A02-chat-assistants' ? 180_000 : 100_000,review:false,web:false,discovery:true};
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
   beforeTool(call) {
@@ -251,6 +251,35 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  await check('A02-chat-assistants',async()=>{
+    const instructions='先阅读原始资料并引用来源。';
+    const {status:created}=await chat(alpha,'请给当前项目保存一个名为“LYRA_ROLE_628 研究员”的助手配置，完整指令逐字为“'+instructions+'”，工具名单只允许 read，模型使用默认（model=null）。先用 assistant_catalog 查询 read 的实际工具名，再用 assistant_create 保存。只配置，不开始工作，不切换本会话角色，不创建任务或提醒。',config.maxDurationMs+5000);
+    const roles=(await server.runtime.assistants.list(alpha)).filter(role=>role.name==='LYRA_ROLE_628 研究员');
+    assert.equal(roles.length,1,'chat_role_single_identity');const role=roles[0]!;
+    assert.equal((await server.runtime.assistants.get(role.id)).instructions,instructions);assert.deepEqual(role.tools,['read']);assert.equal(role.model,null);
+    const beforeRestart=requests;await server.close();server=await serve(config,serverOptions);assert.equal(requests,beforeRestart,'chat_role_restart_no_model');
+    await server.runtime.followUp(created.id,'请先 assistant_read 读取 LYRA_ROLE_628 研究员的完整原指令，再仅在末尾追加“结果用中文。”，保留原句与工具和模型。用原 ID/当前修订修改配置；不开始任务或切换本会话。','chat-role-edit');
+    const edited=await until(()=>server.runtime.status(created.id),row=>row.submission?.requestId==='user:chat-role-edit' && ['answered','failed','budget_limited','waiting_user'].includes(row.status),config.maxDurationMs+5000);
+    assert.equal(edited.status,'answered');assert.equal(edited.goal,undefined);assert.equal(edited.assistant,undefined);
+    const amended=await server.runtime.assistants.get(role.id);assert.equal(amended.instructions,instructions+'结果用中文。');assert.deepEqual(amended.tools,['read']);assert.equal(amended.model,null);
+    await server.runtime.followUp(created.id,'请把刚才的 LYRA_ROLE_628 研究员配置归档，保留记录，不取消或启动任何工作。','chat-role-archive');
+    const archived=await until(()=>server.runtime.status(created.id),row=>row.submission?.requestId==='user:chat-role-archive' && ['answered','failed','budget_limited','waiting_user'].includes(row.status),config.maxDurationMs+5000);
+    assert.equal(archived.status,'answered');assert.equal(archived.goal,undefined);assert.equal((await server.runtime.assistants.get(role.id)).archived,true);
+    await server.runtime.followUp(created.id,'请恢复刚才已归档的 LYRA_ROLE_628 研究员配置（archived=false），只恢复同一条记录，然后 assistant_read 回读完整设置；不开始工作，不切换当前角色。','chat-role-restore');
+    const done=await until(()=>server.runtime.status(created.id),row=>row.submission?.requestId==='user:chat-role-restore' && ['answered','failed','budget_limited','waiting_user'].includes(row.status),config.maxDurationMs+5000);
+    assert.equal(done.status,'answered');assert.equal(done.goal,undefined);assert.equal(done.assistant,undefined);
+    const final=await server.runtime.assistants.get(role.id);assert.equal(final.archived,false);assert.equal(final.instructions,instructions+'结果用中文。');assert.equal(final.revision,4);
+    assert.equal((await server.runtime.assistants.list(alpha)).filter(row=>row.name==='LYRA_ROLE_628 研究员').length,1);
+    assert.equal((await server.runtime.list()).length,1,'chat_role_no_extra_task');
+    const calls=done.messages.filter(message=>message.role==='toolResult');
+    assert.equal(calls.filter(message=>message.toolName==='assistant_create' && !message.isError).length,1);
+    assert.equal(calls.filter(message=>message.toolName==='assistant_update' && !message.isError).length,3);
+    assert(calls.filter(message=>message.toolName==='assistant_read' && !message.isError).length>=2);
+    assert(calls.some(message=>message.toolName==='assistant_catalog' && !message.isError));
+    assert(!calls.some(message=>/task_prepare|delegate|reminder_create/.test(message.toolName)),'chat_role_no_goal_or_dispatch');
+    evidence.chatAssistants={assistantId:role.id,chatId:created.id,originalIdKept:true,instructionsPreserved:true,archivedAndRestored:true,restartNoModel:true,
+      finalRevision:final.revision,createCalls:1,updateCalls:3,goalCreated:false,currentRoleChanged:false,extraTasks:0,requests};
   });
   await check('A01-named-assistant',async()=>{
     const oldMarker='ROLE_LIVE_READER_731', newMarker='ROLE_LIVE_WRITER_936';

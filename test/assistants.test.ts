@@ -92,3 +92,55 @@ test('corrupt catalog data fails visibly without clearing it; an unavailable mod
     assert.equal(await readFile(f.file, 'utf8'), bytes);
   }
 });
+
+test('original assistant create/update/no-op receipts survive later edits, archive and model removal without restoring old settings', async t => {
+  const f = await fixture(t), request = (requestId: string) => ({ requestId, project: f.project, workspace: f.sub });
+  const input = { ...definition, workspace: f.project, model: { provider: 'role-models', modelId: 'reader' } };
+  const [first, duplicate] = await Promise.all([f.roles.create(input, request('chat-create')), f.roles.create(input, request('chat-create'))]);
+  assert.deepEqual(duplicate, first);
+  assert.deepEqual(await f.roles.create(input, request('chat-create')), first);
+  const patch = { revision: 1, instructions: 'The original amended instructions.', tools: ['read'] };
+  const changed = await f.roles.update(first.id, patch, request('chat-update'));
+  const noOp = { revision: 2, name: changed.name };
+  assert.deepEqual(await f.roles.update(first.id, noOp, request('chat-noop')), changed);
+  const current = await f.roles.update(first.id, { revision: 2, instructions: 'Later owner edit.', archived: true });
+  const withoutModel = new Assistants(f.directory, createModels());
+  assert.deepEqual(await withoutModel.create(input, request('chat-create')), first);
+  assert.deepEqual(await withoutModel.update(first.id, patch, request('chat-update')), changed);
+  assert.deepEqual(await withoutModel.update(first.id, noOp, request('chat-noop')), changed);
+  assert.deepEqual(await f.open().get(first.id), current);
+  await assert.rejects(f.roles.create({ ...input, name: 'Different request' }, request('chat-create')), { status: 409 });
+  await assert.rejects(f.roles.update(first.id, { ...patch, instructions: 'Different retry' }, request('chat-update')), { status: 409 });
+  assert.equal((await f.roles.list(f.project)).length, 1);
+  assert.doesNotMatch(JSON.stringify([await f.roles.get(first.id), await f.roles.list(f.project), first, changed]), /operations|fingerprint|requestId/);
+  const stored = JSON.parse(await readFile(f.file, 'utf8'));
+  assert.equal(stored[0].operations.length, 3);
+  const complete = JSON.stringify(stored);
+  for (const corrupt of [
+    [{ ...stored[0], operations: {} }],
+    [{ ...stored[0], operations: [...stored[0].operations, stored[0].operations[0]] }],
+    [{ ...stored[0], operations: [{ ...stored[0].operations[0], result: { ...first, project: f.other } }] }],
+    [{ ...stored[0], operations: [{ ...stored[0].operations[0], result: { ...first, revision: current.revision + 1 } }] }],
+  ]) {
+    const bytes = JSON.stringify(corrupt); await writeFile(f.file, bytes);
+    await assert.rejects(f.roles.get(first.id), /Stored assistant/);
+    assert.equal(await readFile(f.file, 'utf8'), bytes);
+  }
+  await writeFile(f.file, complete);
+});
+
+test('assistant mutation scope is checked inside the original write queue and foreign IDs cannot be amended', async t => {
+  const f = await fixture(t), request = { requestId: 'scoped-create', project: f.project, workspace: f.sub };
+  const foreign = await f.roles.create({ ...definition, workspace: f.other });
+  await assert.rejects(f.roles.update(foreign.id, { revision: 1, instructions: 'Injected' }, request), { status: 404 });
+  const before = await readFile(f.file, 'utf8');
+  await assert.rejects(f.roles.create({ ...definition, workspace: f.other }, request), { status: 409 });
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const blocker = f.roles['changes'].run(async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  const create = f.roles.create({ ...definition, workspace: f.sub }, request);
+  await rm(join(f.project, '.git'), { recursive: true, force: true });
+  release.resolve(); await blocker;
+  await assert.rejects(create, { status: 409 });
+  assert.equal(await readFile(f.file, 'utf8'), before);
+});

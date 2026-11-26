@@ -48,6 +48,7 @@ import { ApplicationCredentials, CredentialError, type CredentialNetwork } from 
 import { credentialTools, credentialExecution } from './credential-tools.js';
 import { Assistants, AssistantError, assistantRef, type AssistantRef, type AssistantPin } from './assistants.js';
 import { assistantPolicy, assistantTools } from './assistant-policy.js';
+import { chatAssistantsExtension } from './chat-assistants.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -77,6 +78,7 @@ export interface TaskMeta {
   entrypoint?: "chat";
   chatReminders?: true | 'managed';
   chatWorkItems?: { project: string };
+  chatAssistants?: { project: string };
   historyRecall?: true;
   projectTaskCatalog?: true;
   structuredQuestions?: true;
@@ -412,6 +414,7 @@ export class LocalRuntime {
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
+        ...(workItemProject ? { chatAssistants: { project: workItemProject } } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
         structuredQuestions: true,
@@ -616,6 +619,13 @@ export class LocalRuntime {
         ...(credentialManagement ? [credentialManagement] : []),
         ...(questions ? [questions] : []),
         ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
+        ...(!remote && meta.chatAssistants ? [chatAssistantsExtension(this.assistants, meta.workspace, meta.chatAssistants.project, meta.id, async () => {
+          const current = this.active.get(meta.id); if (!current) throw new Error('The assistant catalog task is not open.');
+          const tools = new Map([...current.executionExtensions, ...current.preparationExtensions, ...current.chatExtensions].flatMap(extension => extension.tools ?? [])
+            .map(tool => [tool.name, { name: tool.name, description: (tool.description ?? '').slice(0, 300) }]));
+          return { currentModel: meta.model, defaultModel: await this.providers.selected(this.config.model, meta.chatAssistants!.project) ?? null,
+            models: this.options.models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), tools: [...tools.values()] };
+        })] : []),
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
         ...(memoryUse ? [memoryUse] : []),

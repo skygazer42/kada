@@ -209,6 +209,18 @@ owner 的 Assistants 目录保存项目身份、名称、完整指令、模型�
 
 硅基流动 DeepSeek V3.2 首轮模型提出 30 秒预算，测试确认后在计划阶段正确到限，无产物；该失败保留。第二轮明确 180 秒/100,000 token 配置并跳过可选计划后，验证旧会话重启保留 v1、新会话使用 v2、确认前无文件/写工具、确认后只写一次并交付精确字节，bash 始终不提供。两轮 12 次请求、41,924 已知 token，实际金额及中断请求账单未知，不据此声称净收益。[首轮](../experiments/2026-11-26-named-assistant-deepseek-attempt-1.json) · [完整通过](../experiments/2026-11-26-named-assistant-deepseek.json)
 
+### 聊天内助手配置管理
+
+新本机普通聊天固定 `chatAssistants.project`，五个薄工具复用原Assistants：`assistants_list`、`assistant_read`、`assistant_catalog`、`assistant_create`、`assistant_update`。配置保存无Goal、新会话或运行，原角色pin保持；旧/远程/准备/执行及子任务不自动获得管理能力。聊天转Goal移除工具，命名角色的原允许表仍决定是否能调用管理动作。[OpenMausBot实际创建请求](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-call.ts#L511) · [Rakazo原角色版本检查](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/fleet-tools.ts#L837) · [完整契约](2026-11-26-chat-assistants.md)
+
+创建/更新将原chat ID与Pi taskId派生的请求身份、SHA-256摘要和当次公开角色结果，与配置变更同时atomicJson保存。相同请求重放只返回历史结果，不覆盖后来的编辑、归档或无修改操作；异内容冲突。实际写入前重检原项目，外项目ID不可修改，公开入口显式剥离operations。模型移除不影响已提交原结果重放，新选模型仍按现有目录校验。
+
+列表元数据分页并标注说明截断，完整指令及名单从read取得；模型与工具目录只读原已安装模型及原任务阶段元数据，不启动新服务或隐含授权。多字节50条元数据与16,000字符原指令使用有界256KiB原生输出，避免默认50KiB截成无效JSON。服务6项、聊天8项和5个实际SIGKILL场景覆盖重放、归档恢复、范围与后续owner编辑。
+
+首轮全量捕获了多字节分页的修复前失败，修复后完整重跑539通过、4项可选Office跳过、零失败，相关组合28项通过，类型/构建及笔记/提交检查通过。独立只读审查任务正文未送达，未审阅代码，限制保留。
+
+硅基流动DeepSeek V3.2实际查询工具目录、保存一个默认模型的只读助手，daemon重启后完整读回并追加原指令，归档、恢复和再次读回；同一ID最终修订4，一次创建/三次修改，无Goal、角色切换或额外任务。13次请求、136,859总token含缓存，金额未知；该样本为合成配置，未证明净成本或所有模型的配置质量收益。[实测记录](../experiments/2026-11-26-chat-assistants-deepseek.json)
+
 ## 已定位的能力差距
 
 更广的任务规划、结构化提问、安全凭据、命名助手、跨助手协作、撤销及语音等差距见[参考能力核对表](2026-11-25-reference-capability-matrix.md)。下表保留原来已经定位的具体兼容性与实测缺口，不能视为所有剩余能力。

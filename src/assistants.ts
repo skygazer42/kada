@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import type { Models } from '@earendil-works/pi-ai';
 import type { ModelRef } from './config.js';
@@ -10,6 +10,8 @@ export type AssistantRef = { id: string; revision: number };
 type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[] };
 export type Assistant = AssistantRef & Definition & { project: string; archived: boolean; createdAt: number; updatedAt: number };
 export type AssistantPin = AssistantRef & Definition & { project: string; model: ModelRef };
+export type AssistantMutation = { requestId: string; project: string; workspace: string };
+type StoredAssistant = Assistant & { operations?: { requestId: string; fingerprint: string; result: Assistant }[] };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const definitionKeys = ['name', 'description', 'instructions', 'model', 'tools'];
 const storedKeys = [...definitionKeys, 'id', 'revision', 'project', 'archived', 'createdAt', 'updatedAt'];
@@ -37,27 +39,58 @@ function modelRef(input: unknown): ModelRef | null {
   const value = fields(input, ['provider', 'modelId']);
   return { provider: text(value.provider, 'model provider', 128).trim(), modelId: text(value.modelId, 'model ID', 256).trim() };
 }
-function definition(input: Record<string, unknown>): Definition {
-  const name = text(input.name, 'name', 80).trim().normalize('NFC');
+function assistantName(input: unknown): string {
+  const name = text(input, 'name', 80).trim().normalize('NFC');
   if (/[\x00-\x1f\x7f]/.test(name)) throw new AssistantError(400, 'Provide a single-line assistant name without terminal controls.');
-  if (!Array.isArray(input.tools) || input.tools.length > 128 || input.tools.some(name => typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_.:-]{0,255}$/.test(name)) ||
-    new Set(input.tools).size !== input.tools.length) throw new AssistantError(400, 'Provide an explicit array of up to 128 distinct tool names, without wildcards.');
-  return { name, description: input.description === undefined ? '' : text(input.description, 'description', 1000, true).trim(),
-    instructions: text(input.instructions, 'instructions', 16_000), model: modelRef(input.model), tools: [...input.tools].sort() };
+  return name;
+}
+function toolNames(input: unknown): string[] {
+  if (!Array.isArray(input) || input.length > 128 || input.some(name => typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_.:-]{0,255}$/.test(name)) ||
+    new Set(input).size !== input.length) throw new AssistantError(400, 'Provide an explicit array of up to 128 distinct tool names, without wildcards.');
+  return [...input].sort();
+}
+function definition(input: Record<string, unknown>): Definition {
+  return { name: assistantName(input.name), description: input.description === undefined ? '' : text(input.description, 'description', 1000, true).trim(),
+    instructions: text(input.instructions, 'instructions', 16_000), model: modelRef(input.model), tools: toolNames(input.tools) };
 }
 const nameKey = (name: string) => name.trim().normalize('NFC').toLowerCase();
-async function projectFor(workspace: unknown): Promise<string> {
+export async function assistantProject(workspace: unknown): Promise<string> {
   if (typeof workspace !== 'string' || !isAbsolute(workspace)) throw new AssistantError(400, 'Provide an existing absolute project workspace.');
   const project = await memoryProject(workspace);
   if (!project) throw new AssistantError(400, 'Provide an existing project workspace.');
   return project;
+}
+function publicAssistant(item: Assistant): Assistant {
+  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt } = item;
+  return { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt };
+}
+function storedAssistant(input: unknown, allowed: readonly string[] = storedKeys): Assistant {
+  const value = fields(input, allowed); definition(value);
+  if (!storedKeys.every(key => Object.hasOwn(value, key)) || typeof value.id !== 'string' || !uuid.test(value.id) ||
+    typeof value.project !== 'string' || !isAbsolute(value.project) || typeof value.archived !== 'boolean' ||
+    typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt) || value.createdAt < 0 ||
+    typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt) || value.updatedAt < 0) throw new Error('Invalid stored identity.');
+  revision(value.revision); return value as Assistant;
+}
+function mutationRequest(request?: AssistantMutation) {
+  if (request && (typeof request.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(request.requestId) ||
+    typeof request.project !== 'string' || !isAbsolute(request.project) || typeof request.workspace !== 'string' || !isAbsolute(request.workspace))) throw new AssistantError(400, 'Provide the original assistant request and project scope.');
+}
+function replay(items: StoredAssistant[], request: AssistantMutation | undefined, fingerprint: string): Assistant | undefined {
+  if (request) for (const item of items) for (const operation of item.operations ?? []) if (operation.requestId === request.requestId) {
+    if (operation.fingerprint !== fingerprint) throw new AssistantError(409, 'This assistant request already has different content.');
+    return publicAssistant(operation.result);
+  }
+}
+async function mutationScope(request?: AssistantMutation) {
+  if (request && await assistantProject(request.workspace) !== request.project) throw new AssistantError(409, 'The original assistant project changed.');
 }
 
 export class Assistants {
   private readonly path: string;
   private readonly changes = new SerialQueue();
   constructor(dataDir: string, private readonly models: Models) { this.path = join(dataDir, 'assistants.json'); }
-  private async load(): Promise<Assistant[]> {
+  private async load(): Promise<StoredAssistant[]> {
     let input: unknown;
     try { input = await readJson(this.path); }
     catch (error) {
@@ -66,22 +99,28 @@ export class Assistants {
     }
     try {
       if (!Array.isArray(input)) throw new Error('Invalid catalog.');
-      const ids = new Set<string>(), names = new Set<string>();
+      const ids = new Set<string>(), names = new Set<string>(), requests = new Set<string>();
       for (const item of input) {
-        const value = fields(item, storedKeys); definition(value);
-        if (!storedKeys.every(key => Object.hasOwn(value, key)) || typeof value.id !== 'string' || !uuid.test(value.id) ||
-          typeof value.project !== 'string' || !isAbsolute(value.project) || typeof value.archived !== 'boolean' ||
-          typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt) || value.createdAt < 0 ||
-          typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt) || value.updatedAt < 0) throw new Error('Invalid stored identity.');
-        revision(value.revision);
-        const name = JSON.stringify([value.project, nameKey(value.name as string)]);
+        const value = storedAssistant(item, [...storedKeys, 'operations']) as StoredAssistant;
+        const name = JSON.stringify([value.project, nameKey(value.name)]);
         if (ids.has(value.id) || names.has(name)) throw new Error('Duplicate stored identity.');
         ids.add(value.id); names.add(name);
+        if (value.operations !== undefined) {
+          if (!Array.isArray(value.operations)) throw new Error('Invalid operations.');
+          for (const operation of value.operations) {
+            fields(operation, ['requestId', 'fingerprint', 'result']);
+            if (typeof operation.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(operation.requestId) ||
+              typeof operation.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(operation.fingerprint) || requests.has(operation.requestId)) throw new Error('Invalid operation identity.');
+            const result = storedAssistant(operation.result);
+            if (result.id !== value.id || result.project !== value.project || result.revision > value.revision) throw new Error('Invalid operation result.');
+            requests.add(operation.requestId);
+          }
+        }
       }
     } catch { throw new AssistantError(400, 'Stored assistant definitions are invalid.'); }
-    return input as Assistant[];
+    return input as StoredAssistant[];
   }
-  private find(items: Assistant[], id: string): Assistant {
+  private find(items: StoredAssistant[], id: string): StoredAssistant {
     const found = items.find(item => item.id === id);
     if (!found) throw new AssistantError(404, 'Assistant not found.');
     return found;
@@ -93,38 +132,55 @@ export class Assistants {
   private unique(items: Assistant[], project: string, name: string, except?: string) {
     if (items.some(item => item.project === project && item.id !== except && nameKey(item.name) === nameKey(name))) throw new AssistantError(409, 'This project already has an assistant with that name.');
   }
-  async list(workspace: unknown): Promise<Omit<Assistant, 'instructions'>[]> {
-    const project = await projectFor(workspace);
-    return (await this.load()).filter(item => item.project === project).map(({ instructions: _instructions, ...summary }) => summary);
+  async list(workspace: unknown, expectedProject?: string): Promise<Omit<Assistant, 'instructions'>[]> {
+    const project = await assistantProject(workspace);
+    if (expectedProject !== undefined && project !== expectedProject) throw new AssistantError(409, 'The original assistant project changed.');
+    return (await this.load()).filter(item => item.project === project).map(item => { const { instructions: _instructions, ...summary } = publicAssistant(item); return summary; });
   }
-  async get(id: string): Promise<Assistant> { return this.find(await this.load(), id); }
-  async create(input: unknown): Promise<Assistant> {
-    const value = fields(input, ['workspace', ...definitionKeys]), settings = definition(value); this.checkModel(settings.model);
+  async get(id: string): Promise<Assistant> { return publicAssistant(this.find(await this.load(), id)); }
+  async create(input: unknown, request?: AssistantMutation): Promise<Assistant> {
+    mutationRequest(request);
+    const value = fields(input, ['workspace', ...definitionKeys]), settings = definition(value);
+    const fingerprint = createHash('sha256').update(JSON.stringify(['create', value.workspace, settings, request?.project, request?.workspace])).digest('hex');
     return this.changes.run(async () => {
-      const project = await projectFor(value.workspace), items = await this.load(); this.unique(items, project, settings.name);
+      const items = await this.load(), receipt = replay(items, request, fingerprint); if (receipt) return receipt;
+      await mutationScope(request);
+      const project = await assistantProject(value.workspace);
+      if (request && project !== request.project) throw new AssistantError(409, 'The original assistant project changed.');
+      this.checkModel(settings.model); this.unique(items, project, settings.name);
       const now = Date.now(), next: Assistant = { ...settings, project, id: randomUUID(), revision: 1, archived: false, createdAt: now, updatedAt: now };
-      await atomicJson(this.path, [...items, next]); return next;
+      await atomicJson(this.path, [...items, { ...next, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: next }] } : {}) }]); return next;
     });
   }
-  async update(id: string, input: unknown): Promise<Assistant> {
+  async update(id: string, input: unknown, request?: AssistantMutation): Promise<Assistant> {
+    mutationRequest(request);
     const supplied = fields(input, ['revision', ...definitionKeys, 'archived']);
     const value = Object.fromEntries(Object.entries(supplied).filter(([, field]) => field !== undefined)), expected = revision(value.revision);
     if (!Object.keys(value).some(key => key !== 'revision')) throw new AssistantError(400, 'Provide assistant fields to update.');
     if (value.archived !== undefined && typeof value.archived !== 'boolean') throw new AssistantError(400, 'The archived setting must be a boolean.');
+    const patch = { ...(value.name === undefined ? {} : { name: assistantName(value.name) }),
+      ...(value.description === undefined ? {} : { description: text(value.description, 'description', 1000, true).trim() }),
+      ...(value.instructions === undefined ? {} : { instructions: text(value.instructions, 'instructions', 16_000) }),
+      ...(value.model === undefined ? {} : { model: modelRef(value.model) }), ...(value.tools === undefined ? {} : { tools: toolNames(value.tools) }),
+      ...(value.archived === undefined ? {} : { archived: value.archived as boolean }) };
+    const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, patch, request?.project, request?.workspace])).digest('hex');
     return this.changes.run(async () => {
-      const items = await this.load(), previous = this.find(items, id);
+      const items = await this.load(), receipt = replay(items, request, fingerprint); if (receipt) return receipt;
+      await mutationScope(request);
+      const stored = this.find(items, id), previous = publicAssistant(stored);
+      if (request && previous.project !== request.project) throw new AssistantError(404, 'Assistant not found in this project.');
       if (previous.revision !== expected) throw new AssistantError(409, 'The assistant changed. Read its latest revision.');
-      const settings = definition({ ...previous, ...value });
-      if (Object.hasOwn(value, 'model')) this.checkModel(settings.model);
-      this.unique(items, previous.project, settings.name, id);
-      const next: Assistant = { ...previous, ...settings, archived: value.archived as boolean | undefined ?? previous.archived };
-      if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
-      next.revision = revision(previous.revision + 1); next.updatedAt = Date.now();
-      await atomicJson(this.path, items.map(item => item.id === id ? next : item)); return next;
+      if (Object.hasOwn(patch, 'model')) this.checkModel(patch.model!);
+      this.unique(items, previous.project, patch.name ?? previous.name, id);
+      const next: Assistant = { ...previous, ...patch }, changed = JSON.stringify(next) !== JSON.stringify(previous);
+      if (!changed && !request) return previous;
+      if (changed) { next.revision = revision(previous.revision + 1); next.updatedAt = Date.now(); }
+      const operations = request ? [...(stored.operations ?? []), { requestId: request.requestId, fingerprint, result: next }] : stored.operations;
+      await atomicJson(this.path, items.map(item => item.id === id ? { ...next, ...(operations ? { operations } : {}) } : item)); return next;
     });
   }
   async select(workspace: unknown, input: unknown): Promise<Assistant> {
-    const ref = assistantRef(input), project = await projectFor(workspace), item = await this.get(ref.id);
+    const ref = assistantRef(input), project = await assistantProject(workspace), item = await this.get(ref.id);
     if (item.project !== project) throw new AssistantError(404, 'Assistant not found in this project.');
     if (item.revision !== ref.revision || item.archived) throw new AssistantError(409, 'Select the current unarchived assistant revision.');
     this.checkModel(item.model); return item;
