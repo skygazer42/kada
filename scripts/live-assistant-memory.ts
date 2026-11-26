@@ -45,7 +45,7 @@ const chatManagesThreads = process.env.KADA_LIVE_CASES === 'T10-chat-thread-mana
 const threadFixture = chatManagesThreads || chatChoosesThreadModel || process.env.KADA_LIVE_CASES === 'T09-thread-models';
 const otherModel = proposalModel ?? (threadFixture ? template : undefined);
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management','T11-thread-posts'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const threadDispatches: string[] = [];
@@ -616,6 +616,60 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     evidence.workspaceSnapshots = { originalFile: filename, automaticBeforeTurn: true, editVerified: true, stoppedAfterWrite: edited.status !== 'completed', previewBoundRestore: true,
       daemonRestarted: true, undoRecoveredEditedBytes: true, restoreRequests: requests - beforeRestore, requests };
   });
+  if (selectedCases.includes('T11-thread-posts')) await check('T11-thread-posts', async () => {
+    const checks: Record<string, unknown> = {};
+    evidence.threadPosts = checks;
+    const profile = await server.runtime.assistants.create({ workspace: alpha, name: '合成留言助手',
+      instructions: '按用户明确要求在关联会话留言。收到留言时先按当前用户要求回答。', tools: ['post_to_thread', 'list_threads'] });
+    const assistant = { id: profile.id, revision: profile.revision };
+    const source = await server.runtime.create('合成发起会话。只回复「发送方就绪」。', alpha, [], { chat: true, assistant });
+    const target = await server.runtime.create('合成接收会话。只回复「接收方就绪」。', alpha, [], { chat: true, assistant });
+    tasks.add(source.id); tasks.add(target.id);
+    Object.assign(checks, { source: source.id, target: target.id });
+    const [, idleTarget] = await Promise.all([source.id, target.id].map(id => until(() => server.runtime.status(id), state => state.status === 'answered', 110_000)));
+    await server.runtime.followUp(source.id, `用 post_to_thread 向 ${target.id} 发送一条合成留言，正文严格为 PASSIVE_NOTE_746，wake 为 false，delivery_id 为 t11-passive。发好后简短回复。`, 't11-passive');
+    const passiveSent = await until(() => server.runtime.status(source.id), state => ['answered','failed'].includes(state.status) && state.submission?.requestId === 'user:t11-passive', 120_000);
+    checks.passiveSender = passiveSent.status;
+    assert.equal(passiveSent.status, 'answered');
+    const passive = await server.runtime.status(target.id);
+    assert.equal(passive.threadPosts.length, 1);
+    assert.equal(passive.threadPosts[0]?.message, 'PASSIVE_NOTE_746');
+    assert.equal(passive.threadPosts[0]?.wake, 'stored');
+    assert.equal(passive.submission?.id, idleTarget!.submission?.id);
+    assert.equal(passive.budget.totalTokens, idleTarget!.budget.totalTokens);
+    checks.storedWithoutModel = true;
+    const readRequest = '请根据本会话已收到的关联留言，只复述资料里的合成代号。';
+    onModelContext = payload => {
+      const latest = JSON.stringify(payload.messages.findLast(message => message.role === 'user')?.content ?? '');
+      if (latest.includes(readRequest)) checks.modelReceivedOriginalNote = latest.includes('PASSIVE_NOTE_746') && latest.includes(source.id);
+    };
+    const read = await (async () => {
+      try {
+        await server.runtime.followUp(target.id, readRequest, 't11-read');
+        return await until(() => server.runtime.status(target.id), state => state.status === 'answered' && state.submission?.requestId === 'user:t11-read', 110_000);
+      } finally { onModelContext = undefined; }
+    })();
+    assert.equal(checks.modelReceivedOriginalNote, true);
+    assert.match(read.messages.map(conversationAnswer).filter(Boolean).at(-1) ?? '', /PASSIVE_NOTE_746/);
+    checks.readOnOwnerTurn = true;
+    await server.runtime.followUp(source.id, `用 post_to_thread 向 ${target.id} 发送第二条合成留言，正文严格为「请用一句话确认收到 ACTIVE_NOTE_857」，wake 为 true，delivery_id 为 t11-wake。发好后简短回复。`, 't11-wake');
+    const woke = await until(() => server.runtime.status(target.id), state => state.threadPosts.some(post => !!post.reply), 140_000);
+    assert.equal(woke.threadPosts.length, 2);
+    assert.equal(woke.threadPosts[1]?.wake, 'started');
+    assert.match(woke.threadPosts[1]?.reply ?? '', /ACTIVE_NOTE_857/);
+    assert.equal(woke.submission?.id, read.submission?.id);
+    assert.equal(woke.goal, undefined);
+    const sent = await until(() => server.runtime.status(source.id), state => state.status === 'answered' && state.submission?.requestId === 'user:t11-wake', 110_000);
+    assert.equal(sent.messages.flatMap(message => message.role === 'toolResult' && message.toolName === 'post_to_thread' && !message.isError ? [message] : []).length, 2);
+    const beforeRestart = requests;
+    await server.close(); server = await serve(config, serverOptions);
+    const displayed: string[] = [];
+    await new ChatSession(client, event => displayed.push(event.text), alpha).attach(target.id);
+    assert(displayed.some(line => line.includes('关联会话留言') && line.includes('PASSIVE_NOTE_746') && line.includes(source.id)));
+    assert.deepEqual((await server.runtime.status(target.id)).threadPosts, woke.threadPosts);
+    assert.equal(requests, beforeRestart);
+    Object.assign(checks, { wakeAndReply: true, originalOwnerInputPreserved: true, notesSurvivedRestart: true, terminalProvenance: true });
+  });
   if (threadFixture) await check(chatManagesThreads ? 'T10-chat-thread-management' : chatChoosesThreadModel ? 'T09-thread-models-chat' : 'T09-thread-models', async () => {
     assert.notEqual(modelId, template.id, 'Set the source model to DeepSeek for this two-model fixture.');
     const checks: Record<string, unknown> = { dispatches: threadDispatches, childToolsSpecifiedByFixture: true };
@@ -766,6 +820,7 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
       assert(events.some(text => text.includes('独立工作回传') && text.includes('/attach ' + id)));
       await terminal.attach(id);
       checkpoints.returnedToOriginalConversation = true;
+      assert(returned.submission);
       checkpoints.nativeReportSubmission = returned.submission.id;
     }
     await terminal.handle('/title 已验收的独立样本');

@@ -4,6 +4,7 @@ import { Type, type Models } from '@earendil-works/pi-ai';
 import { LiveDoc, ROOT_CONVERSATION_ID, ToolTask, defineDoc, defineExtension, defineTool, hook,
   type SubmissionId, type TaskId, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { ModelRef } from './config.js';
+import type { ThreadPostRequest } from './thread-posts.js';
 
 export type ThreadOrigin = { sourceTaskId: string; title: string; openedBy: 'owner' | 'assistant'; reportBack?: true; modelSelection?: ModelRef };
 export type TaskThread = Partial<ThreadOrigin> & { revision: number; archivedAt?: number };
@@ -51,10 +52,12 @@ export function threadTools(models: Models, current: ModelRef, actions: {
   list: (offset: number) => Promise<unknown>;
   rename: (input: { title: string; revision: number }, caller: ThreadInvocation) => Promise<unknown>;
   close: (id: string, revision: number, caller: ThreadInvocation) => Promise<unknown>;
+  post: (request: ThreadPostRequest, caller: ThreadInvocation) => Promise<unknown>;
 }) {
   const output = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] });
   const revision = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
   const title = Type.String({ minLength: 1, maxLength: 80 });
+  const threadId = Type.String({ pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' });
   return defineExtension({ name: 'local_thread_tools', hooks: [hook(ToolTask, {
     async beforeTool(_call, api) {
       if (api.conversationId === ROOT_CONVERSATION_ID && await actions.reporting()) return { block: 'This independent work report only authorizes a text reply.' };
@@ -87,9 +90,15 @@ export function threadTools(models: Models, current: ModelRef, actions: {
     execute: async (args, api, context) => output(await actions.rename(args, { input: await threadInput(api, context), toolTaskId: api.taskId })),
   }), defineTool({
     name: 'close_thread', description: 'Archive settled related work only when the user asks. Use its exact ID and revision from list_threads. Active, queued and awaiting-user work stays open. The person can reopen the original history after archiving.',
-    parameters: Type.Object({ thread_id: Type.String({ pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' }), revision }, { additionalProperties: false }),
+    parameters: Type.Object({ thread_id: threadId, revision }, { additionalProperties: false }),
     replay: 'safe', executionMode: 'sequential',
     execute: async (args, api, context) => output(await actions.close(args.thread_id, args.revision, { input: await threadInput(api, context), toolTaskId: api.taskId })),
+  }), defineTool({
+    name: 'post_to_thread', description: 'Share information in an existing related local thread only on the owner’s request. Use an exact ID from list_threads and the complete note. Default wake is false. Set wake true only when the owner asks for a reply now. A wake permits a text answer within the recipient’s existing budget. Use the same delivery_id to retry identical content.',
+    parameters: Type.Object({ thread_id: threadId, message: Type.String({ minLength: 1, maxLength: 8000 }), wake: Type.Optional(Type.Boolean()),
+      delivery_id: Type.Optional(Type.String({ pattern: '^[A-Za-z0-9_.:-]{1,100}$' })) }, { additionalProperties: false }),
+    replay: 'safe', executionMode: 'sequential',
+    execute: async (args, api, context) => output(await actions.post(args, { input: await threadInput(api, context), toolTaskId: api.taskId })),
   }), defineTool({
     name: 'start_thread', description: 'Open a separate local task only when the person asks to start a different thread. Pass its title and the requested work. For an explicitly requested model, copy its model_selection from list_models. The new task prepares a brief and waits for the owner to confirm execution. Set report_back only when the person requests the verified result in this original chat. Report the new ID and finish this turn. One thread may be opened per person input.',
     parameters: Type.Object({ title, message: Type.String({ minLength: 1, maxLength: 32_000 }),

@@ -382,6 +382,17 @@ export class ChatSession {
     if (!id) return;
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     if (this.taskId !== id) return;
+    for (const post of status.threadPosts ?? []) {
+      const key = 'thread-post:' + post.id;
+      if (!this.printed.has(key)) {
+        this.printed.add(key);
+        this.info(`关联会话留言 · ${post.sourceTitle}\n${post.message}\n/attach ${post.sourceTaskId}`);
+      }
+      if (status.goal && post.reply && !this.printed.has(key + ':reply')) {
+        this.printed.add(key + ':reply');
+        this.emit({ kind: 'answer', text: post.reply });
+      }
+    }
     for (const report of status.threadReports ?? []) {
       const key = `thread-report:${report.taskId}`;
       if (this.printed.has(key)) continue;
