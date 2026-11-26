@@ -42,6 +42,7 @@ import { modelAccountRefusal, type AccountRefusal } from './routine-account-back
 import { reminderExtension } from './reminders.js';
 import { historyExtension, historyInstructions, historyMatch, historyQuery, type HistoryMessage } from './history.js';
 import { projectTasksExtension } from './project-tasks.js';
+import { chatWorkItemsExtension } from './chat-work-items.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -69,6 +70,7 @@ export interface TaskMeta {
   /** Absent on historical/explicit tasks. A chat creates GoalDoc only on task_prepare. */
   entrypoint?: "chat";
   chatReminders?: true | 'managed';
+  chatWorkItems?: { project: string };
   historyRecall?: true;
   projectTaskCatalog?: true;
   /** Cumulative conversation limits after an explicit refill; configured grants stay unchanged. */
@@ -366,6 +368,8 @@ export class LocalRuntime {
       const model = validateModel(this.options.models, await this.providers.selected(this.config.model, projectWorkspace));
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace);
+      const workItemProject = options.chat && !options.remote ? await memoryProject(files.root) : undefined;
+      if (options.chat && !options.remote && !workItemProject) throw new Error('The chat work item project is unavailable.');
       const selection=options.remote ? [] : options.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       const mcpPins = options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root);
@@ -389,6 +393,7 @@ export class LocalRuntime {
         ...(options.prepare || options.chat ? { preparation: true } : {}),
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
+        ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
         ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
@@ -584,6 +589,7 @@ export class LocalRuntime {
           costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
       } });
       const chatExtensions = [conversation, ...(!remote && meta.chatReminders ? [reminderExtension(this.routines, meta.workspace, meta.id, this.options.routineClock?.now, meta.chatReminders === 'managed')] : []), ...(memory ? [memory] : []),
+        ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
         ...(memoryUse ? [memoryUse] : []),
@@ -637,7 +643,7 @@ export class LocalRuntime {
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: meta.entrypoint === "chat" ? chatExtensions : meta.preparation ? preparationExtensions : extensions,
-          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true) : this.instructions(meta, !!meta.preparation) } });
+          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true, !remote && !!meta.chatWorkItems) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
         this.active.set(meta.id, active);
@@ -762,7 +768,7 @@ export class LocalRuntime {
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
-        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
+        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true, !active.meta.remotePolicy && !!active.meta.chatWorkItems) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
     const preparing = !!active.meta.preparation && !state?.confirmation;

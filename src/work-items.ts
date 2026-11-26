@@ -6,14 +6,46 @@ import { atomicJson, readJson, SerialQueue } from "./util.js";
 
 export type WorkItemLink = { id: string; revision: number };
 export type WorkItemRun = { id: string; workItem?: WorkItemLink; preparation?: boolean };
+export type WorkItemStatus = 'open' | 'parked' | 'done';
 export type WorkItem = WorkItemLink & {
   project: string;
   workspace: string;
   title: string;
   objective: string;
+  status: WorkItemStatus;
+  archived: boolean;
+  completedAt: number | null;
   createdAt: number;
   updatedAt: number;
 };
+type StoredWorkItem = Omit<WorkItem, 'status' | 'archived' | 'completedAt'> & Partial<Pick<WorkItem, 'status' | 'archived' | 'completedAt'>> & {
+  operations?: { requestId: string; fingerprint: string; result: WorkItem }[];
+};
+export type WorkItemRequest = { requestId: string; project: string };
+
+function view(item: StoredWorkItem): WorkItem {
+  const { id, revision, project, workspace, title, objective, createdAt, updatedAt } = item;
+  return { id, revision, project, workspace, title, objective, createdAt, updatedAt,
+    status: item.status ?? 'open', archived: item.archived ?? false, completedAt: item.completedAt ?? null };
+}
+
+function status(value: unknown): WorkItemStatus {
+  if (value !== 'open' && value !== 'parked' && value !== 'done') throw new WorkItemError(400, 'Work item status must be open, parked or done.');
+  return value;
+}
+
+function requestKey(request?: WorkItemRequest) {
+  if (request && (typeof request.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(request.requestId) || typeof request.project !== 'string' || !request.project)) {
+    throw new WorkItemError(400, 'Provide a valid work item request ID and original project.');
+  }
+}
+
+function replay(items: StoredWorkItem[], requestId: string, fingerprint: string): WorkItem | undefined {
+  for (const item of items) for (const operation of item.operations ?? []) if (operation.requestId === requestId) {
+    if (operation.fingerprint !== fingerprint) throw new WorkItemError(409, 'This work item request already has different content.');
+    return operation.result;
+  }
+}
 
 type RunAdapter<T> = {
   task(id: string): Promise<T | undefined>;
@@ -70,63 +102,84 @@ export class WorkItems<T extends WorkItemRun> {
     this.path = join(dataDir, "work-items.json");
   }
 
-  private async load(): Promise<WorkItem[]> {
-    try { return await readJson<WorkItem[]>(this.path); }
+  private async load(): Promise<StoredWorkItem[]> {
+    try { return await readJson<StoredWorkItem[]>(this.path); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
   }
 
-  private find(items: WorkItem[], id: string): WorkItem {
+  private find(items: StoredWorkItem[], id: string): StoredWorkItem {
     const item = items.find(candidate => candidate.id === id);
     if (!item) throw new WorkItemError(404, "Work item not found.");
     return item;
   }
 
-  async list(workspace: unknown): Promise<WorkItem[]> {
+  async list(workspace: unknown, expectedProject?: string): Promise<WorkItem[]> {
     const { project } = await projectFor(workspace);
-    return (await this.load()).filter(item => item.project === project);
+    if (expectedProject !== undefined && expectedProject !== project) throw new WorkItemError(409, 'The original work item project changed.');
+    return (await this.load()).filter(item => item.project === project).map(view);
   }
 
   async get(id: string): Promise<WorkItem> {
-    return this.find(await this.load(), id);
+    return view(this.find(await this.load(), id));
   }
 
   async shared(ids: readonly string[]): Promise<WorkItem[]> {
     if (!ids.length) return [];
-    return (await this.load()).filter(item => ids.includes(item.id));
+    return (await this.load()).filter(item => ids.includes(item.id)).map(view);
   }
 
-  async create(input: unknown): Promise<WorkItem> {
-    const value = fields(input, ["workspace", "title", "objective"]);
+  async create(input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
+    requestKey(request);
+    const value = fields(input, ["workspace", "title", "objective", "status"]);
     const title = text(value.title, "title", 120);
     const objective = text(value.objective, "objective", 32_000);
-    const location = await projectFor(value.workspace);
+    const workspace = text(value.workspace, 'workspace', 4096), state = value.status === undefined ? 'open' : status(value.status);
+    const fingerprint = createHash('sha256').update(JSON.stringify(['create', workspace, title, objective, state, request?.project])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load();
+      const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
+      if (receipt) return receipt;
+      const location = await projectFor(workspace);
+      if (request && location.project !== request.project) throw new WorkItemError(409, 'The original work item project changed.');
       const now = Date.now();
-      const item = { ...location, id: randomUUID(), title, objective, revision: 1, createdAt: now, updatedAt: now };
-      await atomicJson(this.path, [...items, item]);
+      const item: WorkItem = { ...location, id: randomUUID(), title, objective, status: state, archived: false,
+        completedAt: state === 'done' ? now : null, revision: 1, createdAt: now, updatedAt: now };
+      await atomicJson(this.path, [...items, { ...item, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: item }] } : {}) }]);
       return item;
     });
   }
 
-  async update(id: string, input: unknown): Promise<WorkItem> {
-    const value = fields(input, ["revision", "title", "objective"]);
+  async update(id: string, input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
+    requestKey(request);
+    const value = fields(input, ["revision", "title", "objective", "status", "archived"]);
     const expected = revision(value.revision);
     const title = value.title === undefined ? undefined : text(value.title, "title", 120);
     const objective = value.objective === undefined ? undefined : text(value.objective, "objective", 32_000);
-    if (title === undefined && objective === undefined) throw new WorkItemError(400, "Provide a work item title or objective.");
+    const state = value.status === undefined ? undefined : status(value.status);
+    if (value.archived !== undefined && typeof value.archived !== 'boolean') throw new WorkItemError(400, 'The archived setting must be a boolean.');
+    const archived = value.archived as boolean | undefined;
+    if (title === undefined && objective === undefined && state === undefined && archived === undefined) throw new WorkItemError(400, "Provide work item fields to update.");
+    const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, title, objective, state, archived, request?.project])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load();
+      const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
+      if (receipt) return receipt;
       const item = this.find(items, id);
+      if (request && item.project !== request.project) throw new WorkItemError(404, 'Work item not found in this project.');
       if (item.revision !== expected) throw new WorkItemError(409, "The work item changed. Read its latest revision.");
-      const next = { ...item, title: title ?? item.title, objective: objective ?? item.objective };
-      if (next.title === item.title && next.objective === item.objective) return item;
-      next.revision++;
-      next.updatedAt = Date.now();
-      await atomicJson(this.path, items.map(previous => previous === item ? next : previous));
+      const previous = view(item), next = { ...previous, title: title ?? previous.title, objective: objective ?? previous.objective,
+        status: state ?? previous.status, archived: archived ?? previous.archived };
+      const changed = next.title !== previous.title || next.objective !== previous.objective || next.status !== previous.status || next.archived !== previous.archived;
+      if (!changed && !request) return previous;
+      if (changed) {
+        next.revision++; next.updatedAt = Date.now();
+        if (next.status !== previous.status) next.completedAt = next.status === 'done' ? next.updatedAt : null;
+      }
+      const stored = { ...next, operations: request ? [...(item.operations ?? []), { requestId: request.requestId, fingerprint, result: next }] : item.operations };
+      await atomicJson(this.path, items.map(previous => previous === item ? stored : previous));
       return next;
     });
   }
@@ -159,11 +212,12 @@ export class WorkItems<T extends WorkItemRun> {
         return previous;
       }
       if (item.revision !== expected) throw new WorkItemError(409, "The work item changed. Read its latest revision.");
+      if (item.archived || item.status === 'done') throw new WorkItemError(409, 'Reopen and unarchive the work item before starting another run.');
       const current = await projectFor(item.workspace);
       if (current.workspace !== item.workspace || current.project !== item.project) {
         throw new WorkItemError(409, "The work item's original workspace or project has changed.");
       }
-      return this.runtime.start(item, { id: taskId, confirmed, workItem: { id, revision: expected } });
+      return this.runtime.start(view(item), { id: taskId, confirmed, workItem: { id, revision: expected } });
     });
   }
 }

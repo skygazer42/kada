@@ -715,7 +715,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const grants = device.sharedWorkItems ?? [];
           if (id === undefined) {
-            return (await runtime.workItems.shared(grants)).map(({ id, title, revision, updatedAt }) => ({ id, title, revision, updatedAt }));
+            return (await runtime.workItems.shared(grants)).map(({ id, title, revision, updatedAt, status, archived, completedAt }) => ({ id, title, revision, updatedAt, status, archived, completedAt }));
           }
           if (!grants.includes(id)) throw new HttpError(404, "Shared work item not found.");
           if (runId) {
@@ -768,7 +768,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               controls: canControl ? run.remoteControls : [], controlVersion: canControl ? run.remoteControlVersion : null,
             };
           }
-          const { title, revision, updatedAt, objective } = await runtime.workItems.get(id);
+          const { title, revision, updatedAt, objective, status, archived, completedAt } = await runtime.workItems.get(id);
           const runs = await Promise.all((await runtime.workItems.runs(id)).map(async run => {
             const { status, reason, question, childQuestion, summary } = await runtime.taskOverview(run.id);
             return {
@@ -777,7 +777,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             };
           }));
           runs.sort((a, b) => Number(b.pending) - Number(a.pending) || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
-          return { id, title, revision, updatedAt, objective, runs: runs.map(({ pending, createdAt, ...run }) => run) };
+          return { id, title, revision, updatedAt, objective, status, archived, completedAt, runs: runs.map(({ pending, createdAt, ...run }) => run) };
         });
         if (!result) throw new HttpError(401, "Enter this device’s pairing token.");
         send(response, 200, result);

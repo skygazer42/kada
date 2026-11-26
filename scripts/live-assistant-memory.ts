@@ -38,7 +38,7 @@ if (!original) {
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'F11-chat-reminder-management' ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = ['F11-chat-reminder-management','W01-chat-work-items'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -236,6 +236,30 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  await check('W01-chat-work-items',async()=>{
+    const {status:created}=await chat(alpha,'请给这个项目保存一条待办：标题“LYRA_613 周报”，说明“整理本周的合成项目进展”。只存待办，先不要执行，不要设提醒。');
+    const [item]=await server.runtime.workItems.list(alpha);
+    assert(item,'todo_saved');assert.match(item.title,/LYRA_613/);assert.equal(item.status,'open');assert.equal(item.archived,false);
+    assert(created.messages.some(message=>message.role==='toolResult' && message.toolName==='work_item_create' && !message.isError),'todo_create_tool');
+    const beforeRestart=requests;
+    await server.close();server=await serve(config,serverOptions);
+    assert.equal(requests,beforeRestart,'todo_restart_no_model');
+    await server.runtime.followUp(created.id,'把刚才的 LYRA_613 待办标题改为“LYRA_613 月报”，并标记为已完成；这是我手动完成的待办，不需要执行任何工作。','todo-edit');
+    const done=await until(()=>server.runtime.status(created.id),row=>['answered','failed','budget_limited'].includes(row.status) && row.submission?.requestId==='user:todo-edit',90_000);
+    assert.equal(done.status,'answered');assert.equal(done.goal,undefined);
+    const edited=await server.runtime.workItems.get(item.id);
+    assert.match(edited.title,/月报/);assert.equal(edited.status,'done');assert.equal(typeof edited.completedAt,'number');
+    assert(done.messages.some(message=>message.role==='toolResult' && message.toolName==='work_item_update' && !message.isError),'todo_update_tool');
+    await server.runtime.followUp(created.id,'把这条已完成的 LYRA_613 月报待办归档，保留记录，不删除。','todo-archive');
+    const archived=await until(()=>server.runtime.status(created.id),row=>['answered','failed','budget_limited'].includes(row.status) && row.submission?.requestId==='user:todo-archive',90_000);
+    assert.equal(archived.status,'answered');assert.equal(archived.goal,undefined);
+    const final=await server.runtime.workItems.get(item.id);
+    assert.equal(final.archived,true);assert.equal(final.status,'done');assert.equal(final.completedAt,edited.completedAt);
+    assert.equal((await server.runtime.workItems.list(alpha)).length,1,'todo_single_identity');
+    assert.deepEqual(await server.runtime.workItems.runs(item.id),[],'todo_no_execution');
+    assert.doesNotMatch(JSON.stringify(final),/operations|fingerprint|requestId/);
+    evidence.chatWorkItems={itemId:item.id,chatId:created.id,created:true,renamed:true,completed:true,archived:true,originalIdKept:true,goalCreated:false,runs:0,requests};
   });
   await check('T01-project-tasks',async()=>{
     const source=await server.runtime.create('合成验收任务 ORBIT_542：用户尚未决定导出 CSV 还是 XLSX，不能自行选择。只调用 task_blocked，reason 说明缺少格式，question 提问 CSV 还是 XLSX，然后等待。不要执行命令、写文件或委派。',alpha);tasks.add(source.id);

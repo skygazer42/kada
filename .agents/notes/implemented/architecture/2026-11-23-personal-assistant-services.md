@@ -70,7 +70,13 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 项目任务目录以新主任务的 projectTaskCatalog 标记固定，复用 memoryProject 和原 status/taskHandoff；先筛项目元数据，再读 Pi 状态，只返回有界的目标、摘要、问题和步骤。status 自己进入运行时状态队列，目录不能在同一队列内再等待它。查询不提交模型输入、不恢复工作，也不修改预算；子会话、旧任务和远程私有会话不获得工具。目录分页是当前视图，不是跨页快照。 [OpenMausBot 原任务目录](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L236) · [Rakazo 目录聚合](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22)
 
+聊天待办沿原 WorkItems 保存规划状态，不建立第二份待办来源。新聊天固定 chatWorkItems 原项目，只在无 Goal 的聊天阶段提供工具；创建固定原工作区，修改在原保存队列核对项目及修订。open/parked/done 和 archived 与 Pi 运行状态独立，完成/归档不取消原工作，不能作为交付验证。原运行请求重试先找原任务，新运行才要求待办已恢复。旧数组读取补默认值，不自动改写历史文件。 [Rakazo 实际修改归属](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/scratchpad-tools.ts#L131) · [Suparagent 规划和原运行分离](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L31)
+
+待办请求身份由原聊天和 Pi 工具 taskId 派生，规范输入摘要及当次公开结果与工作项同次原子保存。相同请求即使后来被编辑/归档也返回历史结果，不重复写入；无回执的旧修订返回冲突。内部 operations 只在磁盘保存，所有 owner、共享和聊天返回显式公开投影。首次进入 done 保存完成时间，仍为 done 的文字编辑保留时间，重新打开清除；归档不改完成状态。手机继续展示已分享项和原运行，生命周期不授予编辑或撤回既有分享。
+
 ## Alternatives considered
+
+另建聊天待办文件能少改原服务，但会使工作项、共享和原运行身份分叉，所以扩展既有 WorkItems。只在 Pi 工具回执记录成功能节省一份操作记录，但无法跨过文件已提交、工具尚未回执的崩溃窗口；摘要与历史结果同次保存在工作项。只保留最新回执会遗失旧工具恢复所需身份，所以当前不按数量裁剪；文件体积与后续清理政策须测量后再决定。
 
 直接调用 owner list 再过滤可减少代码，但会先打开其他项目状态；项目目录先筛元数据。只用元数据推测状态可避免打开旧 Harness，却不能呈现 Pi 子任务待答、预算与交付，所以复用既有只读状态入口。该入口可能打开原存储做 Pi 投影，但不会启动 scheduler 或提交原工作；不同于仅取旧讨论的 history 工具，目录需要当前业务状态。
 
@@ -143,6 +149,8 @@ GitHub 规则接受事件时从安全标量投影仓库与编号，随原发生�
 通过修改完整定义实现暂停能复用更新入口，但恢复会重置预检基线。周期暂停只移除原生定时任务，恢复时保留原定义。手机直接复用本机恢复入口会获得一轮新预算。手机接回只继续原提交。
 
 ## Consequences
+
+聊天待办有 4 个实际 SIGKILL 场景验证操作重入和后续编辑保护；普通聊天、旧范围、分页/截断和聊天转 Goal 后撤下工具都有 Pi 回归。DeepSeek 经硅基流动完成保存、重启后改名/完成及归档，8 次请求、53,405 总 token，无 Goal/运行，金额未知。Chromium 390 × 844 验证已完成/归档待办与仍待答的原运行同时展示，展开原运行不改变未发送草稿；实体手机尚未验收。新增回执会增加原 JSON 大小，未证明大规模编辑性能或成本改善。
 
 项目任务目录复用既有完整状态读取，减少状态分叉并保留原子任务的待答投影；它仍需遍历同项目任务，大量历史的延迟和跨页变动尚未量化。6 项 Pi 回归覆盖范围、截断、分页、坏存储、重启与聊天转 Goal；硅基流动 DeepSeek 的中文查询使用 4 次请求、20,844 总 token，金额未知，不能推出成本或任务质量收益。参考项目完整产品能力仍按能力核对表逐项补齐。
 

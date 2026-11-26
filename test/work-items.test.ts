@@ -126,9 +126,9 @@ test("a paired phone reads shared runs and answers only their authorized current
     await until(() => server.runtime.status(privateRun.id), status => status.status === "completed");
     await server.close();
     server = await open();
-    const { id, title, revision, updatedAt, objective } = updated;
-    assert.deepEqual(await (await request(phone, remote)).json(), [{ id, title, revision, updatedAt }]);
-    assert.deepEqual(await (await request(phone, details)).json(), { id, title, revision, updatedAt, objective,
+    const { id, title, revision, updatedAt, objective, status, archived, completedAt } = updated;
+    assert.deepEqual(await (await request(phone, remote)).json(), [{ id, title, revision, updatedAt, status, archived, completedAt }]);
+    assert.deepEqual(await (await request(phone, details)).json(), { id, title, revision, updatedAt, objective, status, archived, completedAt,
       runs: [
         { id: waiting.id, revision: item.revision, status: "waiting_user", reason: "Inventory date missing", question: "Which date should I use?", summary: null },
         { id: run.id, revision, status: "completed", reason: null, question: null, summary: "Inventory verified" },
@@ -147,6 +147,11 @@ test("a paired phone reads shared runs and answers only their authorized current
     assert.equal((await request(tablet, runDetails)).status, 404);
     assert.equal((await request(phone, remote + "/" + privateItem.id + "/runs/" + waiting.id)).status, 404);
     assert.equal((await request(phone, details + "/runs/" + privateItem.id)).status, 404);
+    await server.runtime.workItems.update(id, { revision, status: 'done', archived: true }, { requestId: 'owner-close', project: item.project });
+    const closed = await (await request(phone, details)).json();
+    assert.equal(closed.status, 'done'); assert.equal(closed.archived, true); assert.equal(typeof closed.completedAt, 'number');
+    assert.equal(closed.runs.find((row: { id: string }) => row.id === waiting.id).status, 'waiting_user');
+    assert.doesNotMatch(JSON.stringify(closed), /operations|fingerprint|owner-close/);
     const readStatus = t.mock.method(server.runtime, "status");
     try {
       assert.equal((await request(phone, details + "/runs/" + privateRun.id)).status, 404);

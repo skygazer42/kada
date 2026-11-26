@@ -413,6 +413,10 @@ function clearWorkItems() {
   selectWorkItem("");
 }
 
+function workItemState(item) {
+  return { open: "To do", parked: "On hold", done: "Done" }[item.status] + (item.archived ? " · Archived" : "");
+}
+
 async function refreshWorkItems() {
   const device = identity;
   if (!device?.workItems) return;
@@ -444,6 +448,7 @@ async function refreshWorkItems() {
     button.value = row.id;
     button.setAttribute("aria-controls", "work-item-detail");
     button.setAttribute("aria-expanded", String(row.id === selected));
+    element("p", workItemState(row), item);
   }
   workItemsPanel.hidden = !rows.length;
   if (selected) await refreshWorkItem(selected, device);
@@ -471,6 +476,7 @@ async function refreshWorkItem(id, device) {
   if (!current()) return;
   workItemDetail.replaceChildren();
   element("h3", workItem.title + " · Revision " + workItem.revision, workItemDetail);
+  element("p", "Todo: " + workItemState(workItem), workItemDetail);
   element("p", workItem.objective, workItemDetail);
   if (!workItem.runs.some(run => run.id === selectedWorkItemRun)) selectedWorkItemRun = "";
   if (!workItem.runs.length) {
