@@ -94,6 +94,23 @@ npm run harness -- run "阅读资料并给出摘要" --assistant 助手ID@1 --wo
 
 归档使用 `{ "revision": 2, "archived": true }`，恢复用当前修订和 `false`。归档阻止新选择，既有任务仍从原任务入口暂停/取消。目录不删除历史。当前由本机 owner CLI/API 管理，手机和模型不会自动获得角色编辑权。配置旧服务尚不支持时，角色请求会报错。[源码与验收](specs/2026-11-26-named-assistants.md)
 
+## 持久助手协作
+
+用 `assistants list` 查到当前项目的助手 ID 与修订后，可以为一项新本机任务指定协作者。重复 `--collaborator` 可指定多位助手。根助手选择启用协作的角色时，其工具名单也须允许 `assistant_assign` 等协作工具。协作者可在各自名单中使用 `assistant_ask` 提问和 `assistant_attach` 回交文件。
+
+```powershell
+npm run harness -- run "请研究员核对资料，再由主助手提交结果" --workspace E:/project --collaborator 助手ID@1
+```
+
+在聊天中 `/attach 任务ID` 查看并确认原任务说明。确认后，主助手可以在同事的原会话里派新工作或返工。每份工作单独保存输入、提问、结果和固定文件副本。所有同事计入原任务预算。
+
+- `/assistant-work` 列出原工作。加工作 ID 可读原结果和文件引用。
+- `/reply-assistant 工作ID 问题ID 答复` 回答当前问题。重启后可接回同一任务继续答复。
+- `/guide-assistant 工作ID 补充说明` 给指定工作追加说明，由 Pi 在独立回合送达。
+- `/stop-assistant 工作ID` 停止刚查看的工作及其下游工作。同事已排队的其他工作可以继续。
+
+目前从本机终端和 owner API 操作。站立会话归属于原任务和来源会话，任务状态可查到原工作 ID、角色修订、用量和留下的文件。[协作契约与验收](specs/2026-11-26-assistant-collaboration.md)
+
 ## 应用 API 凭据
 
 新本机主会话可请求提供 API 凭据。卡片列出名称、用途、HTTPS 站点与认证方式；核对后输入 `/credential 问题ID`，再在终端的无回显提示中粘贴值。命令本身只填问题 ID。用 `/decline-credential 问题ID` 拒绝。macOS 已接入独立密码字段，编译与实机交互仍待验证。普通消息、选项答复和管道不能提供凭据；手机共享卡提示回本机处理。

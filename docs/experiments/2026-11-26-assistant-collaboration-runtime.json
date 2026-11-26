@@ -1,0 +1,50 @@
+{
+  "model": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+  "case": "A03-assistant-collaboration",
+  "runner": "scripts/live-assistant-memory.ts",
+  "attempts": [
+    {
+      "at": "2026-11-26T17:04:29.890Z",
+      "requests": 1,
+      "totalTokens": 0,
+      "tokenLimit": 100000,
+      "passed": false,
+      "reason": "The first generation was still pending when the runner timed out. No assignment was admitted."
+    },
+    {
+      "at": "2026-11-26T17:08:32.691Z",
+      "requests": 17,
+      "totalTokens": 106979,
+      "tokenLimit": 100000,
+      "passed": false,
+      "reason": "The owner answered on the original work after reopening. The task hit its token limit before formal delivery."
+    },
+    {
+      "at": "2026-11-26T17:11:49.457Z",
+      "requests": 23,
+      "totalTokens": 186434,
+      "tokenLimit": 180000,
+      "passed": false,
+      "reason": "Both peer results were recorded. The root repeatedly queried or tried to submit while the next report waited behind the current turn and reached its token limit."
+    },
+    {
+      "at": "2026-11-26T17:18:19.470Z",
+      "requests": 17,
+      "totalTokens": 118982,
+      "inputTokens": 15497,
+      "outputTokens": 1341,
+      "cachedTokens": 102144,
+      "tokenLimit": 180000,
+      "durationLimitMs": 180000,
+      "passed": true,
+      "originalQuestionAnsweredAfterRestart": true,
+      "originalDeadlinePreserved": true,
+      "reworkUsedOriginalConversation": true,
+      "reworkBriefOmittedAnswer": true,
+      "artifactSha256": "16477688c0e00699c6cfa4497a3612d7e83c532062b64b250fed8908128ed548",
+      "verifiedDelivery": true
+    }
+  ],
+  "estimatedCostUsd": null,
+  "scope": "Synthetic local files and the normal owner API and terminal workflow. The last run used the queued-report turn fix and more precise work-ID instructions. This is functional evidence for the scenario. A paired native Pi comparison remains open."
+}

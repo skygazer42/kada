@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import { defineDoc, LiveDoc, type ConversationId, type ConversationRecord, type EntryId, type SubmissionId, type TaskId, type Tx } from '@earendil-works/pi-durable';
+import { AssistantEntry, defineDoc, InboxDoc, LiveDoc, type ConversationId, type ConversationRecord, type EntryId, type SubmissionId, type TaskId, type Tx } from '@earendil-works/pi-durable';
 import type { AssistantPin, AssistantRef } from './assistants.js';
 import type { FileSnapshot } from './workspace.js';
 export type AssistantWorkFile = FileSnapshot & { sourcePath?: string };
@@ -12,18 +12,25 @@ export type AssistantSeat = {
   pin: PeerPin; tools: string[]; createdAt: number;
 };
 export type AssistantWorkResult = { status: 'done'; submission: SubmissionId; answer: EntryId } | { status: 'unanswered'; submission: SubmissionId; reason: string };
+export type AssistantWorkQuestion = { id: string; text: string; options?: string[]; detail?: string; createdAt: number;
+  submissionId: SubmissionId; submissionRequestId: string; noticeRequestId: string; noticeTaskId: TaskId; answer?: { requestId: string; text: string } };
+export type AssistantWorkInput = { requestId: string; kind: 'answer' | 'guidance'; text: string; questionId?: string; taskId: TaskId };
+export type AssistantRetirement = 'revised' | 'paused' | 'cancelled' | 'budget_limited' | 'source_waiting' | 'source_finished';
 export type AssistantWork = {
   id: string; fingerprint: string; root: ConversationId; source: ConversationId; target: ConversationId; taskId: TaskId;
+  originTaskId?: string;
   origin: AssistantPeerEpoch; parentId?: string; reworkOf?: string; lineage: string[]; depth: number; assistant: AssistantRef; brief: string; files: AssistantWorkFile[];
   inputRequests: string[]; messageRequestId: string; reportRequestId: string; createdAt: number;
   outputs?: AssistantWorkFile[]; outputRequests?: Record<string, AssistantWorkFile[]>;
-  result?: AssistantWorkResult; stop?: { requestId: string; at: number; confirmed: boolean; ancestor?: string };
+  questions?: Record<string, AssistantWorkQuestion>; inputs?: Record<string, AssistantWorkInput>;
+  result?: AssistantWorkResult; stop?: { requestId: string; at: number; confirmed: boolean; ancestor?: string; reason?: AssistantRetirement };
 };
 export type AssistantPeerState = { seats: Record<string, AssistantSeat>; work: Record<string, AssistantWork>; stopped: Record<string, true> };
 export const AssistantPeers = defineDoc<AssistantPeerState>({ kind: 'local.assistant_peers', version: 1, scope: 'session',
   initial: () => ({ seats: {}, work: {}, stopped: {} }), checkpointWhen: () => true });
 export type AssistantAdmission = {
   root: ConversationId; source: ConversationId; project: string; parentId?: string; sourceRole?: AssistantRef; tools: string[];
+  originTaskId?: string;
   enabled: boolean; requiresConfirmation: boolean; now: number; deadlineAt: number; maxPeers: number; maxWorks: number; maxDepth: number;
   goal: AssistantPeerEpoch & { initialized: boolean; phase: string; confirmation?: unknown };
 };
@@ -117,6 +124,7 @@ export async function claimAssistantWork(tx: Tx, authority: AssistantAdmission, 
     anchor: native.anchor, key, kind: intent.mode === 'new' ? 'new' : 'standing', pin: copy(intent.assistant), tools, createdAt: authority.now };
   const id = intent.requestId, messageRequestId = 'assistant-work:' + id, reportRequestId = 'assistant-report:' + id;
   const work: AssistantWork = { id, fingerprint, root: authority.root, source: authority.source, target: target.id, taskId: native.taskId,
+    ...(authority.originTaskId ? { originTaskId: authority.originTaskId } : {}),
     origin, ...(parent ? { parentId: parent.id } : {}), ...(intent.reworkOf ? { reworkOf: intent.reworkOf } : {}), lineage: [...ancestors, intent.assistant.id], depth, assistant: { id: intent.assistant.id, revision: intent.assistant.revision },
     brief: intent.instructions, files: copy(intent.files), inputRequests: [messageRequestId], messageRequestId, reportRequestId, createdAt: authority.now };
   state.work[id] = work;
@@ -128,6 +136,7 @@ export async function captureAssistantResult(tx: Tx, id: string): Promise<Assist
   const state = await tx.doc(AssistantPeers), work = ownWork(state, id);
   if (!work) throw new AssistantPeerError(404, 'Assistant work not found.');
   if (work.result) return copy(work.result);
+  if (Object.values(work.questions ?? {}).some(question => !question.answer)) return;
   const inputs = await Promise.all(work.inputRequests.map(request => tx.submissionByRequest(work.target, request)));
   if (inputs.some(input => !input || input.status === 'queued' || input.status === 'placed')) return;
   const latest = inputs.filter(input => input !== undefined).sort((a, b) => Number(a.entry ?? a.id) - Number(b.entry ?? b.id)).at(-1)!;
@@ -135,6 +144,15 @@ export async function captureAssistantResult(tx: Tx, id: string): Promise<Assist
   if (latest.status === 'done') work.result = { status: 'done', submission: latest.id, answer: latest.answer };
   else if (latest.status === 'unanswered') work.result = { status: 'unanswered', submission: latest.id, reason: latest.reason };
   return work.result ? copy(work.result) : undefined;
+}
+
+export async function readAssistantAnswer(tx: Tx, work: AssistantWork) {
+  if (work.result?.status !== 'done') return null;
+  const entry = await tx.entry(AssistantEntry, work.result.answer);
+  if (!entry || entry.conversationId !== work.target) throw new AssistantPeerError(409, 'The original assistant result entry is missing.');
+  return entry.model?.flatMap(message => message.role === 'assistant'
+    ? message.content.flatMap(part => part.type === 'text' ? [part.text] : [])
+    : []).join('\n') ?? '';
 }
 
 export async function outstandingAssistantWork(tx: Tx, root: ConversationId, goal: AssistantPeerEpoch): Promise<boolean> {
@@ -150,14 +168,27 @@ export async function outstandingAssistantWork(tx: Tx, root: ConversationId, goa
   return false;
 }
 
-function controlVersion(work: AssistantWork): string { return digest([work.id, work.taskId, work.target, work.origin, work.result, work.stop]); }
+export async function hasQueuedAssistantReport(tx: Tx, root: ConversationId, goal: AssistantPeerEpoch): Promise<boolean> {
+  const state = await tx.doc(AssistantPeers);
+  for (const work of Object.values(state.work)) {
+    if (work.source !== root || work.stop || !work.result || !sameEpoch(work.origin, goal)) continue;
+    if ((await tx.submissionByRequest(root, work.reportRequestId))?.status === 'queued') return true;
+  }
+  return false;
+}
+
+function controlVersion(work: AssistantWork): string {
+  return digest([work.originTaskId, work.fingerprint, work.taskId, work.target, work.inputRequests, Object.keys(work.questions ?? {}), work.result, work.stop]);
+}
 export function assistantWorkView(state: AssistantPeerState | undefined, id: string) {
   const work = state && ownWork(state, id); if (!work) return;
   const seat = state!.seats[String(work.target)];
   if (!seat) throw new AssistantPeerError(409, 'The original assistant conversation record is missing.');
   return { id: work.id, source: work.source, conversationId: work.target, conversationKind: seat.kind, nativeTaskId: work.taskId, origin: copy(work.origin), parentId: work.parentId ?? null, reworkOf: work.reworkOf ?? null, depth: work.depth,
     assistant: { ...work.assistant, name: seat.pin.name }, brief: work.brief.slice(0, 1000), truncated: work.brief.length > 1000,
-    files: copy(work.files), outputs: copy(work.outputs ?? []), result: work.result ? copy(work.result) : null, stop: work.stop ? copy(work.stop) : null, controlVersion: controlVersion(work) };
+    files: copy(work.files), outputs: copy(work.outputs ?? []), questions: Object.values(work.questions ?? {}).map(question => ({ id: question.id, text: question.text, createdAt: question.createdAt,
+      options: question.options ? [...question.options] : null, detail: question.detail ?? null, answer: question.answer ? { text: question.answer.text } : null })),
+    result: work.result ? copy(work.result) : null, stop: work.stop ? copy(work.stop) : null, controlVersion: controlVersion(work) };
 }
 
 export async function requestAssistantStop(tx: Tx, root: ConversationId, id: string, version: string, requestId: string, at: number): Promise<AssistantWork> {
@@ -174,6 +205,7 @@ export async function requestAssistantStop(tx: Tx, root: ConversationId, id: str
       at, confirmed: false, ...(current.id === id ? {} : { ancestor: id }) };
     state.stopped[stopKey(root, current.assistant.id)] = true;
   }
+  await withdrawStoppedAssistantInputs(tx, subtree);
   return copy(work);
 }
 
@@ -186,6 +218,56 @@ export async function confirmAssistantStop(tx: Tx, id: string, requestId: string
     const input = await tx.submissionByRequest(work.target, request);
     if (input?.status === 'queued' || input?.status === 'placed') throw new AssistantPeerError(409, 'The original native assistant input is still active.');
   }
-  if (Object.values(state.work).some(child => child.parentId === id && !child.stop?.confirmed)) throw new AssistantPeerError(409, 'Original nested assistant work has not stopped yet.');
+  for (const child of Object.values(state.work).filter(child => child.parentId === id && !child.stop?.confirmed)) {
+    if (!child.stop && child.result && (await tx.submissionByRequest(child.source, child.reportRequestId))?.status === 'done') continue;
+    throw new AssistantPeerError(409, 'Original nested assistant work has not stopped yet.');
+  }
+  const parent = work.parentId ? ownWork(state, work.parentId) : undefined;
+  if (parent && !parent.stop) {
+    const outgoing = [work.reportRequestId, ...Object.values(work.questions ?? {}).map(question => question.noticeRequestId)];
+    for (const request of outgoing) {
+      const notice = await tx.submissionByRequest(work.source, request);
+      if (!notice || notice.status === 'unanswered' && notice.entry === undefined) {
+        parent.inputRequests = parent.inputRequests.filter(pending => pending !== request);
+      }
+    }
+  }
   work.stop.confirmed = true;
+}
+
+export async function retireAssistantWork(tx: Tx, root: ConversationId, reason: AssistantRetirement, now: number, keep?: AssistantPeerEpoch) {
+  const state = await tx.doc(AssistantPeers);
+  for (const work of Object.values(state.work)) {
+    if (work.root !== root || work.stop || keep && sameEpoch(work.origin, keep)) continue;
+    const report = await tx.submissionByRequest(work.source, work.reportRequestId);
+    if (report?.status === 'done') continue;
+    await captureAssistantResult(tx, work.id);
+    work.stop = { requestId: digest(['assistant-retired', work.id, reason]), at: now, confirmed: false, reason };
+  }
+  const pending = Object.values(state.work).filter(work => work.root === root && work.stop && !work.stop.confirmed).map(copy);
+  await withdrawStoppedAssistantInputs(tx, pending);
+  return pending;
+}
+
+async function withdrawStoppedAssistantInputs(tx: Tx, works: AssistantWork[]) {
+  const queued = new Map<ConversationId, Set<SubmissionId>>();
+  const collect = async (conversation: ConversationId, requests: string[]) => {
+    for (const request of requests) {
+      const input = await tx.submissionByRequest(conversation, request);
+      if (input?.status !== 'queued') continue;
+      const ids = queued.get(conversation) ?? new Set<SubmissionId>();
+      ids.add(input.id);
+      queued.set(conversation, ids);
+    }
+  };
+  // Pi can place queued inputs at any turn boundary. Withdraw them in the commit that freezes their work.
+  for (const work of works) {
+    await collect(work.target, work.inputRequests);
+    await collect(work.source, [work.reportRequestId, ...Object.values(work.questions ?? {}).map(question => question.noticeRequestId)]);
+  }
+  for (const [conversation, ids] of queued) {
+    const inbox = await tx.doc(InboxDoc, conversation);
+    inbox.items = copy(inbox.items.filter(item => !ids.has(item.id)));
+    for (const id of ids) tx.settleSubmission(id, { status: 'unanswered', reason: 'aborted' });
+  }
 }

@@ -11,7 +11,7 @@ import type { SkillState } from "./skills.js";
 import { outstandingDelegation, savedDelegation } from "./delegation.js";
 import type { InputImage } from "./input-images.js";
 import { outstandingApproval } from "./approvals.js";
-import { outstandingAssistantWork } from './assistant-peer-state.js';
+import { hasQueuedAssistantReport, outstandingAssistantWork } from './assistant-peer-state.js';
 
 export type GoalPhase = "working" | "clarifying" | "awaiting_confirmation" | "submitted" | "verifying" | "completed" | "waiting_user" | "blocked" | "needs_attention" | "failed";
 export type ReviewVerdict = { verdict: "pass" | "rework" | "blocked"; reason: string; evidence: string[] };
@@ -121,7 +121,13 @@ export function goalExtension(options: { advisoryPlan?: boolean; captureSkill?: 
           throw new Error("Background delegation has not returned. End this turn when your independent work is done.");
         }
         if (submitting && await outstandingApproval(tx, api.conversationId)) throw new Error('An action approval is still outstanding. Wait for its result before submitting.');
-        if (submitting && options.assistantPeers && await outstandingAssistantWork(tx, api.conversationId, goal)) throw new Error('Original assistant work has not returned. Wait for its report before submitting.');
+        if (submitting && options.assistantPeers && await outstandingAssistantWork(tx, api.conversationId, goal)) {
+          if (await hasQueuedAssistantReport(tx, api.conversationId, goal)) {
+            // The saved report cannot enter the conversation while this turn keeps retrying.
+            return { ok: false, revision: goal.revision, phase: goal.phase, candidateId: null, reason: 'An original assistant report is queued for the next turn.' };
+          }
+          throw new Error('Original assistant work has not returned. If it needs an answer you already have, use assistant_answer. Otherwise end this turn and wait for its report.');
+        }
         await action(goal, record, tx);
         goal.appliedTools[key] = true;
       }

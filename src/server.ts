@@ -63,7 +63,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -276,7 +276,26 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.mode !== undefined && input.mode !== "chat") throw new Error("mode must be chat when supplied");
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
         return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined,
-          assistant: input.assistant as AssistantRef | undefined }));
+          assistant: input.assistant as AssistantRef | undefined, collaborators: input.collaborators as AssistantRef[] | undefined }));
+      }
+      const assistantWork = /^\/v1\/tasks\/([a-f0-9-]{36})\/assistant-work(?:\/(assign-(?:[a-f0-9-]{36}-)?\d+)(?:\/(stop|guide|questions\/(\d+)\/answer))?)?$/.exec(url.pathname);
+      if (assistantWork) {
+        const [, taskId, id, action, questionId] = assistantWork;
+        if (!action && req.method === 'GET') {
+          return send(200, id ? await runtime.assistantResult(taskId!, id) : (await runtime.status(taskId!)).assistantWork);
+        }
+        if (!id || !action || req.method !== 'POST') return send(405, { error: 'Method not allowed' });
+        const input = await body(req);
+        if (typeof input.requestId !== 'string') throw new Error('Provide the original request ID.');
+        if (action === 'stop') {
+          if (typeof input.version !== 'string' || !/^[a-f0-9]{64}$/.test(input.version)) throw new Error('Provide the displayed work version.');
+          return send(200, await runtime.stopAssignedAssistant(taskId!, id, input.version, input.requestId));
+        }
+        const text = questionId ? input.answer : input.text;
+        if (typeof text !== 'string') throw new Error('Provide the answer or guidance as text.');
+        return send(200, await runtime.inputAssistantWork(taskId!, {
+          id, requestId: input.requestId, text, ...(questionId ? { questionId } : {}),
+        }, questionId ? 'answer' : 'guidance'));
       }
       const childControl = /^\/v1\/tasks\/([a-f0-9-]{36})\/delegations\/(\d+)\/(stop|interrupt)$/.exec(url.pathname);
       if (childControl && req.method === "POST") {
@@ -351,7 +370,9 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           if (!Number.isSafeInteger(input.revision) || typeof input.digest !== "string") throw new Error("Confirm requires the displayed brief revision and digest");
           await runtime.confirm(id, input.revision as number, input.digest); break;
         case "messages":
-          if (Object.hasOwn(input, 'assistant')) throw new AssistantError(409, 'An existing task keeps its original assistant; select a role only for a new task.');
+          if (Object.hasOwn(input, 'assistant') || Object.hasOwn(input, 'collaborators')) {
+            throw new AssistantError(409, 'An existing task keeps its original assistant selection. Select roles for a new task.');
+          }
           if (typeof input.message !== "string" || (input.requestId !== undefined && typeof input.requestId !== "string")) throw new Error("Expected message and optional requestId strings");
           await runtime.followUp(id, input.message, input.requestId); break;
         default: return send(404, { error: "Not found" });

@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { Harness, LiveDoc, UserEntry, AssistantEntry, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
+import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type Extension, type GenerationHooks } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
@@ -49,6 +49,10 @@ import { credentialTools, credentialExecution } from './credential-tools.js';
 import { Assistants, AssistantError, assistantRef, type AssistantRef, type AssistantPin } from './assistants.js';
 import { assistantPolicy, assistantTools } from './assistant-policy.js';
 import { chatAssistantsExtension } from './chat-assistants.js';
+import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssistantWork, readAssistantAnswer, retireAssistantWork,
+  type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
+import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
+import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
@@ -60,6 +64,7 @@ function workItemAnswerVersion(meta: TaskMeta, goal?: GoalState): string | null 
 export interface TaskMeta {
   id: string;
   assistant?: AssistantPin;
+  collaborators?: AssistantPin[];
   objective: string;
   workspace: string;
   model: ModelRef;
@@ -351,16 +356,32 @@ export class LocalRuntime {
         catch(error) {meta.control='paused';meta.initializationError=errorText(error);await atomicJson(this.metaFile(meta.id),meta);}
       }
       else if (meta.control === "cancelled") await this.cancel(meta.id);
+      else if (meta.collaborators && (meta.control === 'paused' || meta.control === 'budget_limited')) {
+        const active = await this.open(meta, false);
+        try { await this.haltCollaborativeTask(active, meta.control); }
+        finally { await this.closeTask(meta.id); }
+      }
     }
     await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
       const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
       if (assistant && (options.remote || workspace === undefined)) throw new AssistantError(400, 'Select an assistant only for a new local task with its existing project workspace.');
+      let collaboratorRefs: AssistantRef[] | undefined;
+      if (options.collaborators !== undefined) {
+        if (options.remote || options.workItem || options.routineOccurrenceId || workspace === undefined || this.config.maxSubagents < 1 ||
+          !Array.isArray(options.collaborators) || !options.collaborators.length || options.collaborators.length > 16) {
+          throw new AssistantPeerError(400, 'Select between one and sixteen collaborators for a new local project task with workers enabled.');
+        }
+        collaboratorRefs = options.collaborators.map(assistantRef);
+        if (new Set(collaboratorRefs.map(ref => ref.id)).size !== collaboratorRefs.length || collaboratorRefs.some(ref => ref.id === assistant?.id)) {
+          throw new AssistantPeerError(400, 'Choose distinct collaborators other than the coordinating assistant.');
+        }
+      }
       if (typeof objective !== "string" || !objective.trim() || objective.length > 32000) throw new Error("Provide an objective between 1 and 32000 characters");
       const checks = acceptanceChecks(acceptance);
       if (options.chat && checks.length) throw new Error("Acceptance checks belong to an explicit task, not an ordinary conversation");
@@ -373,7 +394,8 @@ export class LocalRuntime {
         ...(options.images?.length ? { images: options.images } : {}),
         ...(options.routineIssue ? { routineIssue: options.routineIssue } : {}),
         ...(options.routinePullRequest ? { routinePullRequest: options.routinePullRequest } : {}),
-        ...(options.workItem ? { workItem: options.workItem } : {}), ...(assistant ? { assistant } : {}) })).digest("hex");
+        ...(options.workItem ? { workItem: options.workItem } : {}), ...(assistant ? { assistant } : {}),
+        ...(collaboratorRefs ? { collaborators: collaboratorRefs } : {}) })).digest("hex");
       if (options.id) try {
         const saved = await this.metadata(id);
         if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
@@ -382,7 +404,12 @@ export class LocalRuntime {
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const projectWorkspace = workspace === undefined || options.remote ? undefined : requestedWorkspace;
       const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : undefined;
-      const model = validateModel(this.options.models, role?.model ?? await this.providers.selected(this.config.model, projectWorkspace));
+      const projectModel = !role?.model || collaboratorRefs ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
+      const model = validateModel(this.options.models, role?.model ?? projectModel);
+      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(async ref => {
+        const { id, revision, project, name, description, instructions, tools, model } = await this.assistants.select(requestedWorkspace, ref);
+        return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? projectModel) };
+      })) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace);
       const workItemProject = options.chat && !options.remote ? await memoryProject(files.root) : undefined;
@@ -392,6 +419,7 @@ export class LocalRuntime {
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       const mcpPins = options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root);
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
+        ...(collaborators ? { collaborators } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
           instructions: role.instructions, tools: [...role.tools], model: { ...model } } } : {}),
         mcpPins,
@@ -603,7 +631,8 @@ export class LocalRuntime {
           },context);
         },
       } satisfies Partial<GenerationHooks>}]}) : undefined;
-      const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
+      const team = remote ? undefined : meta.collaborators;
+      const goal = goalExtension({ advisoryPlan: meta.planPolicy === "advisory", captureSkill: nativeSkills && !!meta.learning, remote, assistantPeers: !!team }), readonly = workspaceExtension(workspace, true), review = reviewExtension();
       const questions = meta.structuredQuestions ? questionExtension(!!meta.preparation, remote) : undefined;
       const credentialManagement = !remote && meta.credentialProject ? credentialTools(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
       const credentialRequests = !remote && meta.credentialProject ? credentialExecution(this.credentials, meta.credentialProject, !!meta.preparation) : undefined;
@@ -670,6 +699,13 @@ export class LocalRuntime {
         ...(meta.preparation && !remote ? [verification] : []),
         ...(learning ? [learning] : []),
         ...(!remote && meta.schemaVersion === 3 && this.config.web !== false ? [webExtension(workspace)] : []), ...extra];
+      if (team) {
+        const peers = assistantPeersExtension({ roles: this.assistants, workspace, models: this.options.models, defaultModel: meta.model, maxPeers: meta.maxSubagents,
+          collaborators: team, extensions: () => extensions.filter(extension => extension.name !== 'local_assistant_peers'),
+          harness: () => this.active.get(meta.id)!.harness,
+          withControl: action => this.peerControl(this.active.get(meta.id)!)(action) });
+        extensions.push(peers); coordinatorOnly.push(peers);
+      }
       for (const extension of [...extensions, ...(meta.preparation ? preparationExtensions : []), ...(meta.entrypoint === "chat" ? chatExtensions : []), ...(meta.schemaVersion !== undefined ? [readonly, review] : [])]) registry.install(extension);
       const storage = await openNodeSqliteStorage(join(this.directory(meta.id), "session.sqlite"));
       let harness: Harness|undefined;
@@ -678,7 +714,7 @@ export class LocalRuntime {
           models: this.options.models, registry,
           env: ({ cwd }) => localEnvironment(cwd ?? meta.workspace),
           settings: { retry: { maxRetries: 2 }, stream: { timeoutMs: 120_000 }, toolExecution: "parallel",
-            ...(meta.schemaVersion === 3 ? { compaction: taskCompaction(this.options.models, [meta.model, meta.subagentModel ?? meta.model], this.config.compactAtTokens) } : {}) },
+            ...(meta.schemaVersion === 3 ? { compaction: taskCompaction(this.options.models, [meta.model, meta.subagentModel ?? meta.model, ...(team ?? []).map(role => role.model)], this.config.compactAtTokens) } : {}) },
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
         const initialExtensions = meta.entrypoint === 'chat' ? chatExtensions : meta.preparation ? preparationExtensions : extensions;
@@ -716,6 +752,7 @@ export class LocalRuntime {
       }
       const finished = goal ? ["completed", "blocked", "waiting_user", "needs_attention", "failed"].includes(goal.phase) : latest?.status === "done" || latest?.status === "unanswered";
       if (finished) {
+        if (goal) await this.retirePeers(active, goal.phase === 'waiting_user' ? 'source_waiting' : 'source_finished');
         if (goal?.phase === 'waiting_user' && meta.structuredQuestions) {
           const asking = await this.latestInput(active);
           const question = await currentQuestion(active.harness, active.root.id, asking?.id, goal);
@@ -749,6 +786,10 @@ export class LocalRuntime {
       }
       if (goal) await stopObsoleteDelegations(active.harness, goal, ctx);
       if (goal) await stopObsoleteApprovals(active.harness, goal);
+      if (goal && meta.collaborators) {
+        await this.retirePeers(active, 'revised', goal);
+        await restoreAssistantStopBoundaries(active.harness, active.root.id, goal, this.peerControl(active), ctx);
+      }
       if (goal) await this.dispatchOutbox(active);
       const initial = await active.harness.commit(tx => tx.submissionByRequest(active!.root.id, "initial"), ctx);
       if (!initial && Date.now() < this.deadline(active, goal)) await active.root.submit({ type: "input",
@@ -912,6 +953,30 @@ export class LocalRuntime {
     if (costLimit !== undefined && used.estimatedCostUsd >= costLimit) return `Task estimated cost budget exhausted ($${used.estimatedCostUsd.toFixed(4)} / $${costLimit})`;
     if (tokenLimit !== null && used.totalTokens >= tokenLimit) return `Task token budget exhausted (${tokenLimit})`;
   }
+  private peerControl(active: Active): AssistantPeerControlRunner {
+    return action => active.childAdmission.run(async () => {
+      const goal = await this.goalState(active);
+      return action({ root: active.root.id, project: active.meta.collaborators![0]!.project, originTaskId: active.meta.id,
+        enabled: active.meta.control === 'active' && !!goal && !await this.budgetReason(active, goal),
+        requiresConfirmation: !!active.meta.preparation, deadlineAt: this.deadline(active, goal), assistant: active.meta.assistant });
+    });
+  }
+  private async retirePeers(active: Active, reason: AssistantRetirement, keep?: AssistantPeerEpoch) {
+    if (!active.meta.collaborators) return;
+    const works = await active.childAdmission.run(() => active.harness.commit(
+      tx => retireAssistantWork(tx, active.root.id, reason, Date.now(), keep), ctx));
+    await settleAssistantStops(active.harness, works, ctx);
+  }
+  private async haltCollaborativeTask(active: Active, control: 'paused' | 'cancelled' | 'budget_limited') {
+    const works = await active.childAdmission.run(() => active.harness.commit(
+      tx => retireAssistantWork(tx, active.root.id, control, Date.now()), ctx));
+    const { tasks, submissions } = await active.harness.inspect(ctx);
+    // Record abort marks before any wait can restart a reopened session.
+    for (const input of submissions) await active.harness.abortSubmission(input.id, ctx);
+    for (const { record } of tasks) await active.harness.abortTask(record.id, ctx);
+    if (tasks.length || submissions.length) await this.abortAll(active);
+    await settleAssistantStops(active.harness, works, ctx);
+  }
   private async dispatchOutbox(active: Active): Promise<void> {
     const outbox = (await readGoal(active.harness)).outbox;
     if (!outbox) return;
@@ -945,6 +1010,11 @@ export class LocalRuntime {
       if (!busy) { active.enabled = false; return; }
       if (Date.now() >= active.meta.deadlineAt) await this.limit(active, "Task time budget exhausted");
       return;
+    }
+    if (active.meta.collaborators && ['waiting_user', 'blocked', 'failed', 'completed', 'needs_attention'].includes(goal.phase)) {
+      await this.retirePeers(active, goal.phase === 'waiting_user' ? 'source_waiting' : 'source_finished');
+      ({ tasks, submissions } = await active.harness.inspect(ctx));
+      busy = tasks.length > 0 || submissions.length > 0;
     }
     if (busy && active.meta.structuredQuestions && ['waiting_user', 'clarifying'].includes(goal.phase)) {
       const asking = await this.latestInput(active);
@@ -1009,6 +1079,17 @@ export class LocalRuntime {
       }
     }
     if (busy) return;
+    if (active.meta.collaborators && goal.phase === 'working' &&
+      await active.harness.commit(tx => outstandingAssistantWork(tx, active.root.id, goal!), ctx)) {
+      await this.updateGoal(active, (state, record) => {
+        state.phase = 'needs_attention';
+        state.reason = 'An assistant work receipt is missing or its report could not be delivered. Inspect the saved work before continuing.';
+        record('needs_attention', state.reason);
+      });
+      await this.retirePeers(active, 'source_finished');
+      active.enabled = false;
+      return;
+    }
     if (goal.phase === "verifying" && goal.review) { await this.finishReview(active, goal); return; }
     if (!latest) return;
     if (latest.status === "unanswered") {
@@ -1176,10 +1257,13 @@ export class LocalRuntime {
     await this.dispatchOutbox(active);
   }
   private async limit(active: Active, reason: string): Promise<void> {
-    active.meta.control = "budget_limited";
-    await atomicJson(this.metaFile(active.meta.id), active.meta);
+    await active.childAdmission.run(async () => {
+      active.meta.control = "budget_limited";
+      await atomicJson(this.metaFile(active.meta.id), active.meta);
+    });
     if (await this.goalState(active)) await this.updateGoal(active, (goal, record) => { goal.reason = reason; record("budget_limited", reason); });
     if (active.meta.routineOccurrenceId) await this.routines.settleBudget(active.meta.routineOccurrenceId);
+    if (active.meta.collaborators) await this.haltCollaborativeTask(active, 'budget_limited');
     await this.closeTask(active.meta.id);
   }
   private async taskState(active: Active, meta: TaskMeta) {
@@ -1188,10 +1272,14 @@ export class LocalRuntime {
     const busy = inspection.tasks.length > 0 || inspection.submissions.length > 0;
     const goal = await this.goalState(active);
     const userQuestion = meta.structuredQuestions ? await currentQuestion(active.harness, active.root.id, (await this.latestInput(active))?.id, goal) : null;
-    const status = meta.control !== "active" ? meta.control : goal ?
+    const assistantState = meta.collaborators ? await active.harness.snapshot(AssistantPeers, ctx) : undefined;
+    const waitingAssistant = goal?.phase === 'working' && Object.values(assistantState?.work ?? {}).some(work =>
+      work.origin.revision === goal.revision && work.origin.epoch === goal.epoch && !work.stop && !work.result &&
+      Object.values(work.questions ?? {}).some(question => !question.answer));
+    const status = meta.control !== "active" ? meta.control : waitingAssistant ? 'waiting_assistant' : goal ?
       goal.phase === "working" ? busy ? "running" : "pending" : ["clarifying", "awaiting_confirmation"].includes(goal.phase) && busy ? "running" : goal.phase === "submitted" ? "verifying" : goal.phase :
       busy ? "running" : userQuestion ? "waiting_user" : submission?.status === "done" ? "answered" : submission?.status === "unanswered" ? "failed" : "pending";
-    return { submission, inspection, goal, status, userQuestion };
+    return { submission, inspection, goal, status, userQuestion, assistantState };
   }
   async taskOverview(id: string) {
     return this.changes.run(async () => {
@@ -1245,7 +1333,7 @@ export class LocalRuntime {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
-      const { submission, inspection, goal, status, userQuestion } = await this.taskState(active, meta);
+      const { submission, inspection, goal, status, userQuestion, assistantState } = await this.taskState(active, meta);
       const context = await active.root.context(ctx);
       const conversations = await this.conversations(active);
       const usage = await active.harness.usage(ctx);
@@ -1278,19 +1366,50 @@ export class LocalRuntime {
       const remotelyControlled = meta.remotePolicy === "workspace" || (!meta.remotePolicy && Boolean(meta.workItem));
       const remoteControls = remotelyControlled ? await this.remoteTaskControls(active, meta, status, goal) : [];
       const approvals = meta.remotePolicy ? [] : await approvalViews(active.harness);
+      const peerUsage = new Map(await Promise.all(Object.values(assistantState?.seats ?? {}).map(async seat =>
+        [seat.conversationId, taskUsage(await active.harness.snapshot(UsageDoc, seat.conversationId, ctx) ?? UsageDoc.definition.initial())] as const)));
+      const assistantWork = Object.values(assistantState?.work ?? {}).map(work => ({ ...assistantWorkView(assistantState, work.id)!, usage: peerUsage.get(work.target)! }));
       return { ...meta, objective: goal?.objective || meta.objective, interaction, deadlineAt: this.deadline(active, goal), status, goal, submission, messages: context.messages, workerCount: workerIds.size,
         workItemAnswerVersion: workItemAnswerVersion(meta, goal),
         remoteControls, remoteControlVersion: remotelyControlled ? this.remoteControlVersion(meta, status, submission?.id, goal) : null,
-        activeTools, interruptibleChildTools, delegations, approvals, userQuestion,
+        activeTools, interruptibleChildTools, delegations, approvals, userQuestion, assistantWork,
         briefDigest: goal?.brief ? briefDigest(goal.brief) : null,
         activeWorkerCount: new Set(inspection.tasks.map(t => t.record.conversationId).filter(id => workerIds.has(id))).size,
         compactions: compactions.total, rootCompactions: compactions.root,
         contextUsage: { estimatedTokens: estimateContextTokens(context.messages).tokens,
           contextWindow: this.options.models.getModel(meta.model.provider, meta.model.modelId)?.contextWindow ?? null },
-        budget: { ...taskUsage(usage), priceKnown:modelCostKnown(meta.model) && (!meta.subagentModel || modelCostKnown(meta.subagentModel)), tokenLimit: goal ? goal.tokenLimit : meta.entrypoint === "chat" ? meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null : null,
+        budget: { ...taskUsage(usage), priceKnown:modelCostKnown(meta.model) && (!meta.subagentModel || modelCostKnown(meta.subagentModel)) &&
+          Object.values(assistantState?.seats ?? {}).every(seat => modelCostKnown(seat.pin.model)), tokenLimit: goal ? goal.tokenLimit : meta.entrypoint === "chat" ? meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null : null,
           costLimit: goal ? goal.costLimit ?? null : meta.entrypoint === "chat" ? meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 : null },
         resumeBudget: this.resumeBudget(meta, goal),
         conversations, tasks: inspection.tasks, usage };
+    });
+  }
+  private async openCollaborativeTask(taskId: string) {
+    const meta = await this.metadata(taskId);
+    if (meta.remotePolicy || !meta.collaborators?.length) throw new AssistantPeerError(404, 'This task has no authorized assistant work.');
+    return this.open(meta, false);
+  }
+  async assistantResult(taskId: string, id: string) {
+    return this.changes.run(async () => {
+      const active = await this.openCollaborativeTask(taskId);
+      const state = await active.harness.snapshot(AssistantPeers, ctx), work = state?.work[id];
+      const view = assistantWorkView(state, id);
+      if (!work || !view || work.root !== active.root.id) throw new AssistantPeerError(404, 'Assistant work not found in this task.');
+      return { ...view, answer: await active.harness.commit(tx => readAssistantAnswer(tx, work), ctx) };
+    });
+  }
+  async inputAssistantWork(taskId: string, request: AssistantInputRequest, kind: 'guidance' | 'answer') {
+    return this.changes.run(async () => {
+      const active = await this.openCollaborativeTask(taskId);
+      const receive = kind === 'answer' ? answerAssistantWork : guideAssistantWork;
+      return receive(active.harness, request, this.peerControl(active), ctx);
+    });
+  }
+  async stopAssignedAssistant(taskId: string, id: string, version: string, requestId: string) {
+    return this.changes.run(async () => {
+      const active = await this.openCollaborativeTask(taskId);
+      return stopAssistantWork(active.harness, id, version, requestId, this.peerControl(active), ctx);
     });
   }
   async interruptChild(id: string, childId: number, options: { workspace?: string; toolTaskId?: number } = {}) {
@@ -1540,7 +1659,8 @@ export class LocalRuntime {
         await atomicJson(this.metaFile(id), meta);
       }
       if (before.review) await (await active.harness.conversation(before.review.conversationId, ctx))?.abort(ctx, { background: true });
-      const updated = await this.updateGoal(active, async (goal, record, tx) => {
+      let retiring: AssistantWork[] = [];
+      const updated = await active.childAdmission.run(() => this.updateGoal(active, async (goal, record, tx) => {
         if (asking) await recordQuestionAnswer(tx, active.root.id, asking.id, key, message, goal, protectedInput);
         else if (questions?.current) (await tx.doc(Questions, active.root.id)).questions[questions.current]!.retired = true;
         if (fingerprint !== undefined) {
@@ -1553,7 +1673,9 @@ export class LocalRuntime {
         goal.userMessages.push(message);
         record("user_input", message);
         goal.outbox = { requestId: key, content: message, ...(images?.length ? { images: structuredClone(images) } : {}) };
-      });
+        if (meta.collaborators) retiring = await retireAssistantWork(tx, active.root.id, 'revised', Date.now(), goal);
+      }));
+      await settleAssistantStops(active.harness, retiring, ctx);
       await stopObsoleteDelegations(active.harness, updated, ctx);
       await stopObsoleteApprovals(active.harness, updated);
       await this.configureStage(active);
@@ -1602,7 +1724,14 @@ export class LocalRuntime {
   private async pauseTask(meta: TaskMeta): Promise<void> {
     if (meta.remotePolicy === "workspace" || meta.workItem) meta.remoteControlRevision = randomUUID();
     meta.control = "paused";
-    await atomicJson(this.metaFile(meta.id), meta);
+    if (meta.collaborators) {
+      const active = await this.open(meta, false);
+      await active.childAdmission.run(async () => {
+        active.meta = meta;
+        await atomicJson(this.metaFile(meta.id), meta);
+      });
+      await this.haltCollaborativeTask(active, 'paused');
+    } else await atomicJson(this.metaFile(meta.id), meta);
     await this.closeTask(meta.id);
   }
   async pause(id: string): Promise<void> {
@@ -1619,6 +1748,8 @@ export class LocalRuntime {
       if (meta.control === "cancelled") throw new Error("Cancelled tasks cannot be resumed");
       await this.closeTask(id);
       const active = await this.open(meta, false);
+      const restarting = meta.collaborators && (meta.control === 'paused' || meta.control === 'budget_limited');
+      if (meta.collaborators && (meta.control === 'paused' || meta.control === 'budget_limited')) await this.haltCollaborativeTask(active, meta.control);
       if(meta.initializationError) {
         const previous=meta.initializationError;
         delete meta.initializationError;
@@ -1637,7 +1768,7 @@ export class LocalRuntime {
           if (grant.maxEstimatedCostUsd !== null) goal.costLimit = used.estimatedCostUsd + grant.maxEstimatedCostUsd;
           if (goal.confirmation) goal.confirmation.deadlineAt = Date.now() + grant.maxDurationMs;
           goal.epoch++; goal.reworks = 0; goal.stalls = 0; goal.lastFingerprint = null;
-          if (["failed", "needs_attention", "blocked", "waiting_user"].includes(goal.phase)) {
+          if (["failed", "needs_attention", "blocked", "waiting_user"].includes(goal.phase) || restarting && goal.phase === 'working') {
             goal.phase = "working"; goal.candidate = null; goal.review = null; goal.lastEvaluated = null;
             goal.outbox = { requestId: `resume:${randomUUID()}`, content: 'Resume the original objective from saved files and history. Read task_status for user requirements. Use {"details":true} for exact confirmed scope and verification evidence and {"delegation":"list"} to find earlier child results. Inspect actual state before further actions and submit actual deliverables for verification.' };
           }
@@ -1664,7 +1795,19 @@ export class LocalRuntime {
   private async cancelTask(meta: TaskMeta): Promise<void> {
     const wasPaused = meta.control === "paused";
     delete meta.remotePaused;
-    meta.control = "cancelled"; await atomicJson(this.metaFile(meta.id), meta);
+    meta.control = "cancelled";
+    if (meta.collaborators) {
+      const active = await this.open(meta, false);
+      await active.childAdmission.run(async () => {
+        active.meta = meta;
+        await atomicJson(this.metaFile(meta.id), meta);
+      });
+      await stopObsoleteApprovals(active.harness);
+      await this.haltCollaborativeTask(active, 'cancelled');
+      await this.closeTask(meta.id);
+      return;
+    }
+    await atomicJson(this.metaFile(meta.id), meta);
     const active = await this.open(meta, false);
     await stopObsoleteApprovals(active.harness);
     if (wasPaused) {

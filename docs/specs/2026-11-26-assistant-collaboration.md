@@ -1,6 +1,6 @@
 # 持久同事会话与跨助手工作交接
 
-状态：身份/事务核心及内部 Pi 派活、原结果回传、显式返工、固定文件和单工作停止已实现；Runtime 产品入口与完整生命周期尚未接入。内部扩展测试不能代替下列产品验收。继续保留[能力矩阵](2026-11-25-reference-capability-matrix.md)的全部协作差距。[固定参考源码及研究](../superpowers/plans/2026-11-26-assistant-handoff-research.md)
+本机终端与 owner API 已接入持久助手协作。新任务显式选定助手修订并确认后，可派活、回交原结果和文件、返工、补充说明、答复与停止单项工作。跨设备团队及性能对照仍待验收。[使用入口](../assistant-usage.md#持久助手协作) · [能力矩阵](2026-11-25-reference-capability-matrix.md) · [固定参考源码及研究](../superpowers/plans/2026-11-26-assistant-handoff-research.md)
 
 ## 用户得到的能力
 
@@ -92,3 +92,11 @@ Runtime 尚未安装该扩展，不能从正常任务入口使用。固定文件
 本阶段当前整仓600项中596通过、0失败、4项可选Office跳过，含上述源私有prompt回归。7处实际SIGKILL均已通过；硅基流动DeepSeek V3.2以24次请求完成首次派活/文件、重启后同会话回忆及修改/归档配置后的原角色返工。第一次验收脚本错传项目子目录被正确拒绝（8次请求），失败记录保留；修正脚本使用实际assistantProject，未放宽产品边界。费用元数据未配置，money=null，不据零字段声称免费。本轮没有工作待答/指导、Runtime全生命周期、owner入口或原Pi收益对照，仍不勾选全部产品验收。[停止与文件证据](../experiments/2026-11-26-assistant-peer-files-and-stop.json) · [真实模型](../experiments/2026-11-26-assistant-peer-live.json)
 
 实现提交 `d30e071` 的不可变内容通过 TruffleHog 3.100.1 扫描（15.6秒），类型/构建、公开测试类型及笔记/提交检查通过。独立代码审查仍不可用：子代理任务正文丢失，CLI 在快照问题修正为不可变提交后仍因认证401失败；凭据扫描不等同代码审查。
+
+## 本机协作入口与恢复
+
+新本机任务通过 `--collaborator ID@修订` 或 owner API 固定助手名单。准备阶段保留原确认入口，确认后才向模型注册派活工具。终端可读取原工作和结果、答复、补充说明及按已显示版本停止单项工作。已选角色与工作随原任务接回。测试核对未选助手、其他任务的工作 ID、迟到答复及未认证 API 的拒绝行为。[入口回归](../../test/assistant-peer-entry.test.ts)
+
+原任务监督器在改目标、暂停、取消、时限或 token 到限时停掉关联工作，保留原工作、原时限和已有证据。派发模型与工具前也检查原预算。真实进程强杀新增两处窗口，分别在答复及停止已持久保存后恢复。测试核对原 ID、报告数量及实际副作用。[生命周期回归](../../test/assistant-peer-lifecycle.test.ts) · [强杀回归](../../test/assistant-peer-recovery.test.ts)
+
+DeepSeek V3.2 在硅基流动完成两份工作。终端重启后向原问题答复，返工沿同一同事会话读取原选择，固定副本、工作区文件和交付证据的 SHA-256 一致。最终 17 次请求、118,982 token，其中 102,144 为缓存读取，账单金额未知。此前三次尝试保留，其中两次到限。复现发现主助手重试提交会挡住排队的原报告，现由原提交工具结束该回合，使 Pi 能继续交付原报告。[真实验收记录](../experiments/2026-11-26-assistant-collaboration-runtime.json) · [原 Pi 回合边界](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/README.md#tools)

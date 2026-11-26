@@ -64,7 +64,8 @@ await writeFile(join(alpha,'AGENTS.md'),'日报回复语言 language 偏好：�
 await writeFile(join(beta,'AGENTS.md'),'日报回复语言 language 偏好：英文。');
 const socket=createServer();await new Promise<void>(done=>socket.listen(0,'127.0.0.1',done));
 const port=(socket.address() as {port:number}).port;await new Promise<void>(done=>socket.close(()=>done()));
-const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:process.env.KADA_LIVE_CASES==='A02-chat-assistants' ? 180_000 : 100_000,review:false,web:false,discovery:true};
+const longLiveCases = ['A02-chat-assistants', 'A03-assistant-collaboration'];
+const config={dataDir:join(directory,'state'),port,model:{provider:'siliconflow',modelId},maxSubagents:2,maxDurationMs:180_000,maxTotalTokens:longLiveCases.includes(process.env.KADA_LIVE_CASES ?? '') ? 180_000 : 100_000,review:false,web:false,discovery:true};
 const routineClock = fakeRoutineClock(Date.parse('2026-12-01T21:00:00Z'));
 const routineScope = defineExtension({name:'live-inventory-scope',hooks:[hook(ToolTask,{
   beforeTool(call) {
@@ -251,6 +252,61 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const loaded=await server.runtime['active'].get(task.id)!.root.agent((await import('@earendil-works/chord/context')).BACKGROUND_CONTEXT);
     assert(loaded.tools.some(tool=>tool.name.startsWith('mcp_records_record_20_')),'discovery_loaded_after_reopen');
     evidence.mcpDiscovery={taskId:task.id,catalogSize:catalog.length,initialMcpSchemas:0,selectedCalls:1,loadedAfterRestart:true,requests};
+  });
+  if (selectedCases.includes('A03-assistant-collaboration')) await check('A03-assistant-collaboration', async () => {
+    const checkpoints: Record<string, unknown> = { tokenLimit: config.maxTotalTokens, durationLimitMs: config.maxDurationMs };
+    evidence.assistantCollaboration = checkpoints;
+    const receipt = await server.runtime.assistants.create({ workspace: alpha, name: 'Sample Reviewer',
+      instructions: 'For the initial assignment, use assistant_ask to ask the owner to select blue or green before reading anything. On the answer turn, return the exact chosen word. On explicit rework, recall the owner answer from your conversation history, write it as the sole content of team-result.txt, call assistant_attach for that file, and return the word.',
+      tools: ['assistant_ask', 'write', 'assistant_attach'] });
+    const assistant = { id: receipt.id, revision: receipt.revision };
+    const task = await client.request<{ id: string }>('/v1/tasks', 'POST', { workspace: alpha, confirmed: true, collaborators: [assistant],
+      objective: `Use assistant_assign in standing mode to give Sample Reviewer (${assistant.id}, revision ${assistant.revision}) one assignment: ask the owner to select a colour. Finish your turn. On ASSISTANT_QUESTION, let the owner reply and finish that turn. On ASSISTANT_REPORT for the initial work ID, use assistant_result and then assistant_rework on that work. Tell the reviewer to write only the chosen English word from its saved answer to team-result.txt and attach the file. Do not include the colour in the rework. Finish your turn. On ASSISTANT_REPORT for the separate rework ID, use assistant_result and read team-result.txt, then call task_submit with team-result.txt as the only artifact. Only the reviewer should write that file.`,
+      acceptance: [{ type: 'file_contains', path: 'team-result.txt', text: 'blue' }] });
+    tasks.add(task.id);
+    const observeTask = async () => {
+      const status = await server.runtime.status(task.id);
+      checkpoints.lastStatus = status.status;
+      checkpoints.submission = status.submission?.status;
+      checkpoints.workCount = status.assistantWork.length;
+      return status;
+    };
+    const waiting = await until(observeTask, status =>
+      ['waiting_assistant', 'waiting_user', 'failed', 'budget_limited', 'needs_attention'].includes(status.status), 120_000);
+    const originalWork = waiting.assistantWork[0];
+    const question = originalWork?.questions[0];
+    assert.equal(waiting.status, 'waiting_assistant');
+    assert(originalWork && question && !question.answer);
+    await server.close();
+    server = await serve(config, serverOptions);
+    const terminalErrors: string[] = [];
+    const terminal = new ChatSession(client, event => { if (event.kind === 'error') terminalErrors.push(event.text); }, alpha);
+    await terminal.attach(task.id);
+    await terminal.handle(`/reply-assistant ${originalWork.id} ${question.id} blue`);
+    assert.equal(terminalErrors.length, 0);
+    checkpoints.restartedAndAnswered = true;
+    const done = await until(observeTask, status =>
+      ['completed', 'waiting_user', 'failed', 'budget_limited', 'needs_attention'].includes(status.status), 150_000);
+    const [first, rework] = done.assistantWork;
+    assert.equal(done.status, 'completed');
+    assert.equal(done.deadlineAt, waiting.deadlineAt);
+    assert.equal(done.assistantWork.length, 2);
+    assert(first && rework && rework.outputs.length === 1);
+    assert.equal(first.id, originalWork.id);
+    assert.equal(first.questions[0]?.id, question.id);
+    assert.equal(rework.reworkOf, first.id);
+    assert.equal(rework.conversationId, first.conversationId);
+    assert.doesNotMatch(rework.brief, /\bblue\b/i);
+    assert(rework.result && first.result);
+    const output = rework.outputs[0]!;
+    const bytes = await readFile(output.path);
+    assert.equal(bytes.toString().trim(), 'blue');
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), output.sha256);
+    assert.deepEqual(await readFile(join(alpha, 'team-result.txt')), bytes);
+    assert((await server.runtime.artifacts(task.id)).some(file => file.state === 'verified' && file.sha256 === output.sha256));
+    Object.assign(checkpoints, { taskId: task.id, workId: first.id, questionId: question.id, reworkId: rework.id,
+      conversationId: first.conversationId, pinnedRevision: first.assistant.revision, restartOriginalQuestion: true,
+      originalDeadline: true, fixedArtifactHash: output.sha256, verifiedDelivery: true, requests });
   });
   await check('A02-chat-assistants',async()=>{
     const instructions='先阅读原始资料并引用来源。';
@@ -440,7 +496,7 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     const {status:recalled,answer} = await chat(alpha,'这个项目之前的对话里，我们为 NEBULA_842 选择了什么数据库？请检索历史并读取原消息后回答。');
     const search = recalled.messages.find(message=>message.role==='toolResult' && message.toolName==='history_search' && !message.isError);
     const read = recalled.messages.find(message=>message.role==='toolResult' && message.toolName==='history_read' && !message.isError);
-    assert(search && read,'history_tools_succeeded');
+    assert(search && read?.role==='toolResult','history_tools_succeeded');
     const original = JSON.parse(read.content.filter(block=>block.type==='text').map(block=>block.text).join(''));
     assert.equal(original.taskId,source.id,'history_original_task');
     assert.match(original.text,/NEBULA_842.*SQLite/,'history_original_text');

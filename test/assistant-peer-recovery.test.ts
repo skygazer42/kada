@@ -48,3 +48,26 @@ for (const stage of ['stop-requested', 'stop-confirmed-before-boundary']) {
     } finally { await worker.stop(); await rm(directory, { recursive: true, force: true, maxRetries: 5 }); }
   });
 }
+
+for (const stage of ['answer-saved', 'stop-saved']) {
+  test('the daemon recovers collaboration after SIGKILL with ' + stage, { timeout: recoveryTestTimeoutMs }, async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'kada-collaboration-recovery-')));
+    const fixture = new URL('./fixtures/collaborative-runtime-worker.ts', import.meta.url);
+    let worker = startRecoveryWorker(fixture, 'create', directory, stage);
+    try {
+      const original = await worker.ready();
+      assert.equal(await worker.stop(), 'SIGKILL');
+      worker = startRecoveryWorker(fixture, 'recover', directory, stage);
+      const result = await worker.complete();
+      assert.deepEqual(result.ids, original.ids);
+      assert.equal(result.deadline, original.deadline);
+      assert.equal(result.summary, 'Recovered the original collaboration.');
+      assert.equal(result.effects, stage === 'answer-saved' ? 'original answer\n' : 'queued sibling\n');
+      assert.equal(result.stopped, stage === 'stop-saved' ? 1 : 0);
+      assert.equal(result.reports, 1);
+    } finally {
+      await worker.stop();
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+}

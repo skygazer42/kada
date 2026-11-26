@@ -23,6 +23,7 @@ export function taskView(status: TaskStatus) {
     progress: { steps: goal?.plan ?? [], tools: status.activeTools },
     skills: skillRecords(status),
     delegations:status.delegations,
+    assistantWork: status.assistantWork,
     stoppableChildren: status.status === "running" ? status.delegations.flatMap(child => child.mode === "background" &&
       ["queued", "running", "waiting_input"].includes(child.status) ? [{ childId: child.conversationId, name: child.name }] : []) : [],
     interruptibleChildTools: status.interruptibleChildTools,
@@ -39,7 +40,7 @@ export function taskView(status: TaskStatus) {
 export type TaskView = ReturnType<typeof taskView>;
 
 export function taskGroup(status: TaskStatus['status']) {
-  return ['waiting_user','blocked','needs_attention','clarifying','awaiting_confirmation','failed','paused','budget_limited'].includes(status) ? 'pending'
+  return ['waiting_user','waiting_assistant','blocked','needs_attention','clarifying','awaiting_confirmation','failed','paused','budget_limited'].includes(status) ? 'pending'
     : ['completed','answered'].includes(status) ? 'delivered' : status === 'cancelled' ? 'closed' : 'running';
 }
 
@@ -48,7 +49,10 @@ export function taskHandoff(status:TaskStatus) {
   const child = status.status === "running" ? status.delegations.find(item => item.status === "waiting_input") : undefined;
   const group = child ? "pending" : taskGroup(status.status);
   const step = goal?.plan.find(step => step.status === 'running')?.title;
-  const question = goal?.question ?? status.userQuestion?.text ?? child?.question?.text ?? null;
+  const peerQuestion = status.status === 'waiting_assistant' ? status.assistantWork
+    .find(work => !work.stop && !work.result && work.origin.revision === goal?.revision && work.origin.epoch === goal?.epoch &&
+      work.questions.some(question => !question.answer))?.questions.find(question => !question.answer) : undefined;
+  const question = goal?.question ?? status.userQuestion?.text ?? child?.question?.text ?? peerQuestion?.text ?? null;
   const summary = group === 'pending' ? question ?? goal?.reason ?? (status.status === 'awaiting_confirmation' ? '等待确认任务说明和预算' : status.status)
     : goal?.candidate?.summary ?? step ?? (status.interaction === 'chat' ? '普通对话' : '执行目标');
   return {group,summary:summary.slice(0,2000),question,step:step ?? null,

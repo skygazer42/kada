@@ -16,6 +16,7 @@ export type ChatEvent = { kind: "info" | "answer" | "error"; text: string };
 
 function answerKey(message: Message, text: string): string { return `${message.timestamp}:${text}`; }
 const HELP = `直接输入消息：普通问答直接回复，需要实际交付时再提出任务说明与预算。\n\n/new [消息]       新建对话，原任务继续在后台运行\n/confirm          确认刚展示的任务说明与预算\n/run 目标         已有明确授权，沿用配置预算直接执行\n/memory list      查看当前项目记忆与来源\n/memory edit ID 内容 纠正一条记忆\n/memory forget ID 遗忘一条记忆\n/memory used      查看当前会话使用的记忆版本\n/tasks            列出最近的对话与任务\n/attach 任务ID    接回已有对话或任务\n/status           查看状态、预算、核验范围和进度\n/pause            暂停当前对话或任务\n/resume           恢复；显式补充一份配置/已确认预算，不代替目标确认\n/cancel           取消当前对话或任务\n/help             显示帮助\n/quit             退出聊天，后台任务继续运行`;
+const ASSISTANT_WORK_HELP = '/assistant-work [工作ID] 查看同事工作或原结果\n/reply-assistant 工作ID 问题ID 答复\n/guide-assistant 工作ID 补充说明\n/stop-assistant 工作ID 停止已查看的工作';
 
 /** Conversation selection and delivery are independent of terminal rendering. */
 export class ChatSession {
@@ -24,9 +25,10 @@ export class ChatSession {
   private activity = "";
   private shownBrief?: { revision: number; digest: string };
   private shownApprovals = new Map<string, string>();
-  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef) {}
+  private shownAssistantWork = new Map<string, string>();
+  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef, private collaborators?: AssistantRef[]) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
-  private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); }
+  private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); this.shownAssistantWork.clear(); }
   async attach(id: string): Promise<void> {
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     this.select(id);
@@ -50,6 +52,36 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (['/assistant-work', '/reply-assistant', '/guide-assistant', '/stop-assistant'].includes(command!)) {
+        if (!this.taskId) throw new Error('先用 /attach 选择任务。');
+        const path = `/v1/tasks/${this.taskId}/assistant-work`;
+        if (command === '/assistant-work') {
+          if (argument && !/^assign-(?:[a-f0-9-]{36}-)?\d+$/.test(argument)) throw new Error('使用原工作 ID。');
+          const work = await this.client.request<TaskStatus['assistantWork'][number] & { answer: string | null } | TaskStatus['assistantWork']>(argument ? `${path}/${argument}` : path);
+          const rows = Array.isArray(work) ? work : [work];
+          for (const row of rows) this.shownAssistantWork.set(row.id, row.controlVersion);
+          this.info(rows.length ? JSON.stringify(work, null, 2) : '当前任务没有同事工作。');
+          return true;
+        }
+        if (command === '/stop-assistant') {
+          const version = this.shownAssistantWork.get(argument ?? '');
+          if (!version) throw new Error('先用 /assistant-work 查看要停止的工作。');
+          await this.client.request(`${path}/${argument}/stop`, 'POST', { version, requestId: `terminal-stop-${argument}` });
+          this.info('已确认停止该工作。');
+        } else if (command === '/reply-assistant') {
+          const reply = /^(assign-(?:[a-f0-9-]{36}-)?\d+)\s+(\d+)\s+([\s\S]+)$/.exec(argument ?? '');
+          if (!reply) throw new Error('用法：/reply-assistant 工作ID 问题ID 答复');
+          await this.client.request(`${path}/${reply[1]}/questions/${reply[2]}/answer`, 'POST', { requestId: `terminal-answer-${reply[2]}`, answer: reply[3] });
+          this.info('答复已保存到原工作。');
+        } else {
+          const guide = /^(assign-(?:[a-f0-9-]{36}-)?\d+)\s+([\s\S]+)$/.exec(argument ?? '');
+          if (!guide) throw new Error('用法：/guide-assistant 工作ID 补充说明');
+          await this.client.request(`${path}/${guide[1]}/guide`, 'POST', { requestId: randomUUID(), text: guide[2] });
+          this.info('补充说明已保存到原工作。');
+        }
+        await this.poll();
+        return true;
+      }
       if (command === '/credential' || command === '/decline-credential') {
         if (!this.taskId || !/^\d+$/.test(argument ?? '')) throw new Error('使用当前凭据问题 ID，不要在命令中填写密钥。');
         const status = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`), question = status.userQuestion;
@@ -103,7 +135,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
@@ -253,8 +285,9 @@ export class ChatSession {
   private async send(message: string, confirmed = false): Promise<void> {
     if (!this.taskId) {
       if (this.assistant && !await this.client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；请重启到当前版本，角色请求不会降级为普通任务。');
-      const task = await this.client.request<TaskMeta>("/v1/tasks", "POST", { objective: message, workspace: this.workspace ?? (this.assistant ? process.cwd() : undefined), confirmed,
-        ...(this.assistant ? { assistant: this.assistant } : {}), ...(confirmed ? {} : { mode: "chat" }) });
+      if (this.collaborators && !await this.client.healthy('assistant-collaboration')) throw new Error('请重启到支持助手协作的后台版本。');
+      const task = await this.client.request<TaskMeta>("/v1/tasks", "POST", { objective: message, workspace: this.workspace ?? (this.assistant || this.collaborators ? process.cwd() : undefined), confirmed,
+        ...(this.assistant ? { assistant: this.assistant } : {}), ...(this.collaborators ? { collaborators: this.collaborators } : {}), ...(confirmed ? {} : { mode: "chat" }) });
       this.select(task.id);
       if (task.assistant) this.info(assistantText(task));
       this.info(confirmed ? `任务：${task.id}\n输出目录：${task.workspace}\n沿用已有授权与配置预算直接执行。费用上限 $${task.maxEstimatedCostUsd ?? 1}，配置时限 ${(task.deadlineAt - task.createdAt) / 60_000} 分钟。`
@@ -280,6 +313,16 @@ export class ChatSession {
       }
     }
     const goal = status.goal;
+    if (status.status === 'waiting_assistant') for (const work of status.assistantWork) {
+      if (work.stop || work.result || work.origin.revision !== goal?.revision || work.origin.epoch !== goal?.epoch) continue;
+      for (const question of work.questions) {
+        const key = `assistant-question:${work.id}:${question.id}`;
+        if (question.answer || this.printed.has(key)) continue;
+        this.printed.add(key);
+        this.shownAssistantWork.set(work.id, work.controlVersion);
+        this.info(`${work.assistant.name} · ${work.id}\n${question.text}${question.detail ? '\n' + question.detail : ''}${question.options?.length ? '\n' + question.options.join(' / ') : ''}\n/reply-assistant ${work.id} ${question.id} 答复`);
+      }
+    }
     if (status.status === "running") for (const child of status.delegations ?? []) {
       if (child.status !== "waiting_input" || !child.question) continue;
       const key = `child-question:${child.conversationId}:${child.question.id}`;
@@ -331,9 +374,9 @@ export class ChatSession {
 }
 
 export async function runChat(client: HarnessClient, options: {
-  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef;
+  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef; collaborators?: AssistantRef[];
 } = {}): Promise<void> {
-  if (options.taskId && options.assistant) throw new Error('接回任务保留原助手；仅新会话可使用 --assistant。');
+  if (options.taskId && (options.assistant || options.collaborators)) throw new Error('仅新会话可以选择助手与同事。');
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const terminal = Boolean((input as NodeJS.ReadStream).isTTY && (output as NodeJS.WriteStream).isTTY);
@@ -355,7 +398,7 @@ export async function runChat(client: HarnessClient, options: {
   const session = new ChatSession(client, render, options.workspace, terminal ? () => new Promise<string>((resolve, reject) => {
     hidden = { resolve, reject };
     output.write('受保护凭据输入（无回显，按 Enter 保存，Ctrl+C 取消）> ');
-  }) : undefined, options.assistant);
+  }) : undefined, options.assistant, options.collaborators);
   output.write("Kada · 终端聊天\n直接聊天，需要实际交付时再确认任务说明与预算。/help 查看命令，/quit 退出。\n\n");
   let finish: () => void;
   const end = new Promise<void>(resolve => { finish = resolve; });

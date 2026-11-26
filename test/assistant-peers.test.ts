@@ -10,6 +10,7 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 import { Assistants } from '../src/assistants.js';
 import { AssistantPeers, assistantWorkView } from '../src/assistant-peer-state.js';
 import { assistantPeersExtension, stopAssistantWork, type AssistantPeerControl } from '../src/assistant-peers.js';
+import { answerAssistantWork, assistantInputDeliveryId, guideAssistantWork } from '../src/assistant-peer-inputs.js';
 import { GoalDoc, goalExtension } from '../src/goal.js';
 import { Workspace } from '../src/workspace.js';
 import { localEnvironment, localExecution } from '../src/execution.js';
@@ -583,4 +584,257 @@ test('recipient prompts exclude source-private memory and preparation sections e
   const work = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!;
   await f.harness.waitForTask(work.taskId, ctx); await f.root.waitForIdle(ctx); assert.equal(peerCalls, 1);
   assert.equal((await f.harness.snapshot(AssistantPeers, ctx))!.work[work.id]!.result?.status, 'done');
+});
+
+test('a peer question stays on its original work across another queued job and reopen, and one owner answer returns its exact result', async t => {
+  let roleId = '', answers = 0;
+  const f = await fixture(t, context => {
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) {
+      if (typeof last === 'string' && last.startsWith('ASSISTANT_ANSWER ')) { answers++; assert(last.includes('BLUE_814')); return fauxAssistantMessage('FIRST_ANSWER_BLUE_814'); }
+      if (last === 'SECOND_WITHOUT_QUESTION') return fauxAssistantMessage('SECOND_INDEPENDENT_629');
+      const asking = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult' && message.toolName === 'assistant_ask').at(-1);
+      if (asking?.isError) throw new Error(JSON.stringify(asking.content));
+      return call('assistant_ask', { question: 'Which original colour?', options: ['BLUE_814', 'GREEN_392'] });
+    }
+    const latest = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (latest.role === 'user' && ['FIRST_QUESTION', 'SECOND_WITHOUT_QUESTION'].includes(String(last))) return call('assistant_assign', {
+      assistant: { id: roleId, revision: 1 }, instructions: String(last),
+    });
+    return fauxAssistantMessage('Original question and receipts retained.');
+  });
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Question worker', instructions: 'Keep each original work.', tools: ['assistant_ask'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'FIRST_QUESTION' }, ctx)).wait(ctx);
+  const waiting = await until(() => f.harness.snapshot(AssistantPeers, ctx), state => Object.values(state?.work ?? {}).some(work => Object.keys(work.questions ?? {}).length === 1)); assert(waiting);
+  const first = Object.values(waiting.work)[0]!, question = Object.values(first.questions!)[0]!;
+  assert.equal(first.result, undefined);
+  await (await f.root.submit({ type: 'input', content: 'SECOND_WITHOUT_QUESTION' }, ctx)).wait(ctx);
+  const second = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work).at(-1)!;
+  await f.harness.waitForTask(second.taskId, ctx); await f.root.waitForIdle(ctx); assert.equal(first.target, second.target);
+  assert.equal((await f.harness.snapshot(AssistantPeers, ctx))!.work[first.id]!.result, undefined);
+  await f.reopen();
+  // Owner receipts and native work submissions have separate request namespaces.
+  const request = { id: first.id, questionId: question.id, requestId: first.messageRequestId, text: 'BLUE_814' };
+  await answerAssistantWork(f.harness, request, f.withControl, ctx); await answerAssistantWork(f.harness, request, f.withControl, ctx);
+  const firstDone = await f.harness.waitForTask(first.taskId, ctx);
+  assert.equal(firstDone.state.outcome.status, 'completed', JSON.stringify({ firstDone, reports: f.reports })); await f.root.waitForIdle(ctx);
+  assert.equal(answers, 1); await assert.rejects(answerAssistantWork(f.harness, { ...request, text: 'GREEN_392' }, f.withControl, ctx), { status: 409 });
+  const state = (await f.harness.snapshot(AssistantPeers, ctx))!, done = state.work[first.id]!;
+  assert(done.result?.status === 'done'); assert.equal(done.inputRequests.length, 2); assert.equal(state.work[second.id]!.inputRequests.length, 1);
+  const peer = await f.harness.conversation(done.target, ctx); assert(peer);
+  const answer = (await peer.context(ctx, { at: done.result.answer })).messages.filter(message => message.role === 'assistant').at(-1);
+  assert(JSON.stringify(answer).includes('FIRST_ANSWER_BLUE_814'));
+  const users = (await f.root.context(ctx)).messages.filter(message => message.role === 'user');
+  assert.equal(users.filter(message => String(message.content).startsWith('ASSISTANT_QUESTION ')).length, 1);
+  assert.equal(users.filter(message => String(message.content).startsWith('ASSISTANT_REPORT ')).length, 2);
+});
+
+test('source guidance reaches the original live work once at a native boundary and does not steer its queued sibling', async t => {
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(); let roleId = '', guided = 0;
+  const hold = defineTool({ name: 'hold', description: 'Hold original work before guidance.', parameters: Type.Object({}), replay: 'safe', execute: async () => {
+    entered.resolve(); await release.promise; return { output: [] };
+  } }); t.after(() => release.resolve());
+  const f = await fixture(t, context => {
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) {
+      if (typeof last === 'string' && last.startsWith('ASSISTANT_GUIDANCE ')) { guided++; assert(last.includes('UPDATED_RULE_817')); return fauxAssistantMessage('ORIGINAL_GUIDED_RESULT_817'); }
+      if (last === 'KEEP_SIBLING') return fauxAssistantMessage('SIBLING_ORIGINAL_RESULT_629');
+      if (context.messages.some(message => message.role === 'toolResult' && message.toolName === 'hold')) return fauxAssistantMessage('Original first answer before guidance.');
+      return call('hold', {});
+    }
+    const latest = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (latest.role === 'user' && ['FIRST_GUIDANCE', 'KEEP_SIBLING'].includes(String(last))) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: String(last) });
+    return fauxAssistantMessage('Original state retained.');
+  }, [defineExtension({ name: 'peer_guidance_hold', tools: [hold] })]);
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Guidance worker', instructions: 'Keep original guidance.', tools: ['hold'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'FIRST_GUIDANCE' }, ctx)).wait(ctx); await entered.promise;
+  const first = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!;
+  const request = { id: first.id, requestId: 'owner-original-guidance', text: 'UPDATED_RULE_817' };
+  const receipt = await guideAssistantWork(f.harness, request, f.withControl, ctx);
+  assert.deepEqual(await guideAssistantWork(f.harness, request, f.withControl, ctx), receipt);
+  await (await f.root.submit({ type: 'input', content: 'KEEP_SIBLING' }, ctx)).wait(ctx);
+  await until(() => f.harness.getTask(receipt.taskId, ctx), task => task?.state.status === 'sleeping');
+  assert.equal(await f.harness.commit(tx => tx.submissionByRequest(first.target, assistantInputDeliveryId(request.requestId)), ctx), undefined);
+  release.resolve();
+  const state = (await f.harness.snapshot(AssistantPeers, ctx))!;
+  for (const work of Object.values(state.work)) assert.equal((await f.harness.waitForTask(work.taskId, ctx)).state.outcome.status, 'completed');
+  await f.root.waitForIdle(ctx); assert.equal(guided, 1);
+  const done = (await f.harness.snapshot(AssistantPeers, ctx))!.work[first.id]!; assert(done.result?.status === 'done');
+  const peer = await f.harness.conversation(first.target, ctx); assert(peer);
+  assert(JSON.stringify((await peer.context(ctx, { at: done.result.answer })).messages.filter(message => message.role === 'assistant').at(-1)).includes('ORIGINAL_GUIDED_RESULT_817'));
+});
+
+test('a source answers its peer original question through its Pi tool and cannot submit while the question remains unanswered', async t => {
+  let roleId = '', earlyRejected = false;
+  const f = await fixture(t, context => {
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult');
+    const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) return typeof last === 'string' && last.startsWith('ASSISTANT_ANSWER ') ? fauxAssistantMessage('ANSWER_TOOL_RESULT_814') :
+      call('assistant_ask', { question: 'Which format?', options: ['Text', 'JSON'] });
+    if (typeof last === 'string' && last.startsWith('ASSISTANT_QUESTION ')) {
+      const question = JSON.parse(last.slice('ASSISTANT_QUESTION '.length));
+      const round = context.messages.slice(context.messages.findLastIndex(message => message.role === 'user'));
+      const submitted = round.find((message): message is ToolResultMessage => message.role === 'toolResult' && message.toolName === 'task_submit');
+      if (!submitted) return call('task_submit', { summary: 'Too early.', artifacts: [] });
+      assert.equal(submitted.isError, true); earlyRejected = true;
+      if (!round.some(message => message.role === 'toolResult' && message.toolName === 'assistant_answer')) return call('assistant_answer', { id: question.id, questionId: question.questionId, text: 'JSON' });
+      return fauxAssistantMessage('Answered the original peer question.');
+    }
+    if (typeof last === 'string' && last.startsWith('ASSISTANT_REPORT ')) return call('task_submit', { summary: 'Original answer and result received.', artifacts: [] });
+    if (!results.some(result => result.toolName === 'assistant_assign')) return call('assistant_assign', { assistant: { id: roleId, revision: 1 }, instructions: 'Ask about format.' });
+    return fauxAssistantMessage('Original answer pending.');
+  });
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Source answers', instructions: 'Ask only for original work.', tools: ['assistant_ask'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'Use JSON when asked by your peer.' }, ctx)).wait(ctx);
+  await until(() => f.harness.snapshot(GoalDoc, ctx), goal => goal?.phase === 'submitted'); assert.equal(earlyRejected, true);
+  const state = (await f.harness.snapshot(AssistantPeers, ctx))!, work = Object.values(state.work)[0]!;
+  assert.equal(Object.keys(work.questions!).length, 1); assert.equal(Object.keys(work.inputs!).length, 1);
+  assert.equal(Object.values(work.questions!)[0]!.answer!.text, 'JSON');
+});
+
+test('a nested peer question can be escalated and answered through the exact original parent work', async t => {
+  let parentId = '', childId = '', answered = 0;
+  const f = await fixture(t, context => {
+    const system = JSON.stringify(context.messages.filter(message => message.role === 'system'));
+    const latest = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult');
+    const round = context.messages.slice(context.messages.findLastIndex(message => message.role === 'user'));
+    if (system.includes('NESTED_QUESTION_CHILD_817')) {
+      if (typeof latest === 'string' && latest.startsWith('ASSISTANT_ANSWER ')) { answered++; assert(latest.includes('ORIGINAL_CHOICE_619')); return fauxAssistantMessage('CHILD_AFTER_ORIGINAL_CHOICE_619'); }
+      return call('assistant_ask', { question: 'Choose the original region.', options: ['ORIGINAL_CHOICE_619', 'OTHER_CHOICE_392'] });
+    }
+    if (system.includes('NESTED_QUESTION_PARENT_529')) {
+      if (typeof latest === 'string' && latest.startsWith('ASSISTANT_QUESTION ')) return call('assistant_ask', { question: 'The nested worker needs the original region.', options: ['ORIGINAL_CHOICE_619', 'OTHER_CHOICE_392'] });
+      if (typeof latest === 'string' && latest.startsWith('ASSISTANT_ANSWER ')) {
+        const notice = context.messages.find(message => message.role === 'user' && String(message.content).startsWith('ASSISTANT_QUESTION ')); assert(notice);
+        const original = JSON.parse(String(notice.content).slice('ASSISTANT_QUESTION '.length));
+        if (!round.some(message => message.role === 'toolResult' && message.toolName === 'assistant_answer')) return call('assistant_answer', { id: original.id, questionId: original.questionId, text: 'ORIGINAL_CHOICE_619' });
+        return fauxAssistantMessage('Nested answer sent to original child.');
+      }
+      if (typeof latest === 'string' && latest.startsWith('ASSISTANT_REPORT ')) return fauxAssistantMessage('PARENT_FINAL_FROM_CHILD_714');
+      if (!results.some(result => result.toolName === 'assistant_assign')) return call('assistant_assign', { assistant: { id: childId, revision: 1 }, instructions: 'Ask for the region.' });
+      return fauxAssistantMessage('Original nested work pending.');
+    }
+    if (typeof latest === 'string' && latest.startsWith('ASSISTANT_QUESTION ')) {
+      const original = JSON.parse(latest.slice('ASSISTANT_QUESTION '.length));
+      if (!round.some(message => message.role === 'toolResult' && message.toolName === 'assistant_answer')) return call('assistant_answer', { id: original.id, questionId: original.questionId, text: 'ORIGINAL_CHOICE_619' });
+      return fauxAssistantMessage('Original parent answered.');
+    }
+    if (!results.some(result => result.toolName === 'assistant_assign')) return call('assistant_assign', { assistant: { id: parentId, revision: 1 }, instructions: 'Coordinate the original nested question.' });
+    return fauxAssistantMessage('Original root retained.');
+  });
+  parentId = (await f.roles.create({ workspace: f.workspace.root, name: 'Escalating parent', instructions: 'NESTED_QUESTION_PARENT_529', tools: ['assistant_assign', 'assistant_ask', 'assistant_answer'] })).id;
+  childId = (await f.roles.create({ workspace: f.workspace.root, name: 'Asking child', instructions: 'NESTED_QUESTION_CHILD_817', tools: ['assistant_ask'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'Coordinate original region choice.' }, ctx)).wait(ctx);
+  const done = await until(() => f.harness.snapshot(AssistantPeers, ctx), state => !!Object.values(state?.work ?? {}).find(work => work.assistant.id === parentId)?.result);
+  const parent = Object.values(done!.work).find(work => work.assistant.id === parentId)!;
+  assert.equal((await f.harness.waitForTask(parent.taskId, ctx)).state.outcome.status, 'completed'); await f.root.waitForIdle(ctx);
+  assert.equal(answered, 1); assert.equal(parent.result?.status, 'done'); assert.equal(Object.keys(done!.work).length, 2);
+  const peer = await f.harness.conversation(parent.target, ctx); assert(peer); assert(parent.result?.status === 'done');
+  assert(JSON.stringify((await peer.context(ctx, { at: parent.result.answer })).messages.filter(message => message.role === 'assistant').at(-1)).includes('PARENT_FINAL_FROM_CHILD_714'));
+});
+
+test('guidance waits for the original question answer and late or conflicting inputs never restart stopped or settled work', async t => {
+  let roleId = '', guided = 0, answered = 0;
+  const asking = Promise.withResolvers<void>(), allowQuestion = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  t.after(() => { allowQuestion.resolve(); release.resolve(); });
+  const hold = defineTool({ name: 'hold', description: 'Hold the question or answer turn.', parameters: Type.Object({ turn: Type.String() }), replay: 'safe',
+    execute: async ({ turn }) => {
+      if (turn === 'question') { asking.resolve(); await allowQuestion.promise; }
+      else { entered.resolve(); await release.promise; }
+      return { output: [] };
+    },
+  });
+  const f = await fixture(t, context => {
+    if (!hasTool(context, 'task_submit')) {
+      const last = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+      if (typeof last === 'string' && last.startsWith('ASSISTANT_GUIDANCE ')) { guided++; assert(last.includes('GUIDANCE_AFTER_ANSWER_629')); return fauxAssistantMessage('ANSWER_THEN_GUIDANCE_RESULT_817'); }
+      if (typeof last === 'string' && last.startsWith('ASSISTANT_ANSWER ')) {
+        const round = context.messages.slice(context.messages.findLastIndex(message => message.role === 'user'));
+        if (!round.some(message => message.role === 'toolResult' && message.toolName === 'hold')) { answered++; return call('hold', { turn: 'answer' }); }
+        return fauxAssistantMessage('Original answer processed.');
+      }
+      if (!context.messages.some(message => message.role === 'toolResult' && message.toolName === 'hold')) return call('hold', { turn: 'question' });
+      return call('assistant_ask', { question: 'Which original choice?', options: ['Yes', 'No'] });
+    }
+    if (!context.messages.some(message => message.role === 'toolResult' && message.toolName === 'assistant_assign')) return call('assistant_assign', {
+      assistant: { id: roleId, revision: 1 }, instructions: 'Ask one original question.',
+    });
+    return fauxAssistantMessage('Original work retained.');
+  }, [defineExtension({ name: 'peer_answer_guidance', tools: [hold] })]);
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Answer before guidance', instructions: 'Keep original input order.', tools: ['assistant_ask', 'hold'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'Coordinate original question.' }, ctx)).wait(ctx);
+  await asking.promise;
+  const work = Object.values((await f.harness.snapshot(AssistantPeers, ctx))!.work)[0]!;
+  const guidance = { id: work.id, requestId: 'original-guidance', text: 'GUIDANCE_AFTER_ANSWER_629' };
+  const receipt = await guideAssistantWork(f.harness, guidance, f.withControl, ctx);
+  const observed = await until(async () => ({
+    task: await f.harness.getTask(receipt.taskId, ctx),
+    delivery: await f.harness.commit(tx => tx.submissionByRequest(work.target, assistantInputDeliveryId(guidance.requestId)), ctx),
+  }), state => state.task?.state.status === 'sleeping' || !!state.delivery);
+  assert.equal(observed.delivery, undefined, 'guidance must wait until the active turn can no longer ask a question');
+  allowQuestion.resolve();
+  const waiting = await until(() => f.harness.snapshot(AssistantPeers, ctx), state => !!Object.keys(state?.work[work.id]?.questions ?? {}).length);
+  const question = Object.values(waiting!.work[work.id]!.questions!)[0]!;
+  await assert.rejects(guideAssistantWork(f.harness, { ...guidance, text: 'Conflicting guidance.' }, f.withControl, ctx), { status: 409 });
+  const answer = { id: work.id, questionId: question.id, requestId: 'original-answer', text: 'Yes' };
+  await assert.rejects(answerAssistantWork(f.harness, { ...answer, questionId: '999999' }, f.withControl, ctx), { status: 409 });
+  await answerAssistantWork(f.harness, answer, f.withControl, ctx); await entered.promise;
+  assert.equal(await f.harness.commit(tx => tx.submissionByRequest(work.target, assistantInputDeliveryId(guidance.requestId)), ctx), undefined);
+  release.resolve(); await f.harness.waitForTask(work.taskId, ctx); await f.root.waitForIdle(ctx);
+  assert.equal(answered, 1); assert.equal(guided, 1);
+  await assert.rejects(guideAssistantWork(f.harness, { ...guidance, requestId: 'late-guidance' }, f.withControl, ctx), { status: 409 });
+  await answerAssistantWork(f.harness, answer, f.withControl, ctx); assert.equal(answered, 1);
+});
+
+test('stopping an unanswered original work rejects a late owner answer and keeps its durable question', async t => {
+  let roleId = '';
+  const f = await fixture(t, context => {
+    if (!hasTool(context, 'task_submit')) return call('assistant_ask', { question: 'May I read the missing record?', options: ['Record A', 'Record B'] });
+    if (!context.messages.some(message => message.role === 'toolResult' && message.toolName === 'assistant_assign')) return call('assistant_assign', {
+      assistant: { id: roleId, revision: 1 }, instructions: 'Ask for the record.',
+    });
+    return fauxAssistantMessage('Original question retained.');
+  });
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Stopped question', instructions: 'Keep original question.', tools: ['assistant_ask'] })).id;
+  await (await f.root.submit({ type: 'input', content: 'Ask original question.' }, ctx)).wait(ctx);
+  const waiting = await until(() => f.harness.snapshot(AssistantPeers, ctx), state => Object.values(state?.work ?? {}).some(work => !!Object.keys(work.questions ?? {}).length));
+  const work = Object.values(waiting!.work)[0]!, question = Object.values(work.questions!)[0]!;
+  const stopped = await stopAssistantWork(f.harness, work.id, assistantWorkView(waiting, work.id)!.controlVersion, 'stop-original-question', f.withControl, ctx);
+  assert.equal(stopped.stop?.confirmed, true); await f.reopen();
+  await assert.rejects(answerAssistantWork(f.harness, { id: work.id, questionId: question.id, requestId: 'late-original-answer', text: 'Record A' }, f.withControl, ctx), { status: 409 });
+  assert.equal((await f.harness.snapshot(AssistantPeers, ctx))!.work[work.id]!.questions![question.id]!.answer, undefined);
+});
+
+test('guidance at an ordinary final-answer boundary never shares its result with another queued work', async t => {
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(); let roleId = '';
+  t.after(() => release.resolve());
+  const f = await fixture(t, async context => {
+    const latest = context.messages.filter(message => message.role === 'user').at(-1)?.content;
+    if (!hasTool(context, 'task_submit')) {
+      if (latest === 'ORIGINAL_FIRST') { entered.resolve(); await release.promise; return fauxAssistantMessage('FIRST_INITIAL_817'); }
+      return fauxAssistantMessage(typeof latest === 'string' && latest.startsWith('ASSISTANT_GUIDANCE ') ? 'FIRST_GUIDED_629' : 'SECOND_UNCHANGED_392');
+    }
+    const last = context.messages.filter(message => message.role === 'user' || message.role === 'toolResult').at(-1)!;
+    if (last.role === 'user' && ['ORIGINAL_FIRST', 'ORIGINAL_SECOND'].includes(String(latest))) return call('assistant_assign', {
+      assistant: { id: roleId, revision: 1 }, instructions: String(latest),
+    });
+    return fauxAssistantMessage('Original work state retained.');
+  });
+  roleId = (await f.roles.create({ workspace: f.workspace.root, name: 'Final boundary guidance', instructions: 'Keep jobs separate.', tools: [] })).id;
+  await (await f.root.submit({ type: 'input', content: 'ORIGINAL_FIRST' }, ctx)).wait(ctx); await entered.promise;
+  await (await f.root.submit({ type: 'input', content: 'ORIGINAL_SECOND' }, ctx)).wait(ctx);
+  const state = (await f.harness.snapshot(AssistantPeers, ctx))!, [first, second] = Object.values(state.work); assert(first && second);
+  await guideAssistantWork(f.harness, { id: first.id, requestId: 'original-final-guidance', text: 'Finish original evidence.' }, f.withControl, ctx);
+  await until(() => f.harness.commit(tx => tx.submissionByRequest(second.target, second.messageRequestId), ctx), input => input?.status === 'queued');
+  release.resolve();
+  for (const work of [first, second]) await f.harness.waitForTask(work.taskId, ctx); await f.root.waitForIdle(ctx);
+  const done = (await f.harness.snapshot(AssistantPeers, ctx))!;
+  const answers: string[] = [];
+  for (const work of [done.work[first.id]!, done.work[second.id]!]) {
+    assert(work.result?.status === 'done'); const peer = await f.harness.conversation(work.target, ctx); assert(peer);
+    answers.push(JSON.stringify((await peer.context(ctx, { at: work.result.answer })).messages.filter(message => message.role === 'assistant').at(-1)));
+  }
+  assert(answers[0]!.includes('FIRST_GUIDED_629')); assert(answers[1]!.includes('SECOND_UNCHANGED_392'));
 });
