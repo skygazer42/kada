@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "surface": "Local Chromium through agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "scrollWidth": 390,
+  "fixture": "Synthetic shared task and paired device",
+  "checks": {
+    "viewGrantDidNotShowConfirmation": true,
+    "ownerCliGrantedControls": true,
+    "briefDisplayedOriginalInputsVerificationAndBudget": true,
+    "confirmedAndStartedOriginalTask": true,
+    "pausedOriginalTask": true,
+    "reloadedAndContinuedOriginalTask": true,
+    "cancelPromptAndOriginalCancellation": true,
+    "viewRetainedAfterControlsRevoked": true,
+    "unrelatedComposerDraftUnchanged": true
+  },
+  "cancellationDialogAcceptedByFixture": true
+}

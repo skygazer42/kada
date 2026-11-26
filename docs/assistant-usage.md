@@ -343,11 +343,13 @@ npm run harness -- remote revoke owner phone
 
 配对返回一次性展示的设备令牌，在 `/remote` 页面输入。设备只访问自己的会话；daemon 管理令牌不会提供给手机。每个会话使用独立工作区和项目边界。附件每条消息最多 4 个、每个 5 MiB，输入和下载核对 SHA-256。已受理消息通过原请求身份查询，中断状态保留原请求。
 
-在本机把已有会话共享给某台配对设备后，手机的 **Shared threads** 可打开原会话、翻阅历史、看留言和下载已验收的交付。另行授予回复权限后，可以处理原会话中的结构化待答。撤回共享会撤回该设备的全部会话访问。 [共享会话与验收](superpowers/plans/2026-11-26-shared-thread-directory.md)
+在本机把已有会话共享给某台配对设备后，手机的 **Shared threads** 可打开原会话、翻阅历史、看留言和下载已验收的交付。另行授予回复权限后，可以处理原会话中的结构化待答。授予控制权限后，可以审阅和确认待执行方案，也可以暂停、继续或取消原任务。手机继续使用原任务的剩余预算和截止时间。 [共享会话](superpowers/plans/2026-11-26-shared-thread-directory.md) · [控制验收](superpowers/plans/2026-11-26-shared-thread-controls.md)
 
 ```powershell
 npm run harness -- remote share-thread 会话ID 账户ID 设备ID
 npm run harness -- remote share-thread-replies 会话ID 账户ID 设备ID
+npm run harness -- remote share-thread-controls 会话ID 账户ID 设备ID
+npm run harness -- remote unshare-thread-controls 会话ID 账户ID 设备ID
 npm run harness -- remote unshare-thread 会话ID 账户ID 设备ID
 ```
 

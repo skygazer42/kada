@@ -38,7 +38,7 @@ try {
     console.log(`\n个人助手入口（npm run harness -- …）：\n  memory list|edit ID 内容|forget ID|used 任务ID\n  tasks --filter pending|running|delivered\n  inbox [read 通知ID]\n  files 任务ID | files open 任务ID 编号\n  model list [provider] [--workspace 路径] | model check provider modelId\n  model select provider modelId [--workspace 路径] | model clear --workspace 路径\n  skills list|enable 名称|disable 名称 --workspace 路径\n  skills rollback 名称 版本 | skills capture 任务ID 目录\n  mcp list|add 配置.json|test ID|enable ID revision 工具…|disable ID\n  routines list|history ID [--task-status]|add 规则.json|update ID 规则.json\n  routines run ID [请求ID] | routines pause|resume|cancel ID\n  remote list|pair 账户ID 设备ID|revoke 账户ID 设备ID\n  computer status|takeover|return\n\nrun --skills 名称,名称@版本 可固定所选方法。空字符串表示不选方法。`);
     console.log("\nMCP 动作审批与工作项（npm run harness -- …）\n  mcp approval 连接ID revision 工具名…\n  work-items list [--workspace 路径] | work-items add 文件.json\n  work-items edit 工作项ID 文件.json | work-items runs 工作项ID\n  work-items run 工作项ID 修订 [请求ID] [--yes]\n在 chat 中用 /approvals 查看动作，再用 /allow 动作ID 或 /deny 动作ID 答复。");
     console.log("\n手机工作项权限（本机授权）\n  work-items share|unshare 工作项ID 账户ID 设备ID\n  work-items share-replies|unshare-replies 工作项ID 账户ID 设备ID\n  work-items share-controls|unshare-controls 工作项ID 账户ID 设备ID\n先分享查看，再分别授予答复或控制权限。撤回查看会同时撤回这些权限。");
-    console.log("\n手机共享会话（本机授权）\n  remote share-thread|unshare-thread 会话ID 账户ID 设备ID\n  remote share-thread-replies|unshare-thread-replies 会话ID 账户ID 设备ID");
+    console.log("\n手机共享会话（本机授权）\n  remote share-thread|unshare-thread 会话ID 账户ID 设备ID\n  remote share-thread-replies|unshare-thread-replies 会话ID 账户ID 设备ID\n  remote share-thread-controls|unshare-thread-controls 会话ID 账户ID 设备ID");
     console.log('work-items edit 的 JSON 可带 revision、title/objective、status（open/parked/done）、archived（布尔值）、priority（low/normal/high/urgent）、dueDate（YYYY-MM-DD）或 dueAt（带 UTC 偏移的 ISO 时刻）及 timeZone（IANA）。截止用 null 清空，切换种类须清空旧字段。保存、完成或设截止不启动/取消原运行，也不创建提醒。');
     console.log('work-items board-link --workspace 路径获取本机浏览器看板链接。board 查看 JSON，edit-board 编辑.json 使用原看板版本。');
     console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
@@ -222,7 +222,7 @@ try {
       if (action === 'list') result = {url:(config.remoteOrigin ?? `http://127.0.0.1:${config.port}`)+'/remote',devices:await request('/v1/remote/devices')};
       else if (action === 'pair') result = await request('/v1/remote/devices','POST',{accountId:rest[0],deviceId:rest[1]});
       else if (action === 'revoke') result = await request('/v1/remote/devices/'+segment(rest[0])+'/'+segment(rest[1]),'DELETE');
-      else if (['share-thread', 'unshare-thread', 'share-thread-replies', 'unshare-thread-replies'].includes(action!)) {
+      else if (action && /^(?:un)?share-thread(?:-replies|-controls)?$/.test(action)) {
         const [taskId, accountId, deviceId] = rest;
         if (rest.length !== 3) throw new Error('Use remote ' + action + ' <task-id> <account-id> <device-id>.');
         result = await request('/v1/tasks/' + segment(taskId) + '/' + action, 'POST', { accountId, deviceId });
@@ -233,7 +233,7 @@ try {
         const route = action === 'share-approval' ? '/share' : '/unshare';
         result = await request('/v1/tasks/'+segment(taskId)+'/approvals/'+segment(approvalId)+route,'POST',{accountId,deviceId,digest});
       }
-      else throw new Error('Use remote list, pair, revoke, share-approval, unshare-approval, share-thread, unshare-thread, share-thread-replies or unshare-thread-replies.');
+      else throw new Error('Use remote list, pair, revoke, share-approval, unshare-approval, or a share-thread or unshare-thread command.');
     } else if (command === 'computer') {
       if (!['status','takeover','return'].includes(action)) throw new Error('Use computer status, takeover or return.');
       result = await request('/v1/computer'+(action === 'status' ? '' : '/'+action),action === 'status' ? 'GET' : 'POST',action === 'status' ? undefined : {});

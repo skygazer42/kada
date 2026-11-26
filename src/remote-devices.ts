@@ -30,7 +30,7 @@ export class RemoteDevices {
     });
   }
 
-  async setSharedThread(accountId: string, deviceId: string, taskId: string, shared: boolean, replies: boolean) {
+  async setSharedThread(accountId: string, deviceId: string, taskId: string, shared: boolean, access: 'view' | 'replies' | 'controls') {
     this.validate(accountId, deviceId);
     return this.changes.run(async () => {
       const devices = await this.credentials();
@@ -38,11 +38,11 @@ export class RemoteDevices {
       if (!device) throw Object.assign(new Error('Device pairing not found.'), { status: 404 });
       const threads = device.sharedThreads ?? [];
       const grant = threads.find(item => item.taskId === taskId);
-      if (replies) {
-        if (shared && !grant) throw Object.assign(new Error('Share this thread for viewing before granting replies.'), { status: 409 });
-        if (!grant || Boolean(grant.replies) === shared) return { shared };
-        if (shared) grant.replies = true;
-        else delete grant.replies;
+      if (access !== 'view') {
+        if (shared && !grant) throw Object.assign(new Error('Share this thread for viewing before granting interaction access.'), { status: 409 });
+        if (!grant || Boolean(grant[access]) === shared) return { shared };
+        if (shared) grant[access] = true;
+        else delete grant[access];
       } else {
         if (Boolean(grant) === shared) return { shared };
         device.sharedThreads = shared ? [...threads, { taskId }] : threads.filter(item => item !== grant);

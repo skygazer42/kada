@@ -423,6 +423,57 @@ test('a late shared thread response cannot restore revoked history', async () =>
   assert.deepEqual(page.field('shared-thread-detail').children, []);
 });
 
+test('shared task controls use the displayed brief and unlock the refreshed original task', async () => {
+  const root = '/remote/api/shared-threads', id = 'original-control';
+  const requests: unknown[] = [];
+  const paused = Promise.withResolvers<void>(), pauseReceipt = Promise.withResolvers<Response>();
+  let state = 'awaiting_confirmation', version = 'running-version';
+  const brief = { revision: 7, outcome: 'Build the sample', deliverables: ['Report'], scope: ['Sample workspace'],
+    inputs: ['fixture.txt'], assumptions: ['Stored inputs'], criteria: [{ text: 'Verify report', method: 'check',
+      verification: { command: 'check-report', inputs: ['fixture.txt'], outputs: ['result.txt'] } }],
+    checks: ['Preserve fixture'], budget: { maxDurationMs: 90000, maxEstimatedCostUsd: 1, maxTotalTokens: 5000 }, usedTokens: 120 };
+  const page = await harness(undefined, undefined, undefined, undefined, undefined, async (url, _token, init) => {
+    const row = { id, title: 'Original control task', status: state, archived: false };
+    if (url === root) return Response.json([row]);
+    if (url.endsWith('/confirm')) {
+      requests.push(JSON.parse(String(init.body)));
+      state = 'running';
+      return Response.json({ confirmed: true });
+    }
+    if (url.endsWith('/control')) {
+      const input = JSON.parse(String(init.body));
+      requests.push(input);
+      if (input.action === 'pause') {
+        state = 'paused'; version = 'paused-version';
+        paused.resolve();
+        return pauseReceipt.promise;
+      }
+      state = 'running'; version = 'continued-version';
+      return Response.json({ updated: true });
+    }
+    return Response.json({ ...row, messages: [], notes: [], artifacts: [], question: null, canReply: false,
+      brief: state === 'awaiting_confirmation' ? brief : null, briefDigest: 'displayed-brief-digest',
+      controls: state === 'awaiting_confirmation' ? [] : state === 'paused' ? ['continue', 'cancel'] : ['pause', 'cancel'], controlVersion: version });
+  }).open();
+  await page.type('Unsent regular draft');
+  await page.field('shared-thread-list').children[0]!.children[0]!.trigger('click');
+  const detail = page.field('shared-thread-detail');
+  const find = (root: Element, label: string): Element | undefined => root.textContent === label ? root : root.children.map(child => find(child, label)).find(Boolean);
+  assert.match(visibleText(detail), /Build the sample.*check-report.*result\.txt.*90 seconds.*5000 tokens/);
+  await find(detail, 'Confirm this brief')!.trigger('click');
+  assert.deepEqual(requests[0], { revision: 7, digest: 'displayed-brief-digest' });
+  const stopping = find(detail, 'Pause')!.trigger('click');
+  await paused.promise;
+  await page.field('refresh-conversations').trigger('click');
+  assert.equal(find(detail, 'Continue')!.disabled, true);
+  pauseReceipt.resolve(Response.json({ updated: true }));
+  await stopping;
+  assert.equal(find(detail, 'Continue')!.disabled, false);
+  await find(detail, 'Continue')!.trigger('click');
+  assert.deepEqual(requests.slice(1), [{ action: 'pause', version: 'running-version' }, { action: 'continue', version: 'paused-version' }]);
+  assert.equal(page.field('prompt').value, 'Unsent regular draft');
+});
+
 function sharedRun(detail: Element): Element {
   const run = detail.children.find(node => node.tagName === 'ul')?.children[0];
   assert(run, 'The shared work item needs its original run list.');

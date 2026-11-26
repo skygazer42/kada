@@ -30,7 +30,7 @@ export interface RemoteDevice {
   sharedWorkItems?: string[];
   sharedWorkItemReplies?: string[];
   sharedWorkItemControls?: string[];
-  sharedThreads?: { taskId: string; replies?: true }[];
+  sharedThreads?: { taskId: string; replies?: true; controls?: true }[];
 }
 
 export interface RemoteOptions {
@@ -89,6 +89,22 @@ type Conversation = Scope & {
 };
 
 type TaskStatus = Awaited<ReturnType<LocalRuntime["status"]>>;
+
+function sharedThreadBrief(status: TaskStatus) {
+  const goal = status.goal, brief = goal?.brief;
+  if (status.status !== 'awaiting_confirmation' || status.thread?.archivedAt || !goal || !brief) return null;
+  const checks = [...goal.checks.map(({ check }) => check), ...brief.checks].map(check => redactCredentials(JSON.stringify(check)));
+  return {
+    revision: brief.revision, outcome: redactCredentials(brief.outcome),
+    deliverables: brief.deliverables.map(redactCredentials), inputs: brief.inputs.map(redactCredentials),
+    scope: brief.scope.map(redactCredentials), assumptions: brief.assumptions.map(redactCredentials),
+    criteria: brief.criteria.map(({ text, method, verification }) => ({ text: redactCredentials(text), method,
+      ...(verification ? { verification: { command: redactCredentials(verification.command), inputs: verification.inputs.map(redactCredentials),
+        outputs: verification.outputs.map(redactCredentials) } } : {}),
+    })),
+    checks: [...new Set(checks)], budget: brief.budget, usedTokens: status.budget.totalTokens, priceKnown: status.budget.priceKnown,
+  };
+}
 
 function piMessageRequest(conversation: Conversation, receipt: Receipt) {
   return conversation.receipts[0] === receipt ? "initial" : "user:" + receipt.requestId;
@@ -714,13 +730,14 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const { pairingId, tokenHash, ...scope } = await authenticate(request);
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
       const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(?:\/(answers|child-answers|control))?)?)?$/.exec(route);
-      const sharedThread = /^\/remote\/api\/shared-threads(?:\/([a-f0-9-]{36})(?:\/(answers|artifacts\/[0-9]+\/[a-f0-9]{64}))?)?$/.exec(route);
+      const sharedThread = /^\/remote\/api\/shared-threads(?:\/([a-f0-9-]{36})(?:\/(answers|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true } : {}) });
       } else if (options.sharedDevices && sharedThread) {
         const [, id, action] = sharedThread;
-        if (method !== (action === 'answers' ? 'POST' : 'GET')) throw new HttpError(405, 'This method is unavailable for shared threads.');
-        const input = action === 'answers' ? await json(request) : undefined;
+        const update = action === 'answers' || action === 'confirm' || action === 'control';
+        if (method !== (update ? 'POST' : 'GET')) throw new HttpError(405, 'This method is unavailable for shared threads.');
+        const input = update ? await json(request) : undefined;
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const grants = device.sharedThreads ?? [];
           if (!id) {
@@ -741,6 +758,24 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             throw error;
           });
           if (meta.remotePolicy) throw new HttpError(404, 'Shared thread not found.');
+          if (input && (action === 'confirm' || action === 'control')) {
+            if (!grant.controls) throw new HttpError(403, 'The host has not shared control access to this thread.');
+            if (action === 'confirm') {
+              const { revision, digest: shownDigest } = input;
+              if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1 ||
+                typeof shownDigest !== 'string' || !shaPattern.test(shownDigest) || Object.keys(input).some(key => !['revision', 'digest'].includes(key))) {
+                throw new HttpError(400, 'Provide the displayed brief revision and digest.');
+              }
+              try { await runtime.confirm(id, revision, shownDigest); }
+              catch { throw new HttpError(409, 'The brief changed or cannot be confirmed. Review the current brief.'); }
+              return { confirmed: true };
+            }
+            const { action: control, version } = input;
+            if ((control !== 'pause' && control !== 'continue' && control !== 'cancel') || typeof version !== 'string' || !shaPattern.test(version) ||
+              Object.keys(input).some(key => !['action', 'version'].includes(key))) throw new HttpError(400, 'Provide an action and the displayed control version.');
+            await runtime.controlRemoteTask(id, 'shared-thread', control, version);
+            return { updated: true };
+          }
           if (input) {
             if (!grant.replies) throw new HttpError(403, 'The host has not shared reply access to this thread.');
             const { questionId, requestId, answer } = input;
@@ -750,7 +785,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             await runtime.answerQuestion(id, questionId, digest(JSON.stringify(['shared-thread', pairingId, requestId])), answer);
             return { questionId, requestId };
           }
-          const status = await runtime.status(id), basePath = '/remote/api/shared-threads/' + id;
+          const status = await runtime.status(id, grant.controls ? 'shared-thread' : undefined), basePath = '/remote/api/shared-threads/' + id;
           if (action?.startsWith('artifacts/')) {
             await download(response, status, basePath, route, url.searchParams.get('file'));
             return true;
@@ -769,8 +804,11 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               sourceTaskId: post.sourceTaskId, sourceTitle: redactCredentials(post.sourceTitle),
             } : {}),
           }));
+          const brief = grant.controls ? sharedThreadBrief(status) : null;
           return { id, title: redactCredentials((meta.thread?.title ?? meta.objective).slice(0, 120)), status: status.status,
             archived: !!meta.thread?.archivedAt, ...history, notes, question, canReply: !!grant.replies && !!question && status.status === 'waiting_user' && !meta.thread?.archivedAt,
+            brief, briefDigest: brief ? status.briefDigest : null, controls: grant.controls ? status.remoteControls : [],
+            controlVersion: grant.controls ? status.remoteControlVersion : null,
             summary: status.status === 'completed' ? redactCredentials(status.goal?.candidate?.summary ?? '') : null,
             artifacts: verifiedArtifacts(status, basePath).map(({ snapshot: _snapshot, ...artifact }) => artifact),
           };
@@ -801,7 +839,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
                 const { action: control, version } = input;
                 if ((control !== "pause" && control !== "continue" && control !== "cancel") || typeof version !== "string" || !shaPattern.test(version) ||
                   Object.keys(input).some(key => !["action", "version"].includes(key))) throw new HttpError(400, "Provide an action and the displayed control version.");
-                await runtime.controlRemoteTask(runId, undefined, control, version);
+                await runtime.controlRemoteTask(runId, 'shared-work-item', control, version);
                 return { updated: true };
               }
               if (!canReply) throw new HttpError(403, "The host has not shared reply access to this work item.");
@@ -924,7 +962,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               await exclusive(path, async () => {
                 try {
                   const workspace = await privateWorkspace(row, false);
-                  await runtime.controlRemoteTask(row.taskId, workspace.root, control, version);
+                  await runtime.controlRemoteTask(row.taskId, { workspace: workspace.root }, control, version);
                 } catch (error) {
                   if (error instanceof TaskConflictError) throw new HttpError(409, error.message);
                   if (isMissing(error)) throw new HttpError(409, "The original task is unavailable.");

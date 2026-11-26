@@ -63,6 +63,7 @@ import { TurnWorkspaceSnapshot, WorkspaceSnapshots, WorkspaceSnapshotError, cont
 
 export type Control = "active" | "paused" | "cancelled" | "budget_limited";
 export type RemoteTaskControl = "pause" | "continue" | "cancel";
+type RemoteTaskScope = { workspace: string } | 'shared-work-item' | 'shared-thread';
 export class TaskConflictError extends Error { readonly status = 409; }
 function workItemAnswerVersion(meta: TaskMeta, goal?: GoalState): string | null {
   if (!meta.workItem || meta.remotePolicy || meta.control !== "active" || goal?.phase !== "waiting_user" || !goal.question) return null;
@@ -1826,7 +1827,7 @@ export class LocalRuntime {
       } while (cursor);
     });
   }
-  async status(id: string) {
+  async status(id: string, view?: 'shared-thread') {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       const active = await this.open(meta, false);
@@ -1860,7 +1861,7 @@ export class LocalRuntime {
         }
         return { activeTools: tools, interruptibleChildTools: interruptible };
       }, ctx) : { activeTools: [], interruptibleChildTools: [] };
-      const remotelyControlled = meta.remotePolicy === "workspace" || (!meta.remotePolicy && Boolean(meta.workItem));
+      const remotelyControlled = meta.remotePolicy === "workspace" || (!meta.remotePolicy && (Boolean(meta.workItem) || view === 'shared-thread'));
       const remoteControls = remotelyControlled ? await this.remoteTaskControls(active, meta, status, goal) : [];
       const approvals = meta.remotePolicy ? [] : await approvalViews(active.harness);
       const peerUsage = new Map(await Promise.all(Object.values(assistantState?.seats ?? {}).map(async seat =>
@@ -2200,10 +2201,12 @@ export class LocalRuntime {
   private remoteControlVersion(meta: TaskMeta, status: string, submissionId?: number, goal?: GoalState): string {
     return createHash("sha256").update(JSON.stringify([meta.id, meta.remoteControlRevision, status, submissionId, goal?.revision, goal?.epoch])).digest("hex");
   }
-  async controlRemoteTask(id: string, workspace: string | undefined, action: RemoteTaskControl, version: string): Promise<void> {
+  async controlRemoteTask(id: string, scope: RemoteTaskScope, action: RemoteTaskControl, version: string): Promise<void> {
     await this.changes.run(async () => {
       const meta = await this.metadata(id);
-      if (workspace === undefined ? meta.remotePolicy !== undefined || !meta.workItem : meta.remotePolicy !== "workspace" || meta.workspace !== workspace) {
+      const allowed = typeof scope === 'string' ? !meta.remotePolicy && (scope === 'shared-thread' || !!meta.workItem)
+        : meta.remotePolicy === 'workspace' && meta.workspace === scope.workspace;
+      if (!allowed) {
         throw new TaskConflictError("The original task is unavailable.");
       }
       const active = await this.open(meta, false);
@@ -2226,7 +2229,7 @@ export class LocalRuntime {
     });
   }
   private async pauseTask(meta: TaskMeta): Promise<void> {
-    if (meta.remotePolicy === "workspace" || meta.workItem) meta.remoteControlRevision = randomUUID();
+    meta.remoteControlRevision = randomUUID();
     meta.control = "paused";
     if (meta.collaborators) {
       const active = await this.open(meta, false);
@@ -2262,7 +2265,7 @@ export class LocalRuntime {
         catch(error) {meta.initializationError=previous;await this.closeTask(id);throw error;}
       }
       delete meta.remotePaused;
-      if (meta.remotePolicy === "workspace" || meta.workItem) meta.remoteControlRevision = randomUUID();
+      meta.remoteControlRevision = randomUUID();
       meta.control = "active"; meta.deadlineAt = Date.now() + (meta.maxDurationMs ?? this.config.maxDurationMs);
       await atomicJson(this.metaFile(id), meta);
       if (await this.goalState(active)) {

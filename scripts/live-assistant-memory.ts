@@ -42,19 +42,19 @@ const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536}
 const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? template : undefined;
 const chatChoosesThreadModel = process.env.KADA_LIVE_CASES === 'T09-thread-models-chat';
 const chatManagesThreads = process.env.KADA_LIVE_CASES === 'T10-chat-thread-management';
+const sharedControlFixture = process.env.KADA_LIVE_CASES === 'T13-shared-thread-controls';
 const threadFixture = chatManagesThreads || chatChoosesThreadModel || process.env.KADA_LIVE_CASES === 'T09-thread-models';
 const otherModel = proposalModel ?? (threadFixture ? template : undefined);
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management','T11-thread-posts'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = sharedControlFixture ? 8 : ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management','T11-thread-posts'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const threadDispatches: string[] = [];
 const options = (input:any, selected: string, context: TranscriptContext) => {
   assert(requests < maxRequests,'Live request limit reached.');requests++;
   const request = {...input,maxTokens:Math.min(input?.maxTokens ?? 1536,1536),signal:AbortSignal.any([deadline,...(input?.signal ? [input.signal] : [])])};
-  if (!threadFixture) return request;
-  threadDispatches.push(selected);
-  if (selected !== template.id) return request;
+  if (threadFixture) threadDispatches.push(selected);
+  if (!sharedControlFixture && (!threadFixture || selected !== template.id)) return request;
   const stage = getCurrentTools(context.messages).some(tool => tool.name === 'task_submit') ? 'task_submit' : 'task_prepare';
   const done = context.messages.some(message => message.role === 'toolResult' && message.toolName === stage && !message.isError);
   return { ...request, toolChoice: done ? 'none' : { type: 'function', function: { name: stage } } };
@@ -123,6 +123,49 @@ async function chat(workspace:string,prompt:string,timeoutMs=90_000) {
   return {status,answer:status.messages.map(conversationAnswer).filter(text=>text!==undefined).at(-1) ?? '',memory:await server.runtime.taskMemory(task.id)};
 }
 try {
+  if (sharedControlFixture) await check('T13-shared-thread-controls', async () => {
+    const checks: Record<string, unknown> = { childToolsSpecifiedByFixture: true };
+    evidence.sharedThreadControls = checks;
+    const task = await server.runtime.create('合成文本交付。先 task_prepare，outcome 为“编写原始报告”，deliverables 为 ["文本"]，输入、假设和问题为空，scope 为 ["合成样本"]，criteria 为 [{"text":"符合代号","method":"inspect"}]，省略 verification 和附加 checks。确认后 task_submit，summary 为 "SHARED_CONFIRM_EXECUTED_572"，artifacts 为空，给出一条通过的文本验收证据。', alpha, [], { prepare: true });
+    tasks.add(task.id);
+    checks.task = task.id;
+    const waiting = await until(() => server.runtime.status(task.id), state => ['awaiting_confirmation', 'failed', 'budget_limited'].includes(state.status), 120_000);
+    checks.preparation = waiting.status;
+    assert.equal(waiting.status, 'awaiting_confirmation');
+    const device = { accountId: 'control-fixture', deviceId: 'fixture-phone' };
+    const pairing = await client.request<{ token: string }>('/v1/remote/devices', 'POST', device);
+    const grant = (action: string) => client.request('/v1/tasks/' + task.id + '/' + action, 'POST', device);
+    await grant('share-thread');
+    const url = `http://127.0.0.1:${port}/remote/api/shared-threads/${task.id}`;
+    const scoped = (route = '', body?: unknown) => fetch(url + route, { method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: 'Bearer ' + pairing.token, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    assert.equal((await (await scoped()).json()).brief, null);
+    await grant('share-thread-controls');
+    const view = await (await scoped()).json();
+    const confirmation = { revision: view.brief.revision, digest: view.briefDigest };
+    assert.equal(view.id, task.id);
+    assert.equal(confirmation.revision, waiting.goal?.brief?.revision);
+    assert.equal(confirmation.digest, waiting.briefDigest);
+    assert.equal((await scoped('/confirm', confirmation)).status, 200);
+    const delivered = await until(() => server.runtime.status(task.id), state => ['completed','failed','needs_attention','budget_limited'].includes(state.status), 155_000);
+    checks.execution = delivered.status;
+    assert.equal(delivered.status, 'completed');
+    assert.match(delivered.goal?.candidate?.summary ?? '', /SHARED_CONFIRM_EXECUTED_572/);
+    assert.equal(delivered.goal?.confirmation?.digest, confirmation.digest);
+    const calls = requests;
+    await server.close(); server = await serve(config, serverOptions);
+    assert.equal((await scoped('/confirm', confirmation)).status, 200);
+    const reopened = await server.runtime.status(task.id);
+    assert.equal(reopened.submission?.id, delivered.submission?.id);
+    assert.equal(reopened.goal?.candidate?.id, delivered.goal?.candidate?.id);
+    assert.equal(requests, calls);
+    await grant('unshare-thread-controls');
+    assert.equal((await scoped('/confirm', confirmation)).status, 403);
+    assert.equal((await scoped()).status, 200);
+    Object.assign(checks, { briefBoundToOriginal: true, confirmationExecuted: true, replayAfterRestart: true, controlRevokedViewRetained: true });
+  });
   if (selectedCases.includes('T12-shared-threads')) await check('T12-shared-threads', async () => {
     const checks: Record<string, unknown> = {};
     evidence.sharedThreads = checks;

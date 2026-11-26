@@ -195,6 +195,7 @@ let sharedThreadSnapshot = "";
 let selectedSharedThread = "";
 let sharedThreadBefore = null;
 let sharedThreadAnswer;
+const sharedThreadActions = new Map();
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -450,6 +451,7 @@ function selectSharedThread(id) {
 function clearSharedThreads() {
   sharedThreadListVersion++;
   sharedThreadListSnapshot = "";
+  sharedThreadActions.clear();
   sharedThreadList.replaceChildren();
   sharedThreads.hidden = true;
   selectSharedThread("");
@@ -525,6 +527,7 @@ async function refreshSharedThread(device) {
   sharedThreadDetail.replaceChildren();
   const title = element("h3", view.title, sharedThreadDetail);
   const shown = () => device === identity && id === selectedSharedThread && before === sharedThreadBefore && title.parentNode === sharedThreadDetail;
+  presentSharedThreadControls(view, device, id, shown);
   if (view.summary) element("p", view.summary, sharedThreadDetail);
   for (const artifact of view.artifacts) {
     const item = element("div", "", sharedThreadDetail);
@@ -603,6 +606,63 @@ async function refreshSharedThread(device) {
   };
   if (view.before) action("Older messages", page, () => showPage(view.before));
   if (before) action("Newest messages", page, () => showPage(null));
+}
+
+function presentSharedThreadControls(view, device, id, shown) {
+  const brief = view.brief;
+  if (!brief && !view.controls?.length) return;
+  if (brief) {
+    element("h4", "Task brief · Revision " + brief.revision, sharedThreadDetail);
+    element("p", brief.outcome, sharedThreadDetail);
+    for (const [label, values] of [["Deliverables", brief.deliverables], ["Inputs", brief.inputs], ["Scope", brief.scope], ["Assumptions", brief.assumptions], ["Additional checks", brief.checks]]) {
+      if (!values?.length) continue;
+      element("h4", label, sharedThreadDetail);
+      const list = element("ul", "", sharedThreadDetail);
+      for (const value of values) element("li", value, list);
+    }
+    element("h4", "Acceptance criteria", sharedThreadDetail);
+    const criteria = element("ul", "", sharedThreadDetail);
+    for (const criterion of brief.criteria) {
+      const item = element("li", criterion.text + " · " + criterion.method, criteria);
+      if (criterion.verification) {
+        element("p", "Command " + criterion.verification.command, item);
+        element("p", "Inputs " + criterion.verification.inputs.join(", "), item);
+        element("p", "Outputs " + criterion.verification.outputs.join(", "), item);
+      }
+    }
+    const budget = brief.budget;
+    const limits = [budget.maxDurationMs / 1000 + " seconds", "$" + budget.maxEstimatedCostUsd];
+    if (budget.maxTotalTokens !== undefined) limits.push(budget.maxTotalTokens + " tokens");
+    element("p", "Budget · " + limits.join(" · "), sharedThreadDetail);
+    element("p", "Tokens used in preparation · " + brief.usedTokens, sharedThreadDetail);
+    if (brief.priceKnown === false) element("p", "Model pricing is unavailable. Time and token limits apply.", sharedThreadDetail);
+  }
+  const controls = element("div", "", sharedThreadDetail);
+  controls.className = "controls";
+  const key = device.pairingId + ":" + id;
+  const selected = () => device === identity && selectedSharedThread === id;
+  const addAction = (label, path, payload) => {
+    const button = action(label, controls, async () => {
+      if (!shown() || sharedThreadActions.has(key) || payload.action === "cancel" && !confirm("Cancel this task?")) return;
+      const operation = Symbol();
+      sharedThreadActions.set(key, operation);
+      for (const control of controls.children) control.disabled = true;
+      try { await post(sharedThreadPath(id) + path, payload); }
+      catch (error) { if (selected()) report(error); }
+      finally {
+        if (sharedThreadActions.get(key) === operation) sharedThreadActions.delete(key);
+        if (selected()) {
+          sharedThreadSnapshot = "";
+          await refreshSharedThreads();
+        }
+      }
+    });
+    button.disabled = sharedThreadActions.has(key);
+    return button;
+  };
+  if (brief) addAction("Confirm this brief", "/confirm", { revision: brief.revision, digest: view.briefDigest }).classList.add("primary");
+  const labels = { pause: "Pause", continue: "Continue", cancel: "Cancel task" };
+  for (const control of view.controls ?? []) addAction(labels[control], "/control", { action: control, version: view.controlVersion });
 }
 
 function workItemState(item) {
