@@ -3,13 +3,21 @@ import type { Api, Model, Models } from '@earendil-works/pi-ai';
 import type { ModelRef } from './config.js';
 import { memoryProject } from './memory-sources.js';
 import { modelCostKnown, validateModel } from './models.js';
-import { atomicJson, readJson, SerialQueue } from './util.js';
+import { atomicJson, readJson, redactCredentials, SerialQueue } from './util.js';
 
 export type ModelCheckError = 'unknown_model' | 'missing_credentials' | 'auth' | 'rate_limit' | 'timeout' | 'unreachable' | 'provider_error';
 type ProbeResult = { status: 'available' } | { status: 'unavailable'; code: ModelCheckError };
 export type ModelCheck = { checkedAt: string; code?: ModelCheckError; message?: string } & ProbeResult;
 export type ModelProbe = (model: Model<Api>, signal: AbortSignal) => Promise<ProbeResult>;
-type SavedSettings = { model?: ModelRef; projectModels?: Record<string, ModelRef>; checks: Record<string, ModelCheck> };
+export type ModelProposalDecision = 'apply' | 'decline';
+export type ModelProposal = { id: string; sourceTaskId: string; previous: ModelRef | null; model: ModelRef; reason: string;
+  state: 'pending' | 'applied' | 'declined'; createdAt: string; settledAt?: string };
+type StoredProposal = ModelProposal & { project: string; baseline: string };
+type SavedSettings = { model?: ModelRef; projectModels?: Record<string, ModelRef>; checks: Record<string, ModelCheck>; proposals?: StoredProposal[] };
+
+export class ModelProposalError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
 
 const messages: Record<ModelCheckError, string> = {
   unknown_model: 'Unknown model. Check the installed Pi model catalog.',
@@ -47,6 +55,21 @@ function probeModel(models: Models): ModelProbe {
 
 const modelKey = (ref: ModelRef) => JSON.stringify([ref.provider, ref.modelId]);
 
+function projectSelection(settings: SavedSettings, project: string, fallback?: ModelRef) {
+  return settings.projectModels?.[project] ?? settings.model ?? fallback ?? null;
+}
+
+function selectionBaseline(settings: SavedSettings, project: string, fallback?: ModelRef) {
+  const current = projectSelection(settings, project, fallback);
+  return JSON.stringify([Boolean(settings.projectModels?.[project]), current ? modelKey(current) : null]);
+}
+
+function proposalView({ project: _project, baseline: _baseline, ...view }: StoredProposal): ModelProposal { return view; }
+
+function findProposal(settings: SavedSettings, project: string, sourceTaskId: string, id: string): StoredProposal | undefined {
+  return settings.proposals?.find(item => item.project === project && item.sourceTaskId === sourceTaskId && item.id === id);
+}
+
 async function projectKey(workspace: string): Promise<string> {
   const project = await memoryProject(workspace);
   if (!project) throw new Error('The model settings workspace must be an existing directory.');
@@ -56,6 +79,7 @@ async function projectKey(workspace: string): Promise<string> {
 export class ProviderSettings {
   private readonly path: string;
   private readonly changes = new SerialQueue();
+  private readonly decisions = new SerialQueue();
   private readonly probe: ModelProbe;
 
   constructor(dataDir: string, private readonly models: Models, probe?: ModelProbe) {
@@ -81,6 +105,73 @@ export class ProviderSettings {
   assertSelectable(ref: ModelRef): ModelRef {
     const model = validateModel(this.models, ref);
     return { provider: model.provider, modelId: model.modelId };
+  }
+
+  async propose(workspace: string, sourceTaskId: string, id: string, ref: ModelRef, reason: string, fallback?: ModelRef): Promise<ModelProposal> {
+    if (!/^[1-9]\d{0,19}$/.test(id) || typeof ref?.provider !== 'string' || typeof ref.modelId !== 'string' ||
+      typeof reason !== 'string' || !reason.trim() || reason.trim().length > 500 || /[\u0000-\u0008\u000B-\u001F\u007F]/.test(reason)) {
+      throw new ModelProposalError(400, 'Provide an original proposal ID, catalog model and a reason of up to 500 characters.');
+    }
+    const project = await projectKey(workspace);
+    const text = redactCredentials(reason.trim());
+    return this.changes.run(async () => {
+      const settings = await this.read();
+      const previous = findProposal(settings, project, sourceTaskId, id);
+      if (previous) {
+        if (modelKey(previous.model) !== modelKey(ref) || previous.reason !== text) throw new ModelProposalError(409, 'The model proposal already has different content.');
+        return proposalView(previous);
+      }
+      const entry = this.models.getModel(ref.provider, ref.modelId);
+      if (!entry) throw new ModelProposalError(400, messages.unknown_model);
+      const model = { provider: entry.provider, modelId: entry.id };
+      const created: StoredProposal = { id, sourceTaskId, project, baseline: selectionBaseline(settings, project, fallback),
+        previous: projectSelection(settings, project, fallback), model, reason: text, state: 'pending', createdAt: new Date().toISOString() };
+      settings.proposals = [...(settings.proposals ?? []), created];
+      await atomicJson(this.path, settings);
+      return proposalView(created);
+    });
+  }
+
+  async proposals(workspace: string, sourceTaskId: string) {
+    const project = await projectKey(workspace);
+    return ((await this.read()).proposals ?? []).filter(item => item.project === project && item.sourceTaskId === sourceTaskId).map(proposalView);
+  }
+
+  async decideProposal(workspace: string, sourceTaskId: string, id: string, decision: ModelProposalDecision, fallback?: ModelRef) {
+    if (decision !== 'apply' && decision !== 'decline') throw new ModelProposalError(400, 'Choose apply or decline.');
+    const project = await projectKey(workspace);
+    const state = decision === 'apply' ? 'applied' : 'declined';
+    const authorized = (settings: SavedSettings) => {
+      const proposal = findProposal(settings, project, sourceTaskId, id);
+      if (!proposal) throw new ModelProposalError(404, 'Model proposal not found in this conversation.');
+      if (proposal.state === state) return proposal;
+      if (proposal.state !== 'pending') throw new ModelProposalError(409, 'The model proposal already has a different decision.');
+      if (decision === 'apply' && selectionBaseline(settings, project, fallback) !== proposal.baseline) {
+        throw new ModelProposalError(409, 'The project default model changed. Ask for a new proposal.');
+      }
+      return proposal;
+    };
+    return this.decisions.run(async () => {
+      const proposal = authorized(await this.read());
+      if (proposal.state === state) return proposalView(proposal);
+      if (decision === 'apply') {
+        const check = await this.check(proposal.model);
+        if (check.status !== 'available') throw new ModelProposalError(409, check.message ?? messages.provider_error);
+      }
+      return this.changes.run(async () => {
+        const settings = await this.read();
+        const original = authorized(settings);
+        if (decision === 'apply') {
+          const check = settings.checks[modelKey(original.model)];
+          if (check?.status !== 'available') throw new ModelProposalError(409, check?.message ?? messages.provider_error);
+          settings.projectModels = { ...settings.projectModels, [project]: original.model };
+        }
+        original.state = state;
+        original.settledAt = new Date().toISOString();
+        await atomicJson(this.path, settings);
+        return proposalView(original);
+      });
+    });
   }
 
   async select(ref: ModelRef, workspace?: string): Promise<ModelRef> {

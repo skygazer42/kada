@@ -27,7 +27,7 @@ import { pinSkills, runSkillScript, skillInstructions, skillReads, SkillStore, s
 import { LocalDiscovery, localContextInstructions, type DiscoveryOptions, type LocalContext } from "./discovery.js";
 import { conversationAnswer, conversationInstructions } from "./conversation.js";
 import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
-import { ProviderSettings } from "./provider-settings.js";
+import { ModelProposalError, ProviderSettings, type ModelProposalDecision } from "./provider-settings.js";
 import { McpTools, type McpPin } from "./mcp-tools.js";
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
@@ -49,6 +49,7 @@ import { credentialTools, credentialExecution } from './credential-tools.js';
 import { Assistants, AssistantError, assistantRef, type AssistantRef, type AssistantPin } from './assistants.js';
 import { assistantPolicy, assistantTools } from './assistant-policy.js';
 import { chatAssistantsExtension } from './chat-assistants.js';
+import { chatModelProposals } from './chat-model-proposals.js';
 import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssistantWork, readAssistantAnswer, retireAssistantWork,
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
@@ -86,6 +87,7 @@ export interface TaskMeta {
   chatReminders?: true | 'managed';
   chatWorkItems?: { project: string };
   chatAssistants?: { project: string };
+  modelProposals?: true;
   historyRecall?: true;
   projectTaskCatalog?: true;
   projectCatalog?: true;
@@ -335,6 +337,26 @@ export class LocalRuntime {
     return this.inbox.mark(notifications.filter(event => event.taskId === id).map(event => event.id),notifications);
   }
   async artifacts(id:string) { return artifactList(await this.status(id)); }
+  private async modelProposalScope(id: string) {
+    const meta = await this.metadata(id);
+    const project = !meta.remotePolicy && meta.modelProposals ? meta.chatAssistants?.project : undefined;
+    if (!project || await memoryProject(meta.workspace) !== project) throw new ModelProposalError(404, 'No project model proposals in this conversation.');
+    return meta.workspace;
+  }
+  private async proposeProjectModel(id: string, proposalId: string, ref: ModelRef, reason: string) {
+    return this.changes.run(async () => {
+      const workspace = await this.modelProposalScope(id);
+      const active = this.active.get(id);
+      if (!active || active.meta.control !== 'active' || active.meta.thread?.archivedAt || await this.goalState(active)) {
+        throw new ModelProposalError(409, 'A local ordinary conversation can propose a model.');
+      }
+      return this.providers.propose(workspace, id, proposalId, ref, reason, this.config.model);
+    });
+  }
+  async projectModelProposals(id: string) { return this.providers.proposals(await this.modelProposalScope(id), id); }
+  async decideProjectModel(id: string, proposalId: string, decision: ModelProposalDecision) {
+    return this.providers.decideProposal(await this.modelProposalScope(id), id, proposalId, decision, this.config.model);
+  }
   private async snapshotWorkspace(id: string) {
     const meta = await this.metadata(id);
     if (meta.remotePolicy) throw new WorkspaceSnapshotError(404, 'Workspace snapshots belong to local tasks.');
@@ -493,7 +515,7 @@ export class LocalRuntime {
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
-        ...(workItemProject ? { chatAssistants: { project: workItemProject } } : {}),
+        ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(!options.remote ? { historyRecall: true as const } : {}),
         ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
@@ -818,6 +840,7 @@ export class LocalRuntime {
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
         ...(!remote && meta.projectCatalog ? [projectCatalogExtension((section, limit, offset) => this.projectCatalog(meta.id, section, limit, offset))] : []),
+        ...(!remote && meta.modelProposals ? [chatModelProposals((id, ref, reason) => this.proposeProjectModel(meta.id, id, ref, reason))] : []),
         ...(!remote && meta.threadTools ? [threadTools((args, input) => this.startThread(meta.id, args, input))] : []),
         ...(memoryUse ? [memoryUse] : []),
         ...(imagePolicy ? [imagePolicy] : []),

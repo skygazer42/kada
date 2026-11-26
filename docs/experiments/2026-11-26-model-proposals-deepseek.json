@@ -1,0 +1,17 @@
+{
+  "at": "2026-11-26T18:52:53.740Z",
+  "case": "T05-model-proposals",
+  "runner": "scripts/live-assistant-memory.ts",
+  "originalModel": "siliconflow/deepseek-ai/DeepSeek-V3.2",
+  "approvedModel": "siliconflow/Qwen/Qwen2.5-7B-Instruct",
+  "requests": 5,
+  "taskTokens": 26305,
+  "estimatedCostUsd": null,
+  "passed": true,
+  "proposalSavedBeforeOwnerDecision": true,
+  "ownerAppliedWithProviderProbe": true,
+  "currentChatPinned": true,
+  "newChatUsedApprovedModel": true,
+  "otherProjectUnchanged": true,
+  "scope": "Synthetic local projects. The request count includes the provider probe. Task token totals measure the two chats."
+}

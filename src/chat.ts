@@ -4,6 +4,7 @@ import { setTimeout } from "node:timers/promises";
 import { Writable, type Readable } from "node:stream";
 import type { HarnessClient, TaskMeta, TaskStatus } from "./client.js";
 import type { LocalRuntime } from "./runtime.js";
+import type { ModelProposal } from './provider-settings.js';
 import type { MemoryFactView } from "./user-memory.js";
 import { errorText, SerialQueue } from "./util.js";
 import { assistantText, briefText, progressText, usageText, verificationText } from "./presentation.js";
@@ -18,6 +19,7 @@ function answerKey(message: Message, text: string): string { return `${message.t
 const HELP = `直接输入消息：普通问答直接回复，需要实际交付时再提出任务说明与预算。\n\n/new [消息]       新建对话，原任务继续在后台运行\n/confirm          确认刚展示的任务说明与预算\n/run 目标         已有明确授权，沿用配置预算直接执行\n/memory list      查看当前项目记忆与来源\n/memory edit ID 内容 纠正一条记忆\n/memory forget ID 遗忘一条记忆\n/memory used      查看当前会话使用的记忆版本\n/tasks            列出最近的对话与任务\n/attach 任务ID    接回已有对话或任务\n/status           查看状态、预算、核验范围和进度\n/pause            暂停当前对话或任务\n/resume           恢复；显式补充一份配置/已确认预算，不代替目标确认\n/cancel           取消当前对话或任务\n/help             显示帮助\n/quit             退出聊天，后台任务继续运行`;
 const ASSISTANT_WORK_HELP = '/assistant-work [工作ID] 查看同事工作或原结果\n/reply-assistant 工作ID 问题ID 答复\n/guide-assistant 工作ID 补充说明\n/stop-assistant 工作ID 停止已查看的工作';
 const THREAD_HELP = '/thread 标题 | 任务说明  从当前会话打开独立工作\n/title 标题  修改当前会话的标题\n/archive  归档当前会话\n/unarchive  将当前会话移回列表\n/tasks archived  查找已归档会话';
+const MODEL_PROPOSAL_HELP = '/model-proposals  查看当前会话的项目模型建议\n/apply-model 建议ID  检查连通性并应用\n/decline-model 建议ID  拒绝建议';
 
 /** Conversation selection and delivery are independent of terminal rendering. */
 export class ChatSession {
@@ -57,6 +59,23 @@ export class ChatSession {
       if (!match) throw new Error("未知命令，输入 /help 查看帮助。");
       const command = match[1], argument = match[2]?.trim();
       if (command === "/quit" || command === "/exit") return false;
+      if (command === '/model-proposals' || command === '/apply-model' || command === '/decline-model') {
+        if (!this.taskId) throw new Error('先用 /attach 选择会话。');
+        const path = `/v1/tasks/${this.taskId}/model-proposals`;
+        if (command === '/model-proposals') {
+          const proposals = await this.client.request<ModelProposal[]>(path);
+          this.info(proposals.length ? proposals.map(({ id, previous, model, reason, state }) => {
+            const before = previous ? `${previous.provider}/${previous.modelId}` : '未设置';
+            return `${id} · ${state} · ${before} → ${model.provider}/${model.modelId}\n${reason}` +
+              (state === 'pending' ? `\n/apply-model ${id} · /decline-model ${id}` : '');
+          }).join('\n\n') : '当前会话没有模型建议。');
+        } else {
+          if (!argument || !/^[1-9]\d{0,19}$/.test(argument)) throw new Error(`用法：${command} 建议ID`);
+          const proposal = await this.client.request<ModelProposal>(`${path}/${argument}`, 'POST', { decision: command === '/apply-model' ? 'apply' : 'decline' });
+          this.info(proposal.state === 'applied' ? `项目默认模型已更新为 ${proposal.model.provider}/${proposal.model.modelId}，供新任务使用。` : '已拒绝模型建议。');
+        }
+        return true;
+      }
       if (command === '/thread' || command === '/title' || command === '/archive' || command === '/unarchive') {
         const source = this.taskId;
         if (!source) throw new Error('先用 /attach 选择会话。');
@@ -165,7 +184,7 @@ export class ChatSession {
         await this.poll();
         return true;
       }
-      if (command === "/help") { this.info(HELP+'\n\n'+THREAD_HELP+'\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
+      if (command === "/help") { this.info(HELP+'\n\n'+THREAD_HELP+'\n'+MODEL_PROPOSAL_HELP+'\n/tasks pending|running|delivered  筛选待处理、执行或交付\n/inbox /read 通知ID  查看通知及标记已读\n/files /open 编号  查看和打开核验产物\n/approvals  查看动作参数\n/allow 动作ID /deny 动作ID  答复已展示的动作审批\n/choose 问题ID 编号  选择当前问题的一个选项\n/credential 问题ID  在交互终端无回显提供凭据，勿在命令中填值\n/decline-credential 问题ID  拒绝当前凭据请求\n/children  查看子会话 ID 和状态\n/stop-child 子会话ID  停止单个后台子任务\n/interrupt-child 子会话ID  中断该子任务当前工具\n/reply-child 子会话ID 问题ID 答复  回复原子会话\n'+ASSISTANT_WORK_HELP+'\n/remind ISO时间 内容  保存带时区的单次提醒\n模型、Skills、MCP、每周规则和设备管理：npm run harness -- help'); return true; }
       if (command === "/confirm") { await this.confirm(); return true; }
       if (['/approvals', '/allow', '/deny'].includes(command!)) {
         if (!this.taskId) throw new Error('先用 /attach 选择任务。');
@@ -334,6 +353,19 @@ export class ChatSession {
     const status = await this.client.request<TaskStatus>(`/v1/tasks/${id}`);
     if (this.taskId !== id) return;
     for (const message of status.goal ? [] : status.messages) {
+      if (message.role === 'toolResult' && message.toolName === 'propose_model' && !message.isError) {
+        const block = message.content.find(item => item.type === 'text');
+        if (block?.type !== 'text') continue;
+        let proposal: ModelProposal;
+        try { proposal = JSON.parse(block.text); } catch { continue; }
+        if (proposal?.sourceTaskId !== id || !/^[1-9]\d{0,19}$/.test(proposal.id)) continue;
+        const key = `model-proposal:${proposal.id}`;
+        if (!this.printed.has(key)) {
+          this.printed.add(key);
+          this.info(`项目模型建议 ${proposal.id} · /model-proposals`);
+        }
+        continue;
+      }
       if (message.role === 'toolResult' && message.toolName === 'start_thread' && !message.isError) {
         const block = message.content.find(item => item.type === 'text');
         if (block?.type !== 'text') continue;

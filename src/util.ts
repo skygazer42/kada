@@ -13,6 +13,18 @@ export async function readJson<T>(file: string): Promise<T> {
 }
 export function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
+const token = /\b(?:sk-[a-z0-9_-]{16,}|(?:gh[pousr]|github_pat|xox[baprs])[_-][a-z0-9_-]{12,}|AIza[a-z0-9_-]{16,})\b/i;
+const credential = /(?:api[ _-]?key|access[ _-]?key|secret|token|password|authorization|credential|密钥|密码)["'`]?\s*[=:：]|\bbearer\s+\S+|https?:\/\/[^\s/@]+:[^\s/@]+@/i;
+
+export function redactCredentials(text: string): string {
+  let privateKey = false;
+  return text.split(/\r?\n/).map(line => {
+    if (/-----BEGIN .*PRIVATE KEY-----/.test(line)) privateKey = true;
+    if (privateKey) { if (/-----END .*PRIVATE KEY-----/.test(line)) privateKey = false; return "[凭据内容已省略]"; }
+    return token.test(line) || credential.test(line) ? "[凭据内容已省略]" : line;
+  }).join("\n");
+}
+
 /** A shared executor for resources such as one desktop, including across tasks. */
 export class SerialQueue {
   private tail: Promise<unknown> = Promise.resolve();

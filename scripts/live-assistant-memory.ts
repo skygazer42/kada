@@ -38,8 +38,9 @@ if (!original) {
   assert(catalog.data.some(model=>model.id===modelId),'model_available_in_account');
 }
 const model = {...(original ?? template),id:modelId,name:modelId,maxTokens:1536};
+const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? template : undefined;
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = process.env.KADA_LIVE_CASES === 'A02-chat-assistants' ? 16 : process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const options = (input:any) => {
@@ -54,7 +55,7 @@ const models = createModels();
 let protectedMarker: string | undefined;
 let onModelContext: ((context: TranscriptContext) => void) | undefined;
 function protectedContext(context: TranscriptContext) { assert(!protectedMarker || !JSON.stringify(context).includes(protectedMarker),'protected_value_absent_from_model_context'); onModelContext?.(context); }
-models.setProvider(createProvider({id:'siliconflow',models:[model],baseUrl:model.baseUrl,
+models.setProvider(createProvider({id:'siliconflow',models:proposalModel && proposalModel.id !== model.id ? [model, proposalModel] : [model],baseUrl:model.baseUrl,
   auth:{apiKey:{name:'SiliconFlow live validation',resolve:async()=>({auth:{apiKey}})}},
   api:{stream:(selected,context,config)=>{protectedContext(context);return observe(native.stream(selected,context,options(config)));},streamSimple:(selected,context,config)=>{protectedContext(context);return observe(native.streamSimple(selected,context,options(config)));}}}));
 const directory = resolve('.harness/live-assistant-memory',randomUUID());
@@ -467,6 +468,35 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(calls.filter(message=>message.toolName==='work_item_update' && !message.isError).length,2);
     assert(!calls.some(message=>/reminder_(?:create|update)|task_prepare/.test(message.toolName)),'planning_no_execution_or_reminder');
     evidence.workItemPlanning={itemId:item.id,chatId:created.id,dateOnlySaved:true,timedDeadlineSaved:true,deadlineCleared:true,originalIdKept:true,restartNoModel:true,goalCreated:false,runs:0,requests};
+  });
+  if (proposalModel) await check('T05-model-proposals', async () => {
+    const checkpoints: Record<string, unknown> = {};
+    evidence.projectModelProposal = checkpoints;
+    const original = { provider: 'siliconflow', modelId };
+    const chosen = { provider: 'siliconflow', modelId: proposalModel.id };
+    assert.notEqual(original.modelId, chosen.modelId);
+    const events: string[] = [], terminal = new ChatSession(client, event => events.push(event.text), alpha);
+    await terminal.handle(`请用 propose_model 建议把本项目未来会话的默认模型设为 ${chosen.modelId}，provider 用 siliconflow。理由写为轻量项目试用。将决定留给我。`);
+    const sourceId = terminal.taskId!;
+    tasks.add(sourceId);
+    const status = await until(() => server.runtime.status(sourceId), state => state.messages.some(message =>
+      message.role === 'toolResult' && message.toolName === 'propose_model' && !message.isError), 100_000);
+    await terminal.poll();
+    assert(events.some(text => text.includes('/model-proposals')));
+    assert.equal(status.goal, undefined);
+    const [proposal] = await server.runtime.projectModelProposals(sourceId);
+    assert(proposal?.state === 'pending');
+    assert.deepEqual(proposal.model, chosen);
+    assert.deepEqual(await server.runtime.providers.selected(original, alpha), original);
+    checkpoints.proposalSaved = true;
+    await terminal.handle(`/apply-model ${proposal.id}`);
+    assert.deepEqual(await server.runtime.providers.selected(original, alpha), chosen);
+    assert.deepEqual(await server.runtime.providers.selected(original, beta), original);
+    assert.deepEqual((await server.runtime.status(sourceId)).model, original);
+    checkpoints.ownerApplied = true;
+    const future = await chat(alpha, '请只回复 READY。');
+    assert.deepEqual(future.status.model, chosen);
+    Object.assign(checkpoints, { currentChatPinned: true, newChatUsedApprovedModel: true, otherProjectUnchanged: true, requests });
   });
   if (selectedCases.includes('T04-workspace-snapshots')) await check('T04-workspace-snapshots', async () => {
     const filename = 'snapshot-demo.txt', file = join(alpha, filename);

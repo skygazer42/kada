@@ -6,7 +6,7 @@ import lockfile from "proper-lockfile";
 import { Type } from "@earendil-works/pi-ai";
 import { defineDoc, defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { GoalDoc, plain } from "./goal.js";
-import { atomicJson, readJson, SerialQueue } from "./util.js";
+import { atomicJson, readJson, redactCredentials as redact, SerialQueue } from "./util.js";
 import { allowedMemoryPath, claudeProject, memoryProject, memorySources, type MemoryDomain, type MemoryProvider } from "./memory-sources.js";
 import type { LocalInventory } from "./discovery.js";
 
@@ -72,19 +72,8 @@ const categories: Category[] = ["preferences", "work", "projects", "environment"
 const domains: MemoryDomain[] = ["general", "work", "life", "unknown"];
 const domainHeadings: Record<MemoryDomain, string> = { general: "通用", work: "工作", life: "个人生活", unknown: "待分类" };
 const headings: Record<Category, string> = { preferences: "协作与偏好", work: "工作背景", projects: "项目线索", environment: "工作环境", life: "个人生活", notes: "其他线索" };
-const token = /\b(?:sk-[a-z0-9_-]{16,}|(?:gh[pousr]|github_pat|xox[baprs])[_-][a-z0-9_-]{12,}|AIza[a-z0-9_-]{16,})\b/i;
-const credential = /(?:api[ _-]?key|access[ _-]?key|secret|token|password|authorization|credential|密钥|密码)["'`]?\s*[=:：]|\bbearer\s+\S+|https?:\/\/[^\s/@]+:[^\s/@]+@/i;
 const MAX_FACTS = 16000, MAX_SOURCES = 512, MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 
-/** A redacted snapshot is traceable but is not claimed to be the original bytes. */
-function redact(text: string): string {
-  let privateKey = false;
-  return text.split(/\r?\n/).map(line => {
-    if (/-----BEGIN .*PRIVATE KEY-----/.test(line)) privateKey = true;
-    if (privateKey) { if (/-----END .*PRIVATE KEY-----/.test(line)) privateKey = false; return "[凭据内容已省略]"; }
-    return token.test(line) || credential.test(line) ? "[凭据内容已省略]" : line;
-  }).join("\n");
-}
 function category(text: string): Category {
   if (/个人生活|家庭|家人|健康|饮食|旅行|爱好|兴趣|生活习惯|personal life|family|health|hobb(?:y|ies)/i.test(text)) return "life";
   if (/偏好|协作|风格|回复|回答|沟通|语言|preference|communication|respond|reply|style/i.test(text)) return "preferences";

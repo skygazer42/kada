@@ -285,6 +285,17 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (route === 'thread' && req.method === 'PATCH') return send(200, await runtime.editThread(taskId!, await body(req)));
         return send(405, { error: 'Method not allowed' });
       }
+      const modelProposal = /^\/v1\/tasks\/([a-f0-9-]{36})\/model-proposals(?:\/([1-9]\d{0,19}))?$/.exec(url.pathname);
+      if (modelProposal) {
+        const [, taskId, id] = modelProposal;
+        if (!id && req.method === 'GET') return send(200, await runtime.projectModelProposals(taskId!));
+        if (id && req.method === 'POST') {
+          const { decision } = await body(req);
+          if (decision !== 'apply' && decision !== 'decline') throw new Error('Choose apply or decline.');
+          return send(200, await runtime.decideProjectModel(taskId!, id, decision));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       const snapshotRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/snapshots(?:\/([a-f0-9-]{36})\/(preview|restore))?$/.exec(url.pathname);
       if (snapshotRoute) {
         const [, taskId, snapshotId, operation] = snapshotRoute;
