@@ -51,6 +51,32 @@ test("a public feed starts from its latest event and resumes oldest first after 
   assert.equal((await syncGithubRoutineEvents(options)).delivered, 0);
 });
 
+test("the GitHub feed uses the configured credential on its fixed origin", async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), "kada-github-auth-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const tokenEnv = "KADA_TEST_GITHUB_FEED_CREDENTIAL", previous = process.env[tokenEnv];
+  delete process.env[tokenEnv];
+  t.after(() => { if (previous === undefined) delete process.env[tokenEnv]; else process.env[tokenEnv] = previous; });
+  const calls: (string | null)[] = [];
+  const options = {
+    dataDir, routineId: "auth-feed", repository: "team/repo", tokenEnv,
+    fetch: (async (url, init) => {
+      assert.equal(new URL(String(url)).origin, "https://api.github.com");
+      assert.equal(init?.redirect, "error");
+      calls.push(new Headers(init?.headers).get("authorization"));
+      return page([issue("30", 3)]);
+    }) as typeof fetch,
+    deliver: async () => assert.fail("An unchanged baseline never delivers."),
+  };
+  await assert.rejects(syncGithubRoutineEvents(options), /KADA_TEST_GITHUB_FEED_CREDENTIAL/);
+  assert.deepEqual(calls, []);
+  process.env[tokenEnv] = "fixture-token";
+  assert.equal((await syncGithubRoutineEvents(options)).baseline, true);
+  process.env[tokenEnv] = "replacement-token";
+  assert.equal((await syncGithubRoutineEvents(options)).delivered, 0);
+  assert.deepEqual(calls, ["Bearer fixture-token", "Bearer replacement-token"]);
+});
+
 test("the watcher stops pagination when a page uses the last GitHub request", async t => {
   const dataDir = await mkdtemp(join(tmpdir(), "kada-github-limit-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -65,8 +91,12 @@ test("the watcher stops pagination when a page uses the last GitHub request", as
   };
   const urls: string[] = [];
   const controller = new AbortController();
-  const mock = t.mock.method(globalThis, "fetch", async (url: URL | string) => {
+  const tokenEnv = "KADA_TEST_GITHUB_WATCH_CREDENTIAL", previous = process.env[tokenEnv];
+  process.env[tokenEnv] = "watch-fixture-token";
+  t.after(() => { if (previous === undefined) delete process.env[tokenEnv]; else process.env[tokenEnv] = previous; });
+  const mock = t.mock.method(globalThis, "fetch", async (url: URL | string, init?: RequestInit) => {
     urls.push(String(url));
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer watch-fixture-token");
     if (urls.length > 1) {
       controller.abort();
       return page([issue("10", 1)]);
@@ -76,7 +106,7 @@ test("the watcher stops pagination when a page uses the last GitHub request", as
     return response;
   });
   const logged = t.mock.method(console, "error", () => controller.abort());
-  await watchGithubIssues(dataDir, ["triage"], routines, controller.signal);
+  await watchGithubIssues(dataDir, ["triage"], routines, controller.signal, tokenEnv);
   assert.equal(urls.length, 1);
   assert.match(String(logged.mock.calls[0]?.arguments[0]), /GitHub request limit/);
   mock.mock.restore();

@@ -547,7 +547,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       pushTimer.unref();
     }
     if (config.githubIssuePolling?.length) {
-      githubRun = watchGithubIssues(config.dataDir, config.githubIssuePolling, runtime.routines, githubAbort.signal)
+      githubRun = watchGithubIssues(config.dataDir, config.githubIssuePolling, runtime.routines, githubAbort.signal, config.githubIssueTokenEnv)
         .catch(error => console.error("GitHub issue watcher stopped. " + errorText(error)));
     }
   } catch (error) {

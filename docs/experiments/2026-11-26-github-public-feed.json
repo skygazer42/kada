@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "repository": "elie222/rakazo",
+  "verifiedOpenedIssue": 6904,
+  "deliveredLiveEvents": 1,
+  "duplicateIssueDeliveries": 0,
+  "producedLocalNotification": true,
+  "createdTasks": 0,
+  "baseline": "Earlier cursor selected from the same real GitHub feed",
+  "transport": "Normal anonymous Node fetch after the GitHub rate limit reset"
+}

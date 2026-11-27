@@ -30,3 +30,8 @@
 owner CLI 加入并读取合成规则，签名 HTTP 投递返回 202，原任务完成且保留 `team/repo` 的 Issue 42 和原目标。临时服务及数据已通过夹具关闭流程移除。模型协议回归验证原始正文、标题和 secret 不进入提示，原任务重启后追加消息仍能读取对应仓库和编号；公开 feed 的集成回归也验证同一投影。
 
 独立只读审查覆盖初版入口验签、大小、过滤、重放、恢复、secret 轮换和规则修订竞态，未发现可操作问题。之后补充的 Issue 元数据传递经主会话与相关/全量回归验证；独立复核未收到可读任务正文，上一轮结论不覆盖该补充。
+## GitHub 事件流可选认证
+
+显式设置 `githubIssueTokenEnv` 后，CLI 同步与后台轮询按原配置读取该环境变量，向固定 GitHub API 发送授权头。匿名请求继续按原事件游标和限流退避处理。已配置的空值或无效值在发请求前报错。 [DuskBot 的 GitHub Bearer 认证](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-tokens/vendors.ts#L73) · [GitHub REST 认证](https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api)
+
+真实验收从 Rakazo 公开事件中选取较早游标，再用 Kada 的正常 Node 请求同步。Issue #6904 只产生一次本机通知。认证头与凭据轮换使用合成环境变量回归。 [真实公开事件](../../experiments/2026-11-26-github-public-feed.json) · [同步回归](../../../test/github-routine-events.test.ts)

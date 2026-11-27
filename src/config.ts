@@ -35,6 +35,7 @@ export interface Config {
   remoteOrigin?: string;
   remotePush?: boolean;
   githubIssuePolling?: string[];
+  githubIssueTokenEnv?: string;
   githubWebhooks?: GithubWebhookConfig[];
 }
 
@@ -89,6 +90,10 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
       githubIssuePolling.some(id => typeof id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(id)))) {
     throw new Error("githubIssuePolling must be an array of routine IDs.");
   }
+  const githubIssueTokenEnv = raw.githubIssueTokenEnv;
+  if (githubIssueTokenEnv !== undefined && (typeof githubIssueTokenEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(githubIssueTokenEnv))) {
+    throw new Error("githubIssueTokenEnv must name an environment variable.");
+  }
   const githubWebhooks = raw.githubWebhooks;
   if (githubWebhooks !== undefined && (!Array.isArray(githubWebhooks) || githubWebhooks.length > 64 ||
     githubWebhooks.some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry) ||
@@ -121,6 +126,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     discovery: optionalBoolean(raw.discovery, "discovery", true),
     ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),
     ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
+    ...(githubIssueTokenEnv ? { githubIssueTokenEnv } : {}),
     ...(githubWebhooks ? { githubWebhooks: githubWebhooks.map(({ routineId, secretEnv }) => ({ routineId, secretEnv })) } : {}),
     maxReworks: raw.maxReworks === 0 ? 0 : positiveInt(raw.maxReworks, "maxReworks", 3, 20),
     maxStalls: positiveInt(raw.maxStalls, "maxStalls", 2, 20),

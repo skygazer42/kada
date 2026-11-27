@@ -43,6 +43,7 @@ type SyncOptions = {
   repository: string;
   deliver: (event: GithubRoutineEvent) => Promise<unknown>;
   fetch?: typeof fetch;
+  tokenEnv?: string;
 };
 
 type FeedEvent = {
@@ -55,9 +56,9 @@ type FeedEvent = {
 type Checkpoint = { eventId: string | null };
 const validId = /^[A-Za-z0-9_-]{1,120}$/;
 
-async function readPage(fetchPage: typeof fetch, repository: string, page: number) {
+async function readPage(fetchPage: typeof fetch, repository: string, page: number, token?: string) {
   const response = await fetchPage(`https://api.github.com/repos/${repository}/events?per_page=100&page=${page}`, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "Kada" },
+    headers: { Accept: "application/vnd.github+json", "User-Agent": "Kada", ...(token ? { Authorization: "Bearer " + token } : {}) },
     redirect: "error",
     signal: AbortSignal.timeout(15_000),
   });
@@ -78,6 +79,10 @@ export async function syncGithubRoutineEvents(options: SyncOptions) {
     repository.endsWith("/.") || repository.endsWith("/..") || !validId.test(options.routineId)) {
     throw new Error("Provide a routine ID and public GitHub repository as owner/name.");
   }
+  const token = options.tokenEnv ? process.env[options.tokenEnv]?.trim() : undefined;
+  if (options.tokenEnv && (!token || !/^[\x21-\x7e]+$/.test(token))) {
+    throw new Error(`Set a valid GitHub API credential in ${options.tokenEnv} before syncing events.`);
+  }
   const directory = join(options.dataDir, "github-routine-events");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const key = createHash("sha256").update(JSON.stringify([options.routineId, repository])).digest("hex");
@@ -92,7 +97,7 @@ export async function syncGithubRoutineEvents(options: SyncOptions) {
       throw new Error("The GitHub feed checkpoint is invalid.");
     }
     const fetchPage = options.fetch ?? fetch;
-    let { rows, more } = await readPage(fetchPage, repository, 1);
+    let { rows, more } = await readPage(fetchPage, repository, 1, token);
     if (!saved) {
       await atomicJson(path, { eventId: rows[0]?.id ?? null });
       return { repository, baseline: true, delivered: 0 };
@@ -109,7 +114,7 @@ export async function syncGithubRoutineEvents(options: SyncOptions) {
         if (!pending.has(event.id)) pending.set(event.id, event);
       }
       if (reachedCheckpoint || !more || page === 3) break;
-      ({ rows, more } = await readPage(fetchPage, repository, page + 1));
+      ({ rows, more } = await readPage(fetchPage, repository, page + 1, token));
     }
     if (!reachedCheckpoint && (saved.eventId !== null || more)) {
       throw new Error("The GitHub feed checkpoint is no longer in the available event window.");
@@ -134,7 +139,7 @@ export async function syncGithubRoutineEvents(options: SyncOptions) {
 }
 
 /** Polling only reads GitHub. The routine owns task admission and its budget. */
-export async function watchGithubIssues(dataDir: string, routineIds: readonly string[], routines: Pick<LocalRoutines, "list" | "receiveEvent">, signal: AbortSignal) {
+export async function watchGithubIssues(dataDir: string, routineIds: readonly string[], routines: Pick<LocalRoutines, "list" | "receiveEvent">, signal: AbortSignal, tokenEnv?: string) {
   while (!signal.aborted) {
     let nextPoll = Date.now() + 60_000;
     let rateLimited = false;
@@ -166,7 +171,7 @@ export async function watchGithubIssues(dataDir: string, routineIds: readonly st
         const repository = githubIssueRepository(rule);
         if (!repository) continue;
         try {
-          await syncGithubRoutineEvents({ dataDir, routineId: rule.id, repository, fetch: pollFetch,
+          await syncGithubRoutineEvents({ dataDir, routineId: rule.id, repository, fetch: pollFetch, tokenEnv,
             deliver: event => {
               signal.throwIfAborted();
               return routines.receiveEvent(rule.id, event, rule.revision);

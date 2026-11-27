@@ -256,7 +256,7 @@ try {
           throw new Error('Select an active github/issues.opened routine with a lowercase repository filter.');
         }
         result = await syncGithubRoutineEvents({
-          dataDir: config.dataDir, routineId, repository,
+          dataDir: config.dataDir, routineId, repository, tokenEnv: config.githubIssueTokenEnv,
           deliver: event => request('/v1/routines/' + segment(routineId) + '/events?revision=' + rule.revision, 'POST', event),
         });
       }
