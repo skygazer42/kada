@@ -8,7 +8,7 @@ import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
 import type { Models } from "@earendil-works/pi-ai";
-import { modelRef, type Config, type ModelRef } from "./config.js";
+import { browserProfilePattern, modelRef, type Config, type ModelRef } from "./config.js";
 import { ReadEvidence, TextFileError, Workspace, workspaceExtension } from "./workspace.js";
 import { answerDelegation, delegationExtension, DelegationInputError, dispatchChildInputs, firstChildQuestion, interruptChildTools, listDelegations, markChildStopped, pendingDelegation, restoreChildStops, stopObsoleteDelegations } from "./delegation.js";
 import { atomicJson, errorText, readJson, redactCredentials, SerialQueue } from "./util.js";
@@ -150,6 +150,8 @@ export interface TaskMeta {
   routinePullRequest?: GithubPullRequest;
   routineGmail?: RoutineGmailMatch;
   browserDriver?: string;
+  browserProfile?: string;
+  browserSession?: string;
   routineNotifyOnChange?: true;
   workItem?: WorkItemLink;
   review?: boolean;
@@ -170,7 +172,7 @@ function stagedOptionalTools(extensions: Extension[]) {
 }
 
 function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, chatGmail: _chatGmail, gmailWrite: _gmailWrite, gmailFiles: _gmailFiles,
-  browserDriver: _browserDriver,
+  browserDriver: _browserDriver, browserSession: _browserSession,
   routineGmail: _routineGmail, chatCalendar: _chatCalendar, calendarWrite: _calendarWrite, calendarAvailability: _calendarAvailability, ...meta }: TaskMeta) { return meta; }
 
 function roomSummary(meta: TaskMeta & { room: AssistantCollaboratorPin[] }) {
@@ -240,7 +242,10 @@ async function catalogStorageVersion(path: string) {
   const [database,wal] = await Promise.all([version(path),version(path+'-wal')]);
   return database === undefined ? undefined : database + '/' + (wal ?? '');
 }
-export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'|'browserKey'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+type ComputerRuntime = Pick<ComputerBridge, 'forTask' | 'release'> &
+  Partial<Pick<ComputerBridge, 'status' | 'takeover' | 'returnControl' | 'browserKey' | 'browserSession'>>;
+export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: ComputerRuntime; browserProfiles?: ReadonlyMap<string, ComputerRuntime>;
+  discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 type BrowserHold = { taskId: string; questionId: string };
 const browserSignInRequest = (questionId: string) => 'browser-sign-in-' + questionId;
 const browserSignInCompleted = 'The user finished the requested browser step. Acquire a new lease and observe the browser before continuing.';
@@ -264,7 +269,7 @@ export class LocalRuntime {
   private pendingThreadReports = new Map<string, ThreadReport>();
   private changes = new SerialQueue();
   private computerCommands = new SerialQueue();
-  private browserHold: BrowserHold | null = null;
+  private browserHolds = new Map<string | undefined, BrowserHold>();
   private closing = false;
   private ticking = false;
   private timer: NodeJS.Timeout;
@@ -624,7 +629,13 @@ export class LocalRuntime {
     return { ...await this.pinAssistant(destination.root, ref, model), workspace: destination.root };
   }
 
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[]; room?: AssistantCollaboratorRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; routineGmail?:RoutineGmailMatch; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;requireRoutineAdmission?:()=>Promise<void>;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: {
+    prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?: SkillSelection[];
+    assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[]; room?: AssistantCollaboratorRef[];
+    routineOccurrenceId?: string; routineIssue?: GithubIssue; routinePullRequest?: GithubPullRequest; routineGmail?: RoutineGmailMatch;
+    notifyOnChange?: boolean; remote?: boolean; signal?: AbortSignal; requireRoutineAdmission?: () => Promise<void>;
+    images?: InputImage[]; workItem?: WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId; browserProfile?: string;
+  } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
@@ -635,6 +646,10 @@ export class LocalRuntime {
       if (source?.room) throw new TaskConflictError('Open independent work from an ordinary local thread.');
       if (source) workspace = source.workspace;
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
+      const browserProfile = options.browserProfile;
+      if (browserProfile !== undefined && (typeof browserProfile !== 'string' || !browserProfilePattern.test(browserProfile) || options.remote || options.room)) {
+        throw new QuestionError(400, 'Choose a configured browser profile for a new local task.');
+      }
       const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
       if (assistant && (options.remote || workspace === undefined)) throw new AssistantError(400, 'Select an assistant only for a new local task with its existing project workspace.');
       let collaboratorRefs: AssistantCollaboratorRef[] | undefined;
@@ -657,6 +672,7 @@ export class LocalRuntime {
       if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error("Provide a valid task UUID.");
       const requestedWorkspace = resolve(workspace ?? join(this.directory(id), "workspace"));
       const creationHash = createHash("sha256").update(JSON.stringify({ objective, workspace: requestedWorkspace, acceptance: checks, prepare: Boolean(options.prepare), chat: Boolean(options.chat), budget: budget ?? null, skills:options.skills ?? null, routineOccurrenceId:options.routineOccurrenceId ?? null,notifyOnChange:options.notifyOnChange === true,remote:options.remote===true,
+        ...(browserProfile ? { browserProfile } : {}),
         ...(options.images?.length ? { images: options.images } : {}),
         ...(options.routineIssue ? { routineIssue: options.routineIssue } : {}),
         ...(options.routinePullRequest ? { routinePullRequest: options.routinePullRequest } : {}),
@@ -687,9 +703,12 @@ export class LocalRuntime {
         ? await assistantProject(requestedWorkspace) : undefined;
       const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(pin)) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
-      const files = await Workspace.open(requestedWorkspace, { create: !thread && !room });
       const localChat = !options.remote && !room;
-      const browserDriver = localChat ? this.options.computer?.browserKey?.() : undefined;
+      const taskComputer = localChat ? this.computerFor(browserProfile) : undefined;
+      const browserDriver = taskComputer?.browserKey?.();
+      const browserSession = browserProfile ? taskComputer?.browserSession?.() : undefined;
+      if (browserProfile && (!browserDriver || !browserSession)) throw new QuestionError(409, 'The selected browser profile is unavailable.');
+      const files = await Workspace.open(requestedWorkspace, { create: !thread && !room });
       const workItemProject = options.chat && localChat ? await memoryProject(files.root) : undefined;
       const credentialProject = localChat ? workItemProject ?? await memoryProject(files.root) : undefined;
       const gmail = credentialProject ? await this.gmail.assistantMailbox(credentialProject) : undefined;
@@ -749,6 +768,8 @@ export class LocalRuntime {
         ...(options.routinePullRequest ? { routinePullRequest: structuredClone(options.routinePullRequest) } : {}),
         ...(options.routineGmail ? { routineGmail: structuredClone(options.routineGmail) } : {}),
         ...(browserDriver ? { browserDriver } : {}),
+        ...(browserProfile ? { browserProfile } : {}),
+        ...(browserSession ? { browserSession } : {}),
         ...(options.notifyOnChange ? {routineNotifyOnChange:true as const} : {}),
         ...(options.workItem ? { workItem: options.workItem } : {}),
         ...(this.config.subagentModel ? { subagentModel: this.config.subagentModel } : {}),
@@ -1397,7 +1418,9 @@ export class LocalRuntime {
         return goal.costLimit !== undefined && used.estimatedCostUsd < goal.costLimit * 0.8 &&
           (goal.tokenLimit === null || used.totalTokens < goal.tokenLimit * 0.8) && Date.now() + 10_000 < this.deadline(current, goal);
       } }) : undefined;
-      const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
+      const taskComputer = this.computerFor(meta.browserProfile);
+      const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 &&
+        (this.options.computer || meta.browserProfile) && e.name === "local_computer"));
       if (rolePolicy) extra.push(rolePolicy);
       const approvals = !remote && meta.schemaVersion === 3
         ? approvalExtension(this.mcp,{calendar:this.calendars,gmail:this.gmail}).extension : undefined;
@@ -1415,8 +1438,8 @@ export class LocalRuntime {
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.routineGmail) extra.push(projectGmailExtension(this.gmail, meta.workspace, meta.routineGmail.fingerprint, meta.routineGmail.messageIds));
       if (!remote && (meta.mcpDiscovery === 'deferred' || meta.optionalToolDiscovery)) extra.push(createToolSearchExtension());
-      if (!remote && meta.schemaVersion === 3 && this.options.computer && this.browserConnectionMatches(meta)) {
-        extra.push(this.options.computer.forTask(meta.id, meta.structuredQuestions === true, meta.browserDriver));
+      if (!remote && meta.schemaVersion === 3 && taskComputer && this.browserConnectionMatches(meta)) {
+        extra.push(taskComputer.forTask(meta.id, meta.structuredQuestions === true, meta.browserDriver));
       }
       const coordinatorOnly = [goal, verification, ...posts, ...(snapshots ? [snapshots] : []), ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(calendarWrites ? [calendarWrites] : []), ...(gmailWrites ? [gmailWrites] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
@@ -1697,8 +1720,13 @@ export class LocalRuntime {
     const notice = await settleLearning(active.methods, active.workspace, active.meta.id, state, taskUsage(await active.harness.usage(ctx)).estimatedCostUsd);
     await this.updateGoal(active, goal => { if (goal.learning) { goal.learning.settledRevision = state.revision; if (notice) goal.learning.notice = notice; } });
   }
+  private computerFor(profile?: string) {
+    return profile === undefined ? this.options.computer : this.options.browserProfiles?.get(profile);
+  }
+
   private browserConnectionMatches(meta: TaskMeta) {
-    return !meta.browserDriver || this.options.computer?.browserKey?.() === meta.browserDriver;
+    if (meta.browserProfile && !meta.browserDriver) return false;
+    return !meta.browserDriver || this.computerFor(meta.browserProfile)?.browserKey?.() === meta.browserDriver;
   }
 
   private instructions(meta: TaskMeta, preparing = false): string {
@@ -1873,10 +1901,15 @@ export class LocalRuntime {
       const question = (await active.harness.snapshot(Questions, active.root.id, ctx))?.questions[signInId];
       if (question?.browserSignIn && question.answer?.requestId === outbox.requestId) {
         await this.computerCommands.run(async () => {
-          if (question.answer?.text === browserSignInCompleted && this.options.computer?.browserKey?.() !== question.browserDriver) {
+          const { browserProfile: profile, browserSession: session } = active.meta;
+          const hold = this.browserHolds.get(session);
+          if (question.answer?.text === browserSignInCompleted && this.computerFor(profile)?.browserKey?.() !== question.browserDriver) {
             throw new QuestionError(409, 'Reconnect the original browser driver before resuming the task.');
           }
-          if (this.browserHold?.taskId === active.meta.id && this.browserHold.questionId === signInId) await this.returnBrowserHold();
+          if (hold?.taskId === active.meta.id && hold.questionId === signInId) {
+            const computer = session ? this.browserConnections().find(entry => entry.session === session)?.computer : this.computerFor();
+            await this.returnBrowserHold(session, computer);
+          }
         });
       }
     }
@@ -1947,7 +1980,7 @@ export class LocalRuntime {
     if (["completed", "blocked", "waiting_user", "needs_attention", "failed"].includes(goal.phase)) {
       if (busy) await this.abortAll(active);
       await this.finishLearning(active);
-      this.options.computer?.release(active.meta.id); active.enabled = false; return;
+      this.computerFor(active.meta.browserProfile)?.release(active.meta.id); active.enabled = false; return;
     }
     if (Date.now() >= this.deadline(active, goal)) { await this.limit(active, "Task time budget exhausted"); return; }
     const budgetReason = await this.budgetReason(active, goal);
@@ -2009,7 +2042,7 @@ export class LocalRuntime {
     if (latest.status === "unanswered") {
       await this.updateGoal(active, (state, record) => { state.phase = "failed"; state.reason = `Model run failed: ${latest.reason}`; record("failed", state.reason); });
       await this.finishLearning(active);
-      this.options.computer?.release(active.meta.id); active.enabled = false; return;
+      this.computerFor(active.meta.browserProfile)?.release(active.meta.id); active.enabled = false; return;
     }
     if (latest.status !== "done" || goal.lastEvaluated === String(latest.id)) return;
     if (active.meta.preparation && !goal.confirmation) {
@@ -2124,7 +2157,7 @@ export class LocalRuntime {
     }
     if (verdict.verdict === "blocked") {
       await this.updateGoal(active, (state, record) => { state.phase = "blocked"; state.reason = verdict.reason; record("blocked", verdict.reason); });
-      this.options.computer?.release(active.meta.id); active.enabled = false; return;
+      this.computerFor(active.meta.browserProfile)?.release(active.meta.id); active.enabled = false; return;
     }
     if (verdict.verdict !== "pass") { await this.reject(active, goal, `Independent review: ${verdict.reason}\n${verdict.evidence.join("\n")}`, String(latest?.id)); return; }
     const readPaths = await active.harness.commit(async tx => plain((await tx.doc(ReadEvidence)).files[String(review.conversationId)] ?? []), ctx);
@@ -2155,7 +2188,7 @@ export class LocalRuntime {
     });
     await this.queueThreadReport(active);
     await this.finishLearning(active);
-    this.options.computer?.release(active.meta.id); active.enabled = false;
+    this.computerFor(active.meta.browserProfile)?.release(active.meta.id); active.enabled = false;
   }
   private async reject(active: Active, goal: GoalState, reason: string, evaluated: string, guidance?: string): Promise<void> {
     const fingerprint = createHash("sha256").update(JSON.stringify({
@@ -2599,30 +2632,59 @@ export class LocalRuntime {
     const { data } = await verifyVoiceReply(await Workspace.open(join(this.directory(id), 'voice'), { create: false }), file);
     return data;
   }
-  private async saveBrowserHold(hold: BrowserHold | null) {
-    await atomicJson(join(this.config.dataDir, 'browser-handoff.json'), hold);
-    this.browserHold = hold;
+  private browserConnections() {
+    return [this.options.computer, ...(this.options.browserProfiles?.values() ?? [])].flatMap(computer => {
+      const session = computer?.browserSession?.();
+      return computer && session ? [{ session, computer }] : [];
+    });
+  }
+  private browserHoldPath(session?: string) {
+    const key = session === undefined ? '' : '-' + createHash('sha256').update(session).digest('hex');
+    return join(this.config.dataDir, 'browser-handoff' + key + '.json');
+  }
+  private async saveBrowserHold(hold: BrowserHold | null, session?: string) {
+    await atomicJson(this.browserHoldPath(session), hold);
+    if (hold) this.browserHolds.set(session, hold);
+    else this.browserHolds.delete(session);
   }
   private async restoreBrowserHold() {
-    const hold = await readJson<BrowserHold | null>(join(this.config.dataDir, 'browser-handoff.json')).catch(error => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
-    });
-    if (hold === null) return;
-    if (!/^[a-f0-9-]{36}$/.test(hold.taskId) || !/^\d{1,20}$/.test(hold.questionId)) throw new Error('Invalid saved browser handoff.');
-    this.browserHold = hold;
-    await this.options.computer?.takeover?.();
+    const connections = [{ session: undefined, computer: this.options.computer }, ...this.browserConnections()];
+    for (const { session, computer } of connections) {
+      const hold = await readJson<BrowserHold | null>(this.browserHoldPath(session)).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      });
+      if (hold === null) continue;
+      if (!/^[a-f0-9-]{36}$/.test(hold.taskId) || !/^\d{1,20}$/.test(hold.questionId)) throw new Error('Invalid saved browser handoff.');
+      this.browserHolds.set(session, hold);
+      await computer?.takeover?.();
+    }
   }
-  private async returnBrowserHold() {
-    const status = await this.options.computer?.returnControl?.();
-    if (this.browserHold) await this.saveBrowserHold(null);
+  private async returnBrowserHold(session: string | undefined, computer: ComputerRuntime | undefined) {
+    const status = await computer?.returnControl?.();
+    if (this.browserHolds.has(session)) await this.saveBrowserHold(null, session);
     return status;
   }
-  computerControl(action: 'takeover' | 'return') {
+  computerStatus(profile?: string) {
+    const computer = this.computerFor(profile);
+    if (profile !== undefined && !computer) throw new QuestionError(404, 'Browser profile not found.');
+    return computer?.status?.() ?? { connected: false, mode: 'disabled', owner: null, observed: false, busy: false, takingOver: false };
+  }
+  computerProfiles() {
+    return [...(this.options.browserProfiles?.keys() ?? [])].map(name => ({ name, ...this.computerStatus(name) }));
+  }
+  computerControl(action: 'takeover' | 'return', profile?: string) {
     return this.computerCommands.run(async () => {
-      const computer = this.options.computer;
+      const computer = this.computerFor(profile);
+      if (profile !== undefined && !computer) throw new QuestionError(404, 'Browser profile not found.');
       if (!computer?.takeover || !computer.returnControl) throw new Error('Computer control is disabled. Select an existing driver before taking control.');
-      return action === 'takeover' ? computer.takeover() : this.returnBrowserHold();
+      const session = computer.browserSession?.();
+      if (profile !== undefined && !session) throw new QuestionError(409, 'The selected browser profile is unavailable.');
+      if (action === 'takeover') return computer.takeover();
+      const heldSession = profile !== undefined || (session && this.browserHolds.has(session)) ? session : undefined;
+      const status = await this.returnBrowserHold(heldSession, computer);
+      if (profile === undefined && heldSession && this.browserHolds.has(undefined)) await this.saveBrowserHold(null);
+      return status;
     });
   }
   async browserSignIn(id: string, questionId: string, action: 'takeover' | 'continue' | 'decline'): Promise<void> {
@@ -2645,8 +2707,9 @@ export class LocalRuntime {
         throw new QuestionError(409, 'Resume the original task budget before answering its browser request.');
       }
       if (action !== 'decline') await this.computerCommands.run(async () => {
-        const computer = this.options.computer, status = computer?.status?.();
-        const hold = this.browserHold, matches = hold?.taskId === id && hold.questionId === questionId;
+        const computer = this.computerFor(meta.browserProfile), status = computer?.status?.();
+        const hold = this.browserHolds.get(meta.browserSession) ?? this.browserHolds.get(computer?.browserSession?.());
+        const matches = hold?.taskId === id && hold.questionId === questionId;
         if (!computer?.takeover || !computer.returnControl || !saved.browserDriver || computer.browserKey?.() !== saved.browserDriver) {
           throw new QuestionError(409, 'Reconnect the original browser driver before using this request.');
         }
@@ -2655,7 +2718,7 @@ export class LocalRuntime {
           return;
         }
         if (hold && !matches || status?.owner && status.owner !== id) throw new QuestionError(409, 'The browser is already in use by another task.');
-        if (!matches) await this.saveBrowserHold({ taskId: id, questionId });
+        if (!matches) await this.saveBrowserHold({ taskId: id, questionId }, meta.browserSession);
         await computer.takeover();
       });
       if (action !== 'takeover') await this.followUpTask(id, message, requestId, undefined, undefined, { id: questionId }, true);
@@ -2991,7 +3054,7 @@ export class LocalRuntime {
   private async closeTask(id: string): Promise<void> {
     const active = this.active.get(id);
     if (!active) return;
-    this.options.computer?.release(id);
+    this.computerFor(active.meta.browserProfile)?.release(id);
     active.enabled = false;
     try { await active.harness.close(ctx); } finally { this.active.delete(id); }
   }

@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
-import type { Config } from "./config.js";
+import { browserProfilePattern, type Config } from "./config.js";
 import { ComputerBridge } from "./computer.js";
 import { VERSION } from "./version.js";
 import { LocalRuntime, type RuntimeOptions } from "./runtime.js";
@@ -46,6 +46,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const release = await lockfile.lock(config.dataDir, { stale: 5000, update: 1000, retries: { retries: 6, minTimeout: 1000, maxTimeout: 1000 } });
   const computer = new ComputerBridge();
+  const browserProfiles = new Map<string, ComputerBridge>();
+  const closeComputers = () => Promise.all([computer.close(), ...[...browserProfiles.values()].map(profile => profile.close())]);
   let runtime: LocalRuntime | undefined;
   const devices = new RemoteDevices(config.dataDir);
   let remote: ReturnType<typeof createRemoteHandler>;
@@ -79,7 +81,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (chartPreviews.handle(req, res, url)) return;
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-memory','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-memory','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines','browser-profiles'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -100,10 +102,11 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const expected = Buffer.from(token);
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return send(401, { error: "Unauthorized" });
       if (req.headers.origin && req.headers.origin !== `http://127.0.0.1:${config.port}`) return send(403, { error: "Cross-origin requests are not allowed" });
-      const controls = config.computer ? computer : options?.computer;
-      if (url.pathname === '/v1/computer' && req.method === 'GET') return send(200,controls?.status?.() ?? {connected:false,mode:'disabled',owner:null,observed:false,busy:false,takingOver:false});
+      if (url.pathname === '/v1/computer/profiles' && req.method === 'GET') return send(200, runtime.computerProfiles());
+      const computerProfile = url.searchParams.get('profile') ?? undefined;
+      if (url.pathname === '/v1/computer' && req.method === 'GET') return send(200, runtime.computerStatus(computerProfile));
       if (['/v1/computer/takeover','/v1/computer/return'].includes(url.pathname) && req.method === 'POST') {
-        return send(200, await runtime.computerControl(url.pathname.endsWith('/takeover') ? 'takeover' : 'return'));
+        return send(200, await runtime.computerControl(url.pathname.endsWith('/takeover') ? 'takeover' : 'return', computerProfile));
       }
       if (url.pathname === "/v1/environment" && req.method === "GET") return send(200, await runtime.localSetup());
       if (url.pathname === "/v1/environment/memory" && req.method === "GET") {
@@ -428,7 +431,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.mode !== undefined && input.mode !== "chat") throw new Error("mode must be chat when supplied");
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
         return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined,
-          assistant: input.assistant as AssistantRef | undefined, collaborators: input.collaborators as AssistantCollaboratorRef[] | undefined }));
+          assistant: input.assistant as AssistantRef | undefined, collaborators: input.collaborators as AssistantCollaboratorRef[] | undefined,
+          browserProfile: input.browserProfile as string | undefined }));
       }
       const threadRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/(threads?)$/.exec(url.pathname);
       if (threadRoute) {
@@ -595,8 +599,31 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   });
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
+    const named = Object.entries(config.browserProfiles ?? {});
+    const sessions = new Set<string>();
+    if (named.length && computer.browserKey()) {
+      const session = computer.browserSession();
+      if (!session) throw new Error('The default browser must identify its fixed session before adding named profiles.');
+      sessions.add(session);
+    }
+    for (const [name, driver] of named) {
+      if (!browserProfilePattern.test(name)) throw new Error('Invalid browser profile name.');
+      const profile = new ComputerBridge(true);
+      browserProfiles.set(name, profile);
+      try { await profile.connect(driver); }
+      catch {
+        await profile.close();
+        console.warn('Browser profile ' + name + ' is unavailable at startup.');
+        continue;
+      }
+      const session = profile.browserSession();
+      if (!session) throw new Error('Browser profile ' + name + ' must identify a fixed browser session.');
+      if (sessions.has(session)) throw new Error('Browser profiles cannot use the same browser session.');
+      sessions.add(session);
+    }
     const models = options?.models ?? cloudModels();
-    runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
+    runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])],
+      computer: config.computer ? computer : options?.computer, browserProfiles: config.browserProfiles ? browserProfiles : options?.browserProfiles });
     workboard = createWorkboardAccess(runtime.workItems, runtime.calendars, `http://127.0.0.1:${config.port}`, body);
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
     projectMcp = createProjectMcpAccess(runtime.mcp, { gmail:runtime.gmail, calendar:runtime.calendars },
@@ -625,7 +652,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   } catch (error) {
     server.close();
     await runtime?.close();
-    await computer.close();
+    await closeComputers();
     await release();
     throw error;
   }
@@ -640,7 +667,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       githubAbort.abort();
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      try { await Promise.all([pushRun, githubRun]); await runtime!.close(); await computer.close(); } finally { await release(); }
+      try { await Promise.all([pushRun, githubRun]); await runtime!.close(); await closeComputers(); } finally { await release(); }
     },
   };
 }

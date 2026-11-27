@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import type { ToolExecutionApi } from '@earendil-works/pi-durable';
@@ -10,6 +15,7 @@ import { createClient, type TaskStatus } from '../src/client.js';
 import { ComputerBridge } from '../src/computer.js';
 import { LocalRuntime } from '../src/runtime.js';
 import { serve } from '../src/server.js';
+import { VERSION } from '../src/version.js';
 import { hasTool, scriptedFixture, until } from './helpers.js';
 
 const driver = {
@@ -19,6 +25,94 @@ const driver = {
 };
 const snapshot = 'computer_0_agent_browser_snapshot';
 const call = (name: string, args = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: 'toolUse' });
+
+test('the terminal cannot send a named task or takeover to a daemon without browser profile support', async t => {
+  const fixture = await scriptedFixture(() => assert.fail('A legacy daemon must not receive the task.'));
+  let mutations = 0;
+  const daemon = createHttpServer((request, response) => {
+    if (request.method !== 'GET') mutations++;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(request.url === '/health' ? JSON.stringify({ status: 'ok', version: VERSION, capabilities: ['ordinary-chat'] }) : '[]');
+  });
+  t.after(async () => {
+    daemon.closeAllConnections();
+    await new Promise<void>(resolve => daemon.close(() => resolve()));
+    await fixture.close();
+  });
+  await new Promise<void>(resolve => daemon.listen(0, '127.0.0.1', resolve));
+  const config = join(fixture.directory, 'legacy-daemon.json');
+  await writeFile(join(fixture.settings.dataDir, 'token'), 'fixture-token');
+  await writeFile(config, JSON.stringify({ ...fixture.settings, port: (daemon.address() as { port: number }).port }));
+  const execute = promisify(execFile);
+  for (const command of [['run', 'Use the named fixture.', '--detach'], ['computer', 'takeover']]) {
+    await assert.rejects(execute(process.execPath,
+      ['--import', 'tsx', 'src/cli.ts', ...command, '--browser-profile', 'alpha', '--config', config]), /支持浏览器配置/);
+  }
+  assert.equal(mutations, 0);
+});
+
+test('two selected browser profiles keep independent takeovers and resume their original tasks after restart', { timeout: 60_000 }, async t => {
+  const f = await scriptedFixture(context => {
+    const profile = context.messages.some(message => message.role === 'user' && String(message.content).includes('Profile alpha')) ? 'alpha' : 'beta';
+    const after = context.messages.findLastIndex(message => message.role === 'user' && String(message.content).includes('The user finished the requested browser step'));
+    const results = context.messages.slice(after + 1).filter(message => message.role === 'toolResult');
+    if (!results.some(result => result.toolName === 'computer_begin')) return call('computer_begin');
+    const observed = results.find(result => result.toolName === snapshot);
+    if (!observed) return call(snapshot, { interactive: true });
+    assert.match(JSON.stringify(observed), new RegExp('fixture session ' + profile));
+    if (after < 0) return call('computer_request_sign_in', { step: 'verification' });
+    return call('task_submit', { summary: 'Reobserved the original selected browser.', artifacts: [] });
+  });
+  await f.runtime.close();
+  const listener = createServer();
+  await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const port = (listener.address() as { port: number }).port;
+  await new Promise<void>(resolve => listener.close(() => resolve()));
+  const named = (id: string) => ({ ...driver, args: [...driver.args, '--named'], env: { AGENT_BROWSER_SESSION: id } });
+  const config = { ...f.settings, port, browserProfiles: { alpha: named('alpha'), beta: named('beta') } };
+  let service = await serve(config, { models: f.models });
+  t.after(async () => { await service.close(); await f.close(); });
+  const client = createClient(config);
+  const create = (browserProfile?: string) => client.request<TaskStatus>('/v1/tasks', 'POST', {
+    objective: 'Profile ' + browserProfile + ' needs verification.', workspace: f.workspace, confirmed: true, browserProfile,
+  });
+  const control = (profile: string) => client.request<{ connected: boolean; mode: string }>('/v1/computer?profile=' + profile);
+  assert((await control('alpha')).connected);
+  assert((await control('beta')).connected);
+  await assert.rejects(create('unknown'), /profile/i);
+  const [alpha, beta] = await Promise.all([create('alpha'), create('beta')]);
+  const wait = (id: string) => until(() => service.runtime.status(id), status => status.status === 'waiting_user' && status.submission?.status === 'done');
+  const [a, b] = await Promise.all([wait(alpha.id), wait(beta.id)]);
+  const action = (task: typeof a, verb: string) => client.request('/v1/tasks/' + task.id + '/browser-sign-in/' + task.userQuestion!.id, 'POST', { action: verb });
+  await action(a, 'takeover');
+  await action(b, 'takeover');
+  assert.equal((await control('alpha')).mode, 'user');
+  assert.equal((await control('beta')).mode, 'user');
+  await service.close();
+  service = await serve({ ...config, browserProfiles: { renamed: named('alpha'), beta: named('beta') } }, { models: f.models });
+  assert.equal((await control('renamed')).mode, 'user');
+  assert.equal((await control('beta')).mode, 'user');
+  await assert.rejects(action(a, 'continue'), /original browser driver/i);
+  await service.close();
+  service = await serve({ ...config, browserProfiles: { ...config.browserProfiles, alpha: named('replacement') } }, { models: f.models });
+  assert.equal((await control('alpha')).mode, 'agent');
+  assert.equal((await control('beta')).mode, 'user');
+  await assert.rejects(action(a, 'continue'), /original browser driver/i);
+  await service.close();
+  service = await serve(config, { models: f.models });
+  assert.equal((await control('alpha')).mode, 'user');
+  assert.equal((await control('beta')).mode, 'user');
+  await action(a, 'continue');
+  await until(() => service.runtime.status(alpha.id), status => status.status === 'completed');
+  assert.equal((await control('alpha')).mode, 'agent');
+  assert.equal((await control('beta')).mode, 'user');
+  await action(b, 'continue');
+  await until(() => service.runtime.status(beta.id), status => status.status === 'completed');
+  assert.equal((await control('beta')).mode, 'agent');
+  await service.close();
+  await assert.rejects(serve({ ...config, browserProfiles: { alpha: named('alpha'), duplicate: named('alpha') } }, { models: f.models }),
+    /same browser session|duplicate session/i);
+});
 
 test('new browser tasks keep their original synthetic driver through reconnect and restart', async t => {
   const first = {...driver,env:{AGENT_BROWSER_SESSION:'fixture-a'}};

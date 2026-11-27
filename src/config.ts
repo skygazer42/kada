@@ -11,6 +11,7 @@ export interface ComputerConfig {
   observationTools?: string[];
   leaseMs?: number;
 }
+export const browserProfilePattern = /^[a-z][a-z0-9_-]{0,39}$/;
 export interface Config {
   dataDir: string;
   port: number;
@@ -32,6 +33,7 @@ export interface Config {
   maxReworks?: number;
   maxStalls?: number;
   computer?: ComputerConfig;
+  browserProfiles?: Record<string, ComputerConfig>;
   /** Canonical origin of an already configured HTTPS reverse proxy. */
   remoteOrigin?: string;
   remotePush?: boolean;
@@ -64,6 +66,21 @@ export function modelRef(value: unknown, name: string): ModelRef | undefined {
   return { provider: m.provider, modelId: m.modelId };
 }
 
+function computerConfig(input: unknown, label: string): ComputerConfig {
+  const c = input as ComputerConfig;
+  if (!c || typeof c.command !== "string" || !c.command.trim() || !Array.isArray(c.tools) ||
+    c.tools.length === 0 || !c.tools.every(t => typeof t === "string" && t.length > 0) ||
+    (c.args !== undefined && (!Array.isArray(c.args) || !c.args.every(a => typeof a === "string"))) ||
+    (c.env !== undefined && (typeof c.env !== "object" || !c.env || !Object.values(c.env).every(v => typeof v === "string")))) {
+    throw new Error(label + " requires a command and an explicit tools allowlist (optional args and env)");
+  }
+  if (c.observationTools !== undefined && (!Array.isArray(c.observationTools) || !c.observationTools.every(t => typeof t === "string" && c.tools.includes(t)))) {
+    throw new Error(label + ".observationTools must be selected from its tools");
+  }
+  if (c.leaseMs !== undefined) positiveInt(c.leaseMs, label + ".leaseMs", 120_000, 3_600_000);
+  return c;
+}
+
 export async function loadConfig(filename = "harness.config.json"): Promise<Config> {
   let raw: Record<string, unknown> = {};
   try { raw = JSON.parse(await readFile(filename, "utf8")); }
@@ -72,18 +89,14 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
   const model = process.env.MODEL_PROVIDER && process.env.MODEL_ID
     ? { provider: process.env.MODEL_PROVIDER, modelId: process.env.MODEL_ID }
     : modelRef(raw.model, "model");
-  let computer: ComputerConfig | undefined;
-  if (raw.computer !== undefined) {
-    const c = raw.computer as ComputerConfig;
-    if (!c || typeof c.command !== "string" || !c.command.trim() || !Array.isArray(c.tools) ||
-      c.tools.length === 0 || !c.tools.every(t => typeof t === "string" && t.length > 0) ||
-      (c.args !== undefined && (!Array.isArray(c.args) || !c.args.every(a => typeof a === "string"))) ||
-      (c.env !== undefined && (typeof c.env !== "object" || !c.env || !Object.values(c.env).every(v => typeof v === "string")))) {
-      throw new Error("computer requires a command and an explicit tools allowlist (optional args and env)");
-    }
-    if (c.observationTools !== undefined && (!Array.isArray(c.observationTools) || !c.observationTools.every(t => typeof t === "string" && c.tools.includes(t)))) throw new Error("computer.observationTools must be selected from computer.tools");
-    if (c.leaseMs !== undefined) positiveInt(c.leaseMs, "computer.leaseMs", 120_000, 3_600_000);
-    computer = c;
+  const computer = raw.computer === undefined ? undefined : computerConfig(raw.computer, 'computer');
+  let browserProfiles: Config['browserProfiles'];
+  if (raw.browserProfiles !== undefined) {
+    if (!raw.browserProfiles || typeof raw.browserProfiles !== 'object' || Array.isArray(raw.browserProfiles)) throw new Error('browserProfiles must be an object.');
+    browserProfiles = Object.fromEntries(Object.entries(raw.browserProfiles).map(([name, input]) => {
+      if (!browserProfilePattern.test(name)) throw new Error('Use lowercase names for browser profiles.');
+      return [name, computerConfig(input, 'browserProfiles.' + name)];
+    }));
   }
   if (raw.dataDir !== undefined && typeof raw.dataDir !== "string") throw new Error("dataDir must be a string");
   const githubIssuePolling = raw.githubIssuePolling;
@@ -133,6 +146,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     maxReworks: raw.maxReworks === 0 ? 0 : positiveInt(raw.maxReworks, "maxReworks", 3, 20),
     maxStalls: positiveInt(raw.maxStalls, "maxStalls", 2, 20),
     computer,
+    ...(browserProfiles ? { browserProfiles } : {}),
     ...(typeof raw.remoteOrigin === 'string' ? {remoteOrigin:new URL(raw.remoteOrigin).origin} : {}),
   };
 }

@@ -59,6 +59,8 @@ export class ComputerBridge {
   private takingOver = false;
   private activeTool?: string;
   private uncertain = false;
+  constructor(private readonly namedProfile = false) {}
+
   async connect(config: ComputerConfig): Promise<Extension> {
     if (this.client) await this.close();
     this.tools = [];
@@ -95,8 +97,24 @@ export class ComputerBridge {
 
   browserKey() {
     if (!this.ready || this.client?.getServerVersion()?.name !== browserAdapter || !this.config) return undefined;
-    const { command, args, env } = this.config;
-    return createHash('sha256').update(JSON.stringify([command, args, env?.AGENT_BROWSER_SESSION ?? null])).digest('hex');
+    const { command, args, env, tools, observationTools } = this.config;
+    const identity = [command, args, env?.AGENT_BROWSER_SESSION ?? null];
+    if (this.namedProfile) {
+      const session = this.browserSession();
+      if (!session) return undefined;
+      identity.push(session, tools, observationTools);
+    }
+    return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+  }
+
+  browserSession(): string | undefined {
+    if (!this.ready || this.client?.getServerVersion()?.name !== browserAdapter) return;
+    try {
+      const data = JSON.parse(this.client.getInstructions() ?? 'null') as { browserSession?: unknown } | null;
+      if (typeof data?.browserSession === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(data.browserSession)) return data.browserSession;
+    } catch {
+      // The original single-browser adapter can run without advertising a named session.
+    }
   }
 
   status() {

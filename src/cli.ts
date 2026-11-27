@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
-import { loadConfig } from "./config.js";
+import { browserProfilePattern, loadConfig } from "./config.js";
 import { cloudModels } from "./models.js";
 import { errorText } from "./util.js";
 import { createClient, type TaskMeta, type TaskStatus } from "./client.js";
@@ -16,9 +16,14 @@ try { loadEnvFile(".env"); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 
 const args = parseArgs({ allowPositionals: true, options: {
+  'browser-profile': { type: 'string' },
   config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, assistant:{type:'string'}, collaborator:{type:'string',multiple:true}, "room-file":{type:'string',multiple:true}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
 } });
 const [command = "chat", id, ...rest] = args.positionals;
+const browserProfile = args.values['browser-profile'];
+if (browserProfile !== undefined && (!browserProfilePattern.test(browserProfile) || !['run', 'chat', 'computer'].includes(command))) {
+  throw new Error('Use --browser-profile with run, chat or computer and a configured profile name.');
+}
 if (args.values['room-file'] && (command !== 'rooms' || id !== 'send')) throw new Error('Use --room-file with rooms send.');
 const config = await loadConfig(args.values.config);
 const client = createClient(config);
@@ -58,6 +63,7 @@ try {
     console.log('  rooms file 群组ID 消息ID 附件编号');
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
+    console.log('computer profiles 查看浏览器配置。run、chat 和 computer 可用 --browser-profile 名称选择。');
     console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
     console.log('model browser --workspace 路径　生成本机项目模型设置链接。');
     console.log('assistants browser --workspace 路径　生成本机项目助手设置链接。');
@@ -73,12 +79,13 @@ try {
     console.log("GitHub PR Webhook 使用同一配置，规则类型为 pull_request.opened、pull_request.reopened、pull_request.synchronize、pull_request.closed 或 pull_request.ready_for_review。原任务保留仓库、编号、headSha/baseSha 及 draft/merged；可按这些标量精确匹配。");
   } else if (command === "chat") {
     const assistant = selectedAssistant(), collaborators = selectedCollaborators();
-    if (id && (assistant || collaborators)) throw new Error('仅新会话可以选择助手与同事。');
+    if (id && (assistant || collaborators || browserProfile)) throw new Error('仅新会话可以选择助手、同事和浏览器。');
     const { ensureDaemon } = await import("./daemon.js");
     const { runChat } = await import("./chat.js");
     const daemon = await ensureDaemon(config, args.values.config);
     console.log(daemon.started ? `已启动后台服务（PID ${daemon.pid}），退出聊天后任务仍可继续。` : "已连接本地后台服务。");
-    await runChat(createClient(config), { taskId: id, workspace: args.values.workspace ? resolve(args.values.workspace) : assistant || collaborators ? process.cwd() : undefined, assistant, collaborators });
+    await runChat(createClient(config), { taskId: id, workspace: args.values.workspace ? resolve(args.values.workspace) : assistant || collaborators ? process.cwd() : undefined,
+      assistant, collaborators, browserProfile });
   } else if (command === "serve") {
     const { serve } = await import("./server.js");
     const server = await serve(config);
@@ -345,8 +352,13 @@ try {
       }
       else throw new Error('Use remote list, pair, revoke, share-approval, unshare-approval, or a share-thread or unshare-thread command.');
     } else if (command === 'computer') {
-      if (!['status','takeover','return'].includes(action)) throw new Error('Use computer status, takeover or return.');
-      result = await request('/v1/computer'+(action === 'status' ? '' : '/'+action),action === 'status' ? 'GET' : 'POST',action === 'status' ? undefined : {});
+      if ((browserProfile || action === 'profiles') && !await client.healthy('browser-profiles')) throw new Error('请重启到支持浏览器配置的后台版本。');
+      if (action === 'profiles') result = await request('/v1/computer/profiles');
+      else {
+        if (!['status','takeover','return'].includes(action)) throw new Error('Use computer profiles, status, takeover or return.');
+        const query = browserProfile ? '?profile=' + encodeURIComponent(browserProfile) : '';
+        result = action === 'status' ? await request('/v1/computer' + query) : await request('/v1/computer/' + action + query, 'POST', {});
+      }
     } else {
       if (action === 'open' || action === 'chart') {
         if (action === 'chart' && !await client.healthy('chart-preview')) throw new Error('请重启到支持图表预览的后台版本。');
@@ -376,11 +388,12 @@ try {
     const assistant = selectedAssistant(), collaborators = selectedCollaborators();
     if (assistant && !await client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；角色请求不会降级为普通任务。');
     if (collaborators && !await client.healthy('assistant-collaboration')) throw new Error('请重启到支持助手协作的后台版本。');
+    if (browserProfile && !await client.healthy('browser-profiles')) throw new Error('请重启到支持浏览器配置的后台版本。');
     const objective = [id, ...rest].filter(Boolean).join(" ");
     const acceptance = args.values.acceptance ? JSON.parse(await readFile(args.values.acceptance, "utf8")) : undefined;
     const skills = args.values.skills === undefined ? undefined : args.values.skills.split(',').filter(Boolean).map(ref => { const [name,version] = ref.split('@'); return {name,...(version ? {version} : {})}; });
     const task = await request<TaskMeta>("/v1/tasks", "POST", { objective, workspace: args.values.workspace ? resolve(args.values.workspace) : assistant || collaborators ? process.cwd() : undefined, acceptance, confirmed: args.values.yes,skills,
-      ...(assistant ? { assistant } : {}), ...(collaborators ? { collaborators } : {}) });
+      ...(assistant ? { assistant } : {}), ...(collaborators ? { collaborators } : {}), ...(browserProfile ? { browserProfile } : {}) });
     console.log(`Task: ${task.id}\nWorkspace: ${task.workspace}`);
     if (task.assistant) console.log(assistantText(task));
     if (task.preparation) console.log(`先整理目标和预算；进入聊天 /attach ${task.id} 后确认。已有明确授权可使用 run --yes。`);

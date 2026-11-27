@@ -4,7 +4,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { setTimeout } from "node:timers/promises";
 
 const browser = process.argv.includes("--browser");
-const server = new Server({ name: browser ? "kada-agent-browser-cli" : "simulated-desktop", version: "1.0.0" }, { capabilities: { tools: {} } });
+const browserSession = browser ? process.env.AGENT_BROWSER_SESSION : undefined;
+const server = new Server({ name: browser ? "kada-agent-browser-cli" : "simulated-desktop", version: "1.0.0" }, {
+  capabilities: { tools: {} }, ...(browserSession ? { instructions: JSON.stringify({ browserSession }) } : {}),
+});
 const image = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l4cAAAAASUVORK5CYII=" };
 let active = 0;
 const actions: unknown[] = [];
@@ -28,7 +31,7 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
         if (request.params.arguments?.fail) return { isError: true, content: [{ type: "text", text: "snapshot error " + "!".repeat(2_000) }] };
         const text = request.params.arguments?.interactive === false ? "full snapshot " + ".".repeat(2_000) :
           ++snapshots === 1 ? "first snapshot " + ".".repeat(2_000) : `snapshot ${snapshots}`;
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text: process.argv.includes("--named") ? text + " fixture session " + browserSession : text }] };
       }
       if (name === "agent_browser_screenshot") return { content: [{ type: "text", text: `screenshot receipt ${++screenshots}` }, image] };
       return { content: [{ type: "text", text: "clicked " + "+".repeat(2_000) }] };

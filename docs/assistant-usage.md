@@ -560,6 +560,15 @@ npm run harness -- computer return
 
 未配置驱动时 status 显示 disabled。接管会立即阻止新动作并等待当前调用结束；`takingOver`、`busy` 和 `uncertain` 分别显示等待、当前操作及结果不明。回交或重连后重新获得租约并观察。
 
+在配置文件的 `browserProfiles` 对象中可以登记多个浏览器。每个配置使用相同的 `command`、`args`、`tools` 和可选的 `observationTools` 字段，指向固定会话的 agent-browser 适配。各配置使用不同的会话名。任务创建后，接管和回交沿当时选定的配置进行。 [配置方式与源码出处](superpowers/plans/2026-11-27-browser-sign-in-handoff.md#任务选择浏览器配置)
+
+```powershell
+npm run harness -- computer profiles
+npm run harness -- run "核对本地测试网页" --browser-profile review
+npm run harness -- computer status --browser-profile review
+npm run harness -- computer return --browser-profile review
+```
+
 同一次租约取得更新的同类观察后，模型请求会省略已被替代的大段快照或截图图片。完整观察保留在 Pi 会话历史中。交互快照、完整快照和截图分别处理。
 
 任务请你登录或验证时，在接回原任务的终端输入 `/sign-in 问题ID`。在能看到的原浏览器会话完成操作，然后用 `/signed-in 问题ID` 回交，或用 `/decline-sign-in 问题ID` 拒绝。后台重启后保留用户控制。回交后，原任务重新观察页面再继续。任务已放弃时，可用 `computer return` 交还控制权。密码与验证码请在浏览器中输入。 [实现与验收](superpowers/plans/2026-11-27-browser-sign-in-handoff.md)

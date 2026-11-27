@@ -58,7 +58,9 @@ async function main() {
   const tools:Tool[]=Object.entries(methods).map(([name,method])=>({name,description:`Use the installed agent-browser CLI to ${method} in this isolated local test page. For actions, use the latest @eN control ref.`,
     inputSchema:{type:'object',additionalProperties:false,properties:{...common,...(method==='open' ? {url:{type:'string'},headed:{type:'boolean'},webmcp:{type:'boolean'}} : method==='snapshot' ? {interactive:{type:'boolean'}} : method==='fill' ? {selector,text:{type:'string'}} : method==='click' ? {selector} : method==='screenshot' ? {path:{type:'string'}} : {})},
       ...(method==='fill' ? {required:['selector','text']} : method==='click' ? {required:['selector']} : {})},annotations:{readOnlyHint:method==='snapshot'}}));
-  const server=new Server({name:'kada-agent-browser-cli',version:'1.0.0'},{capabilities:{tools:{}}});
+  const server=new Server({name:'kada-agent-browser-cli',version:'1.0.0'},{
+    capabilities:{tools:{}}, instructions:JSON.stringify({browserSession:scope.session}),
+  });
   server.setRequestHandler(ListToolsRequestSchema,async()=>({tools}));
   server.setRequestHandler(CallToolRequestSchema,async(request,context)=>{
     try {

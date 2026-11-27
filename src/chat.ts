@@ -32,7 +32,8 @@ export class ChatSession {
   private shownApprovals = new Map<string, string>();
   private shownAssistantWork = new Map<string, string>();
   private pendingThread?: { source: string; title: string; message: string; reportBack: boolean; modelId?: string; requestId: string };
-  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef, private collaborators?: AssistantCollaboratorRef[]) {}
+  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>,
+    private assistant?: AssistantRef, private collaborators?: AssistantCollaboratorRef[], private browserProfile?: string) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
   private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); this.shownAssistantWork.clear(); }
   async attach(id: string): Promise<void> {
@@ -381,8 +382,10 @@ export class ChatSession {
     if (!this.taskId) {
       if (this.assistant && !await this.client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；请重启到当前版本，角色请求不会降级为普通任务。');
       if (this.collaborators && !await this.client.healthy('assistant-collaboration')) throw new Error('请重启到支持助手协作的后台版本。');
+      if (this.browserProfile && !await this.client.healthy('browser-profiles')) throw new Error('请重启到支持浏览器配置的后台版本。');
       const task = await this.client.request<TaskMeta>("/v1/tasks", "POST", { objective: message, workspace: this.workspace ?? (this.assistant || this.collaborators ? process.cwd() : undefined), confirmed,
-        ...(this.assistant ? { assistant: this.assistant } : {}), ...(this.collaborators ? { collaborators: this.collaborators } : {}), ...(confirmed ? {} : { mode: "chat" }) });
+        ...(this.assistant ? { assistant: this.assistant } : {}), ...(this.collaborators ? { collaborators: this.collaborators } : {}),
+        ...(this.browserProfile ? { browserProfile: this.browserProfile } : {}), ...(confirmed ? {} : { mode: "chat" }) });
       this.select(task.id);
       if (task.assistant) this.info(assistantText(task));
       this.info(confirmed ? `任务：${task.id}\n输出目录：${task.workspace}\n沿用已有授权与配置预算直接执行。费用上限 $${task.maxEstimatedCostUsd ?? 1}，配置时限 ${(task.deadlineAt - task.createdAt) / 60_000} 分钟。`
@@ -527,9 +530,10 @@ export class ChatSession {
 }
 
 export async function runChat(client: HarnessClient, options: {
-  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[];
+  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef;
+  collaborators?: AssistantCollaboratorRef[]; browserProfile?: string;
 } = {}): Promise<void> {
-  if (options.taskId && (options.assistant || options.collaborators)) throw new Error('仅新会话可以选择助手与同事。');
+  if (options.taskId && (options.assistant || options.collaborators || options.browserProfile)) throw new Error('仅新会话可以选择助手、同事和浏览器。');
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const terminal = Boolean((input as NodeJS.ReadStream).isTTY && (output as NodeJS.WriteStream).isTTY);
@@ -551,7 +555,7 @@ export async function runChat(client: HarnessClient, options: {
   const session = new ChatSession(client, render, options.workspace, terminal ? () => new Promise<string>((resolve, reject) => {
     hidden = { resolve, reject };
     output.write('受保护凭据输入（无回显，按 Enter 保存，Ctrl+C 取消）> ');
-  }) : undefined, options.assistant, options.collaborators);
+  }) : undefined, options.assistant, options.collaborators, options.browserProfile);
   output.write("Kada · 终端聊天\n直接聊天，需要实际交付时再确认任务说明与预算。/help 查看命令，/quit 退出。\n\n");
   let finish: () => void;
   const end = new Promise<void>(resolve => { finish = resolve; });
