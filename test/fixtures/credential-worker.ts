@@ -4,6 +4,7 @@ import { setTimeout } from 'node:timers/promises';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
 import { LocalRuntime } from '../../src/runtime.js';
 import { Questions } from '../../src/questions.js';
+import { WindowsCredentialProtection } from '../../src/windows-credential-protection.js';
 import { BACKGROUND_CONTEXT as ctx } from '@earendil-works/chord/context';
 import { until } from '../helpers.js';
 
@@ -59,7 +60,9 @@ try {
     if (JSON.stringify(done).includes(secret) || JSON.stringify(done).includes(replacement)) throw new Error('Public state contains a value.');
     const saved = await runtime.credentials.list(workspace);
     const disk = await readFile(join(directory, 'application-credentials', 'items.json'), 'utf8');
-    console.log(JSON.stringify({ type: 'completed', revision: saved[0].revision, replacementKept: disk.includes(replacement), oldValueAbsent: !disk.includes(secret),
+    const file = JSON.parse(disk);
+    const contents = file.schema === 2 ? await new WindowsCredentialProtection().open(file) : disk;
+    console.log(JSON.stringify({ type: 'completed', revision: saved[0].revision, replacementKept: contents.includes(replacement), oldValueAbsent: !contents.includes(secret),
       answers: done.messages.filter(message => message.role === 'user' && String(message.content).includes('Credential reports saved')).length,
       goal: done.goal ? 'existing' : null }));
   }

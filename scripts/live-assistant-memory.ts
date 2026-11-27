@@ -519,7 +519,13 @@ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
     assert.equal(credentialCalls,1,'one_authenticated_request');assert(!JSON.stringify(done).includes(protectedMarker!));
     const disk=await readFile(join(config.dataDir,'tasks',source.id,'session.sqlite'));
     assert(!disk.includes(Buffer.from(protectedMarker!)),'credential_absent_from_pi_storage');
-    evidence.applicationCredential={sourceTaskId:source.id,executionTaskId:task.id,protectedInput:true,valueAbsentFromModelAndPi:true,authenticatedRequests:credentialCalls,restartNoModel:true,chatGoalCreated:false,requests};
+    let windowsStorageProtected = false;
+    if (process.platform === 'win32') {
+      const credentialFile = await readFile(join(config.dataDir, 'application-credentials', 'items.json'), 'utf8');
+      assert(!credentialFile.includes(protectedMarker!) && JSON.parse(credentialFile).protection === 'windows-dpapi', 'windows_credential_file_protection');
+      windowsStorageProtected = true;
+    }
+    evidence.applicationCredential={sourceTaskId:source.id,executionTaskId:task.id,protectedInput:true,valueAbsentFromModelAndPi:true,authenticatedRequests:credentialCalls,restartNoModel:true,chatGoalCreated:false,requests,windowsStorageProtected};
   });
   await check('Q01-structured-question',async()=>{
     const source=await server.runtime.create('只问我一个普通选择题：周末想读书还是散步？请用 ask_user 提供“读书”和“散步”两个选项，然后等待。不创建任务说明，不执行工作。',alpha,[],{chat:true});tasks.add(source.id);

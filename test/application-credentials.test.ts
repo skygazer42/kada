@@ -14,6 +14,36 @@ async function fixture(t: test.TestContext) {
 }
 const value = 'synthetic-credential-value-42';
 
+test('Windows encrypts stored credentials on mutation and can reopen them under the same user', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t), project = join(f.directory, 'project');
+  const destination = { name: 'reports', origin: 'https://api.example', auth: { type: 'bearer' as const } };
+  await f.store.list(project);
+  const legacy = { ...destination, project, value, revision: 1, updatedAt: 42 };
+  const original = JSON.stringify({ schema: 1, salt: 'aa'.repeat(32), items: [legacy], operations: [] });
+  await writeFile(f.file, original);
+  assert.deepEqual(await f.store.list(project), [{ ...destination, revision: 1, updatedAt: 42 }]);
+  assert.equal(await readFile(f.file, 'utf8'), original);
+
+  const rotation = { ...destination, project, value: 'replacement-synthetic-value', expectedRevision: 1, requestId: 'legacy-rotation' };
+  const stored = await f.store.save(rotation);
+  const protectedBytes = await readFile(f.file, 'utf8');
+  assert.doesNotMatch(protectedBytes, /synthetic-credential-value-42|replacement-synthetic-value|legacy-rotation/);
+  const envelope = JSON.parse(protectedBytes);
+  assert.equal(envelope.schema, 2);
+  assert.equal(envelope.protection, 'windows-dpapi');
+  const reopened = new ApplicationCredentials(f.directory);
+  assert.deepEqual(await reopened.list(project), [stored]);
+  assert.deepEqual(await reopened.save(rotation), stored);
+  assert.equal(await readFile(f.file, 'utf8'), protectedBytes);
+  const tag = Buffer.from(envelope.tag, 'base64');
+  tag[0] = tag[0]! ^ 1;
+  const damaged = JSON.stringify({ ...envelope, tag: tag.toString('base64') });
+  await writeFile(f.file, damaged);
+  await assert.rejects(reopened.list(project), /Stored application credentials/);
+  await assert.rejects(reopened.save({ ...rotation, expectedRevision: 2, requestId: 'after-damage' }), /Stored application credentials/);
+  assert.equal(await readFile(f.file, 'utf8'), damaged);
+});
+
 test('application credentials retain project, revision and original save receipts without returning values', async t => {
   const f = await fixture(t), project = join(f.directory, 'project'), other = join(f.directory, 'other');
   const input = { project, name: 'reports', origin: 'https://api.example/', auth: { type: 'bearer' as const }, value, expectedRevision: 0, requestId: 'save-original' };

@@ -8,6 +8,7 @@ import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 import { atomicJson, readJson, SerialQueue } from './util.js';
+import { WindowsCredentialProtection, type ProtectedCredentialFile } from './windows-credential-protection.js';
 
 export type CredentialAuth = { type: 'bearer' } | { type: 'header'; name: string } | { type: 'basic'; username: string };
 export type CredentialDestination = { name: string; origin: string; auth: CredentialAuth };
@@ -85,6 +86,7 @@ export class ApplicationCredentials {
   private readonly directory: string;
   private readonly path: string;
   private readonly queue = new SerialQueue();
+  private readonly protection = new WindowsCredentialProtection();
   constructor(dataDir: string, private readonly network: CredentialNetwork = {}) { this.directory = join(dataDir, 'application-credentials'); this.path = join(this.directory, 'items.json'); }
   private async exclusive<T>(action: () => Promise<T>) {
     return this.queue.run(async () => {
@@ -95,7 +97,10 @@ export class ApplicationCredentials {
   }
   private async load(): Promise<Saved> {
     let saved: Saved;
-    try { saved = await readJson<Saved>(this.path); }
+    try {
+      const file = await readJson<Saved | ProtectedCredentialFile>(this.path);
+      saved = file?.schema === 2 ? JSON.parse(await this.protection.open(file)) as Saved : file;
+    }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schema: 1, salt: randomBytes(32).toString('hex'), items: [], operations: [] };
       throw new CredentialError(400, 'Stored application credentials could not be read.');
@@ -116,6 +121,12 @@ export class ApplicationCredentials {
         new Set(saved.operations.map(operation => operation.requestId)).size !== saved.operations.length) throw new Error('Duplicate stored identity.');
     } catch { throw new CredentialError(400, 'Stored application credentials are invalid.'); }
     return saved;
+  }
+  private async persist(saved: Saved) {
+    const file = process.platform === 'win32'
+      ? await this.protection.seal(JSON.stringify(saved))
+      : saved;
+    await atomicJson(this.path, file);
   }
   async list(project: string): Promise<ApplicationCredential[]> {
     projectKey(project);
@@ -147,7 +158,7 @@ export class ApplicationCredentials {
       if (index < 0) saved.items.push(next); else saved.items[index] = next;
       const result = metadata(next);
       saved.operations.push({ requestId: input.requestId, digest, result });
-      await atomicJson(this.path, saved);
+      await this.persist(saved);
       return result;
     });
   }
@@ -159,7 +170,7 @@ export class ApplicationCredentials {
       if (item.revision !== revision) throw new CredentialError(409, 'The credential changed. Read its current revision before deleting it.');
       if (item.deleted) return;
       delete item.value; item.deleted = true; item.revision++; item.updatedAt = Date.now();
-      await atomicJson(this.path, saved);
+      await this.persist(saved);
     });
   }
   async request(project: string, input: CredentialRequest, parentSignal?: AbortSignal): Promise<{ status: number; body: string; headers: Record<string, string>; truncated: boolean; withheld: boolean }> {

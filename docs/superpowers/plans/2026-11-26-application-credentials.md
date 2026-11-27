@@ -13,8 +13,8 @@
 - 新本机主会话固定原项目凭据能力；远程、旧任务、子任务不自动获得账户使用能力。远程可填原本机明确分享的请求卡是后续独立权限项，本轮先提供 owner 本机遮罩入口。
 - `request_credential` 只接受 name、origin、label、reason 和 auth（bearer/header/basic），不接受 secret/value。复用 Questions 身份和当前回合等待，模型只得到已保存/拒绝的通用结果。普通聊天不创建 Goal；准备/执行任务保持原等待阶段。
 - 用户从终端 `/credential 问题ID` 无回显输入，或 macOS 密码字段填入。值不作为普通 messages/answer 路由或工具参数提交。owner `POST /v1/tasks/:id/credentials/:questionId` 只在当前原问题/项目、控制与预算允许时接收；其他问题、已取消或错修订拒绝。
-- 凭据记录以项目+名称定位，绑定规范 HTTPS origin 与认证类型，原子保存修订及提供请求回执。重复提供原请求/原值返回原 receipt，不覆盖后来的轮换；异内容冲突。明文值只在私有应用凭据文件及实际请求注入存在，公开列表只见名称、站点、认证类型和修订。现有用户历史凭据不读取或改写。
-- 私有路径 `application-credentials/`，默认 Git 忽略，提交检查拒绝强制暂存；现有原子写入 mode 0600/目录0700 在适用系统生效，Windows 沿用户目录权限。该存储是受限本地文件，不冒称系统密钥库或对本机任意代码的秘密隔离。
+- 凭据以项目和名称定位，绑定 HTTPS origin 与认证类型。写入一次保存修订及请求回执，重复请求返回原结果。公开列表只返回名称、站点、认证类型和修订。
+- Git 忽略 `application-credentials/`，提交检查覆盖强制暂存。Windows 新写入用 DPAPI 保护的数据密钥加密。原明文记录可直接使用，并在下一次成功写入时迁移。其他平台使用限权文件。 [Windows 存储](2026-11-26-windows-application-credential-protection.md)
 - `credentials_list` 只读当前项目元数据；owner CLI 可删除指定修订。`credential_request` 只在已确认执行 Goal 内提供，使用名称及固定修订，支持 GET/HEAD/POST/PUT/PATCH/DELETE。原 scope/预算仍约束任务；工具无自动重放/重试，外部结果未知须先核对。
 - 请求只向原 origin 注入认证头，拒绝 userinfo、片段、非 HTTPS、重定向以及尝试覆盖认证/Host/连接等头。先验证 DNS 的全部地址为 public，并将本次连接 lookup 固定到通过的地址，防止再次解析切换；保留 TLS 主机名验证。测试通过注入 transport/lookup 使用本机合成服务，不增加生产内网开关。
 - 请求/响应各有界，30 秒总限时，响应最多1MB并截断给模型至20k字符。脱敏先于截断，至少覆盖原值、认证头值、percent/base64形式；不返回任意响应头，仅允许分页/限速字段，回显失败错误使用通用文字。值不写日志、命令行或测试证据。
@@ -40,7 +40,7 @@ DeepSeek V3.2 经硅基流动执行 5 次请求、33,461 总 token：中文发�
 
 另用临时生成且显式信任的本地 CA 完成真实 TLS 握手，正确主机名请求一次，错误主机名在 HTTP 前被拒绝；未关闭 rejectUnauthorized。路由与 CA 是测试注入，不能证明真实第三方 DNS/API 兼容。[本地 TLS 记录](../../experiments/2026-11-26-application-credential-local-tls.json)
 
-Swift 四文件语法解析通过，macOS 编译与实机仍未验收。自动独立审查因缺少 TruffleHog 在调用审查模型前退出；既往委派的审查也未获得有效代码审查结果，因此本次没有独立审查通过结论。保留本地明文、任意服务变换回显不保证识别、网页登录/OTP、系统密钥库、远程输入等限制。
+Swift 四文件语法解析通过，macOS 编译与实机待验收。自动独立审查缺少 TruffleHog，在调用审查模型前退出。实际回显检查覆盖记录中的编码形式。网页登录、验证码、其他系统的密钥库和远程输入待补。 [Windows 存储](2026-11-26-windows-application-credential-protection.md)
 
 ## 取舍
 

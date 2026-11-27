@@ -192,7 +192,7 @@ npm run harness -- credentials list --workspace E:/project
 npm run harness -- credentials remove reports 1 --workspace E:/project
 ```
 
-列表只返回元数据，删除须使用显示的当前修订。替换由新凭据请求完成，重复提交原请求只确认原结果，不覆盖后来的轮换或删除。值保存于 dataDir 的 `application-credentials/items.json`；这是受限本地明文文件，Git 忽略并由提交检查阻止暂存，适用平台使用 0600/0700。Windows 沿用户目录权限，尚未接系统密钥库，也不隔离本机任意文件工具。网页登录、验证码和远程遮罩输入仍未提供。[参考及验收计划](superpowers/plans/2026-11-26-application-credentials.md)
+列表只返回元数据，删除须使用显示的当前修订。替换由新凭据请求完成，重复提交返回该请求的原回执。凭据文件为 dataDir 的 `application-credentials/items.json`，Git 忽略该路径并检查强制暂存。Windows 写入使用当前用户 DPAPI 保护的数据密钥。旧文件在首次成功修改时迁移，移机恢复需要能解开密钥的 Windows 用户配置。其他系统使用限权的本机文件。网页登录、验证码和远程输入待补。 [Windows 存储与验收](superpowers/plans/2026-11-26-windows-application-credential-protection.md)
 
 ## 模型与方法
 
