@@ -210,5 +210,7 @@ try {
   await operator.close();
   if(page) {page.closeAllConnections();await new Promise<void>(done=>page!.close(()=>done()));}
   const report={at:new Date().toISOString(),mode:flags.live ? 'siliconflow' : 'scripted-model',realDriver:true,localPageOnly:true,fixture:directory.slice(artifactRoot.length+1),limits,modelRequests:requests,usage,stage,proof};
-  await writeFile(resolve('docs/experiments/2026-11-23-computer-browser'+(flags.live ? '-live' : '')+'.json'),JSON.stringify(report,null,2)+'\n');
+  const resultPath = join(directory, 'result.json');
+  await writeFile(resultPath, JSON.stringify(report, null, 2) + '\n');
+  console.log('Evidence: ' + resultPath);
 }

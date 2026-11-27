@@ -457,6 +457,8 @@ npm run test:computer:browser -- --live --command C:/path/to/agent-browser-win32
 
 测试自建合成本地页面和临时配置，不改日常 daemon。第一条用脚本化模型驱动真实浏览器；第二条使用硅基流动，默认 DeepSeek-V3.2，凭据沿用前文的环境变量或终端无回显输入。验证会调用原接管 API、通过独立操作端修改页面、强制中断并重连驱动，然后让同一 Pi 任务重新观察并交付 JSON。这里的操作端由测试自动模拟，并非人工操作记录。
 
+每次运行在独立的 `.harness/computer-browser-…/result.json` 保存结果，终端输出该文件的路径。
+
 任务状态与 `/v1/tasks/:id/view` 的 `delegations` 显示 Pi 子会话职责、状态、结果目录与用量。接回任务后，主 Agent 可通过 `task_status` 查询已有子任务和原结果。常规响应显示完整用户要求、待办和简要失败信息，完整确认说明与证据可按需读取。任务总用量已包含子会话。
 
 已授权的本地任务可通过 `delegate_background` 启动一批子任务，收到回执后继续独立工作。子任务使用 Pi 原生本地文件和终端工具。结果就绪后，主会话会收到一次提示，读取结果后再交付。
