@@ -114,7 +114,7 @@ try {
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
-  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants','rooms','voice','snapshots'].includes(command)) {
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants','rooms','voice','snapshots','gmail'].includes(command)) {
     const {ensureDaemon} = await import('./daemon.js');
     await ensureDaemon(config,args.values.config);
     const action = id ?? 'list';
@@ -226,6 +226,19 @@ try {
         result = await request(path + '/' + segment(id) + '/' + action, 'POST', { accountId, deviceId });
       }
       else throw new Error('Use work-items list, board, board-link, edit-board, calendar, calendar-source, calendar-clear, add, edit, runs, run, share or unshare.');
+    }
+    else if (command === 'gmail') {
+      const query = '?' + new URLSearchParams({ workspace });
+      const source = '/v1/gmail/source' + query;
+      if (action === 'source' && rest.length <= 1) result = rest.length ? await request(source, 'PUT', await json(rest[0])) : await request(source);
+      else if (action === 'clear' && !rest.length) result = await request(source, 'DELETE');
+      else if (action === 'search' && rest[0] && rest.length <= 2) {
+        result = await request('/v1/gmail/search' + query, 'POST', { query: rest[0], pageToken: rest[1] });
+      } else if (action === 'read' && rest[0] && (rest.length === 1 || rest.length === 3)) {
+        result = await request('/v1/gmail/message' + query, 'POST', {
+          id: rest[0], ...(rest[1] === undefined ? {} : { offset: Number(rest[1]), sha256: rest[2] }),
+        });
+      } else throw new Error('Use gmail source [SOURCE.json], search QUERY [PAGE_TOKEN], read ID [OFFSET SHA256] or clear.');
     }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {

@@ -298,6 +298,28 @@ npm run harness -- work-items calendar-clear --workspace E:/project
 
 打开看板的截止日历即可浏览本月外部日程。工作项日期沿其保存时区显示，外部日程沿日历来源所选时区显示。 [工具契约与验收](superpowers/plans/2026-11-27-project-calendar.md)
 
+### Gmail
+
+在 Google Workspace MCP 的 Gmail 连接上启用只读的 `search_gmail_messages` 和 `get_gmail_message_content`，并允许项目使用它们。将 MCP 连接 ID、当前测试修订和邮箱地址保存为配置文件。
+
+```json
+{
+  "id": "mail",
+  "revision": "当前连接修订",
+  "email": "team@example.com"
+}
+```
+
+```powershell
+npm run harness -- gmail source mailbox.json --workspace E:/project
+npm run harness -- gmail search "in:inbox" --workspace E:/project
+npm run harness -- gmail read MESSAGE_ID --workspace E:/project
+npm run harness -- gmail read MESSAGE_ID NEXT_OFFSET BODY_SHA256 --workspace E:/project
+npm run harness -- gmail clear --workspace E:/project
+```
+
+搜索结果提供邮件 ID 和后续页的令牌。把令牌作为 `gmail search` 的第二个参数继续查询。读取正文时，用返回的 `next_offset` 和 `body_sha256` 接回原邮件版本。 [源码与验收](superpowers/plans/2026-11-27-project-gmail.md)
+
 在看板的 **分配助手** 选择同项目助手与修订。终端工作项 JSON 可带 `"assignee": { "id": "助手ID", "revision": 1 }`，用 `null` 清空。由用户发起工作项运行后，Pi 使用所选角色准备并等待原确认。角色更新后，新运行需要重新选择当前版本，已有运行按原版本处理。
 
 配对手机获得查看后，本机可用 `work-items share-edits 工作项ID 账户ID 设备ID` 开启该卡的 **Edit work item**。手机保存名称、说明、状态、优先级、截止日期或时刻及其时区。旧修订出现冲突时可保留草稿，选择 **Load current fields** 读取最新字段。用 `work-items unshare-edits` 撤回编辑。 [分配与手机编辑验收](superpowers/plans/2026-11-26-work-item-assignees.md)

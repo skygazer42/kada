@@ -23,6 +23,7 @@ import { watchGithubIssues } from "./github-routine-events.js";
 import { githubWebhook } from './github-webhook.js';
 import { createWorkboardAccess } from './workboard-access.js';
 import { ProjectCalendars } from './project-calendars.js';
+import { ProjectGmail } from './project-gmail.js';
 import { createProjectModelAccess } from './project-model-access.js';
 import { createProjectMcpAccess } from './project-mcp-access.js';
 import { createProjectAssistantsAccess } from './project-assistants-access.js';
@@ -52,6 +53,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   let remote: ReturnType<typeof createRemoteHandler>;
   let workboard: ReturnType<typeof createWorkboardAccess>;
   let calendars: ProjectCalendars;
+  let gmail: ProjectGmail;
   let projectModels: ReturnType<typeof createProjectModelAccess>;
   let projectMcp: ReturnType<typeof createProjectMcpAccess>;
   let projectAssistants: ReturnType<typeof createProjectAssistantsAccess>;
@@ -332,6 +334,20 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         const access = action!.endsWith('-controls') ? 'controls' : action!.endsWith('-replies') ? 'replies' : 'view';
         return send(200, await devices.setSharedThread(accountId, deviceId, id!, shared, access));
       }
+      const mailbox = /^\/v1\/gmail\/(source|search|message)$/.exec(url.pathname)?.[1];
+      if (mailbox) {
+        const workspace = url.searchParams.get('workspace');
+        if (!workspace) return send(400, { error: 'Provide the project workspace.' });
+        if (mailbox === 'source') {
+          if (req.method === 'GET') return send(200, await gmail.source(workspace));
+          if (req.method === 'PUT') return send(200, await gmail.setSource(workspace, await body(req)));
+          if (req.method === 'DELETE') return send(200, await gmail.clearSource(workspace));
+        } else if (req.method === 'POST') {
+          const input = await body(req);
+          return send(200, mailbox === 'search' ? await gmail.search(workspace, input) : await gmail.message(workspace, input));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       if (url.pathname === '/v1/notifications' && req.method === 'GET') return send(200,await runtime.notifications());
       const notification = /^\/v1\/notifications\/([a-f0-9]{64})\/read$/.exec(url.pathname);
       if (notification && req.method === 'POST') return send(200,await runtime.readNotification(notification[1]!));
@@ -583,6 +599,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     const models = options?.models ?? cloudModels();
     runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
     calendars = new ProjectCalendars(config.dataDir, runtime.mcp);
+    gmail = new ProjectGmail(config.dataDir, runtime.mcp);
     workboard = createWorkboardAccess(runtime.workItems, calendars, `http://127.0.0.1:${config.port}`, body);
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
     projectMcp = createProjectMcpAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
