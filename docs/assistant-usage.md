@@ -192,7 +192,7 @@ npm run harness -- credentials list --workspace E:/project
 npm run harness -- credentials remove reports 1 --workspace E:/project
 ```
 
-列表只返回元数据，删除须使用显示的当前修订。替换由新凭据请求完成，重复提交返回该请求的原回执。凭据文件为 dataDir 的 `application-credentials/items.json`，Git 忽略该路径并检查强制暂存。Windows 写入使用当前用户 DPAPI 保护的数据密钥。旧文件在首次成功修改时迁移，移机恢复需要能解开密钥的 Windows 用户配置。其他系统使用限权的本机文件。网页登录、验证码和远程输入待补。 [Windows 存储与验收](superpowers/plans/2026-11-26-windows-application-credential-protection.md)
+列表只返回元数据，删除须使用显示的当前修订。替换由新凭据请求完成，重复提交返回该请求的原回执。凭据文件为 dataDir 的 `application-credentials/items.json`，Git 忽略该路径并检查强制暂存。Windows 写入使用当前用户 DPAPI 保护的数据密钥。旧文件在首次成功修改时迁移，移机恢复需要能解开密钥的 Windows 用户配置。其他系统使用限权的本机文件。网页登录和人工验证可在本机浏览器交接。 [Windows 存储与验收](superpowers/plans/2026-11-26-windows-application-credential-protection.md) · [浏览器登录交接](superpowers/plans/2026-11-27-browser-sign-in-handoff.md)
 
 ## 模型与方法
 
@@ -448,6 +448,8 @@ npm run harness -- computer return
 
 同一次租约取得更新的同类观察后，模型请求会省略已被替代的大段快照或截图图片。完整观察保留在 Pi 会话历史中。交互快照、完整快照和截图分别处理。
 
+任务请你登录或验证时，在接回原任务的终端输入 `/sign-in 问题ID`。在能看到的原浏览器会话完成操作，然后用 `/signed-in 问题ID` 回交，或用 `/decline-sign-in 问题ID` 拒绝。后台重启后保留用户控制。回交后，原任务重新观察页面再继续。任务已放弃时，可用 `computer return` 交还控制权。密码与验证码请在浏览器中输入。 [实现与验收](superpowers/plans/2026-11-27-browser-sign-in-handoff.md)
+
 首个真实驱动选择为已安装的 agent-browser 0.38.1，仅用于本地测试网页。它的原生 MCP 端点在本机调用超时，因此提供 `scripts/agent-browser-stdio.ts` 薄适配，仍由现成 CLI 执行浏览器操作。会话、页面和截图路径固定，不提供任意 JavaScript 或 Shell。当前 CLI 不支持安全传递以 `-` 开头的填写值，适配会明确拒绝。
 
 ```powershell
@@ -455,7 +457,7 @@ npm run test:computer:browser -- --command C:/path/to/agent-browser-win32-x64.ex
 npm run test:computer:browser -- --live --command C:/path/to/agent-browser-win32-x64.exe
 ```
 
-测试自建合成本地页面和临时配置，不改日常 daemon。第一条用脚本化模型驱动真实浏览器；第二条使用硅基流动，默认 DeepSeek-V3.2，凭据沿用前文的环境变量或终端无回显输入。验证会调用原接管 API、通过独立操作端修改页面、强制中断并重连驱动，然后让同一 Pi 任务重新观察并交付 JSON。这里的操作端由测试自动模拟，并非人工操作记录。
+测试自建合成本地验证页和临时配置。第一条用脚本化模型驱动真实浏览器。第二条使用硅基流动，默认 DeepSeek-V3.2，凭据沿用前文的环境变量或终端无回显输入。独立操作端自动模拟用户接管和输入合成验证码。脚本强制中断并重连驱动，再让同一 Pi 任务经回交重新观察并交付 JSON。
 
 每次运行在独立的 `.harness/computer-browser-…/result.json` 保存结果，终端输出该文件的路径。
 

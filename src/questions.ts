@@ -6,8 +6,8 @@ import type { InputImage } from './input-images.js';
 import type { CredentialDestination } from './application-credentials.js';
 
 export type UserQuestion = { id: string; text: string; options: string[]; detail?: string; createdAt: number;
-  credential?: CredentialDestination & { expectedRevision: number } };
-type SavedQuestion = UserQuestion & { submissionId: SubmissionId; revision?: number; epoch?: number; retired?: true; answer?: { requestId: string; text: string } };
+  browserSignIn?: 'login' | 'verification'; credential?: CredentialDestination & { expectedRevision: number } };
+type SavedQuestion = UserQuestion & { browserDriver?: string; submissionId: SubmissionId; revision?: number; epoch?: number; retired?: true; answer?: { requestId: string; text: string } };
 export const Questions = defineDoc<{
   current?: string; questions: Record<string, SavedQuestion>;
   outbox?: { questionId: string; requestId: string; content: string; images?: InputImage[] };
@@ -31,8 +31,9 @@ export async function currentQuestion(harness: Harness, conversation: Conversati
   const state = await harness.snapshot(Questions, conversation, context), question = state?.current ? state.questions[state.current] : undefined;
   if (!question || question.answer || question.retired || question.submissionId !== submissionId ||
     (goal ? question.revision !== goal.revision || question.epoch !== goal.epoch || !['waiting_user', 'clarifying'].includes(goal.phase) : question.revision !== undefined)) return null;
-  const { id, text, options, detail, createdAt, credential } = question;
-  return plain({ id, text, options, createdAt, ...(detail ? { detail } : {}), ...(credential ? { credential } : {}) });
+  const { id, text, options, detail, createdAt, credential, browserSignIn } = question;
+  return plain({ id, text, options, createdAt, ...(detail ? { detail } : {}), ...(credential ? { credential } : {}),
+    ...(browserSignIn ? { browserSignIn } : {}) });
 }
 
 export async function recordQuestionAnswer(tx: Tx, conversation: ConversationId, questionId: string, requestId: string, text: string, goal?: GoalState, protectedInput = false) {
@@ -40,6 +41,7 @@ export async function recordQuestionAnswer(tx: Tx, conversation: ConversationId,
   for (const other of Object.values(state.questions)) if (other.id !== questionId && other.answer?.requestId === requestId) throw new QuestionError(409, 'This request ID already answered another question.');
   if (!question) throw new QuestionError(409, 'This question is no longer available.');
   if (question.credential && !protectedInput) throw new QuestionError(400, 'Use the protected credential input; do not send a credential in chat.');
+  if (question.browserSignIn && !protectedInput) throw new QuestionError(400, 'Use the browser sign-in controls to answer this request.');
   if (question.answer) {
     if (question.answer.requestId !== requestId || question.answer.text !== text) throw new QuestionError(409, 'This question already has a different answer.');
     return;
@@ -50,7 +52,7 @@ export async function recordQuestionAnswer(tx: Tx, conversation: ConversationId,
   question.answer = { requestId, text };
 }
 
-export async function saveQuestion(api: ToolExecutionApi, data: Pick<UserQuestion, 'text' | 'options' | 'detail' | 'credential'>, preparation: boolean, remote: boolean, ctx: typeof context, toolName = 'ask_user') {
+export async function saveQuestion(api: ToolExecutionApi, data: Pick<SavedQuestion, 'text' | 'options' | 'detail' | 'credential' | 'browserSignIn' | 'browserDriver'>, preparation: boolean, remote: boolean, ctx: typeof context, toolName = 'ask_user') {
   const hasGoal = (await api.snapshot(GoalDoc, ctx))?.initialized, id = String(api.taskId);
   await api.commit(async tx => {
     const state = await tx.doc(Questions, api.conversationId);
@@ -72,7 +74,9 @@ export async function saveQuestion(api: ToolExecutionApi, data: Pick<UserQuestio
     }, remote ? api.conversationId : undefined);
     else if (remote) await tx.appendEntry(api.conversationId, { kind: 'local.goal.remote_progress', data: { event: 'waiting_user', timestamp: api.now() } });
   }, ctx);
-  return { output: [{ type: 'text' as const, text: toolName === 'request_credential' ? 'Protected credential input requested. Never ask for its value in chat.' : 'Question saved; wait for the user answer.' }], control: { terminate: true } };
+  const text = data.browserSignIn ? 'Browser handoff requested. Wait for the user to take over and respond. Passwords and codes belong in the browser.'
+    : toolName === 'request_credential' ? 'Protected credential input requested. Never ask for its value in chat.' : 'Question saved; wait for the user answer.';
+  return { output: [{ type: 'text' as const, text }], control: { terminate: true } };
 }
 
 export function questionExtension(preparation: boolean, remote: boolean) {

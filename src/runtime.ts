@@ -195,7 +195,10 @@ interface Active {
   /** Disposable cache derived from Pi entries; rebuilt from storage after reopening. */
   compactionCounts: Map<Conversation["id"], { last?: EntryId; count: number }>;
 }
-export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'|'browserKey'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+type BrowserHold = { taskId: string; questionId: string };
+const browserSignInRequest = (questionId: string) => 'browser-sign-in-' + questionId;
+const browserSignInCompleted = 'The user finished the requested browser step. Acquire a new lease and observe the browser before continuing.';
 
 /** Each top-level task owns a Pi session. The host, rather than the model, decides completion. */
 export class LocalRuntime {
@@ -210,6 +213,8 @@ export class LocalRuntime {
   private active = new Map<string, Active>();
   private pendingThreadReports = new Map<string, ThreadReport>();
   private changes = new SerialQueue();
+  private computerCommands = new SerialQueue();
+  private browserHold: BrowserHold | null = null;
   private closing = false;
   private ticking = false;
   private timer: NodeJS.Timeout;
@@ -517,6 +522,7 @@ export class LocalRuntime {
     return store.capture(await Workspace.open(status.workspace,{create:false}),status.goal,id,path);
   }
   async recover(): Promise<void> {
+    await this.restoreBrowserHold();
     const metadata=await this.metadataList(true);
     for(const meta of metadata) if(meta.control==='budget_limited' && meta.routineOccurrenceId) await this.routines.settleBudget(meta.routineOccurrenceId);
     for (const meta of metadata) {
@@ -1190,7 +1196,7 @@ export class LocalRuntime {
       const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp).extension : undefined;
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
-      if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id));
+      if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id, meta.structuredQuestions === true));
       const coordinatorOnly = [goal, verification, ...posts, ...(snapshots ? [snapshots] : []), ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
@@ -1622,6 +1628,18 @@ export class LocalRuntime {
   private async dispatchOutbox(active: Active): Promise<void> {
     const outbox = (await readGoal(active.harness)).outbox;
     if (!outbox) return;
+    const signInId = /^user:browser-sign-in-(\d{1,20})$/.exec(outbox.requestId)?.[1];
+    if (signInId) {
+      const question = (await active.harness.snapshot(Questions, active.root.id, ctx))?.questions[signInId];
+      if (question?.browserSignIn && question.answer?.requestId === outbox.requestId) {
+        await this.computerCommands.run(async () => {
+          if (question.answer?.text === browserSignInCompleted && this.options.computer?.browserKey?.() !== question.browserDriver) {
+            throw new QuestionError(409, 'Reconnect the original browser driver before resuming the task.');
+          }
+          if (this.browserHold?.taskId === active.meta.id && this.browserHold.questionId === signInId) await this.returnBrowserHold();
+        });
+      }
+    }
     const admitted = await active.harness.commit(tx => tx.submissionByRequest(active.root.id, outbox.requestId), ctx);
     if (!admitted) await active.root.submit({ type: "input", content: await imageInput(outbox.content, outbox.images,
       this.options.models.getModel(active.meta.model.provider, active.meta.model.modelId)!), requestId: outbox.requestId, whenBusy: "steer" }, ctx);
@@ -2300,6 +2318,69 @@ export class LocalRuntime {
     if (!file) throw new VoiceNoteError(404, 'No saved audio for this speech request.');
     return verifyVoiceReply(await Workspace.open(join(this.directory(id), 'voice'), { create: false }), file);
   }
+  private async saveBrowserHold(hold: BrowserHold | null) {
+    await atomicJson(join(this.config.dataDir, 'browser-handoff.json'), hold);
+    this.browserHold = hold;
+  }
+  private async restoreBrowserHold() {
+    const hold = await readJson<BrowserHold | null>(join(this.config.dataDir, 'browser-handoff.json')).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (hold === null) return;
+    if (!/^[a-f0-9-]{36}$/.test(hold.taskId) || !/^\d{1,20}$/.test(hold.questionId)) throw new Error('Invalid saved browser handoff.');
+    this.browserHold = hold;
+    await this.options.computer?.takeover?.();
+  }
+  private async returnBrowserHold() {
+    const status = await this.options.computer?.returnControl?.();
+    if (this.browserHold) await this.saveBrowserHold(null);
+    return status;
+  }
+  computerControl(action: 'takeover' | 'return') {
+    return this.computerCommands.run(async () => {
+      const computer = this.options.computer;
+      if (!computer?.takeover || !computer.returnControl) throw new Error('Computer control is disabled. Select an existing driver before taking control.');
+      return action === 'takeover' ? computer.takeover() : this.returnBrowserHold();
+    });
+  }
+  async browserSignIn(id: string, questionId: string, action: 'takeover' | 'continue' | 'decline'): Promise<void> {
+    if (!/^\d{1,20}$/.test(questionId)) throw new QuestionError(400, 'Provide the displayed browser sign-in request ID.');
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (meta.remotePolicy) throw new QuestionError(404, 'Browser sign-in request not found.');
+      if (meta.control !== 'active' || meta.thread?.archivedAt) throw new QuestionError(409, 'Resume the original task before handling its browser request.');
+      const active = await this.open(meta, false), goal = await this.goalState(active);
+      const saved = (await active.harness.snapshot(Questions, active.root.id, ctx))?.questions[questionId];
+      if (!saved?.browserSignIn) throw new QuestionError(404, 'Browser sign-in request not found.');
+      const message = action === 'decline' ? 'The user declined the requested browser step. Continue only if there is another authorized path.'
+        : browserSignInCompleted;
+      const requestId = browserSignInRequest(questionId);
+      if (saved.answer && action !== 'takeover') return this.followUpTask(id, message, requestId, undefined, undefined, { id: questionId }, true);
+      const input = await this.latestInput(active);
+      const question = await currentQuestion(active.harness, active.root.id, input?.id, goal);
+      if (!goal || question?.id !== questionId || input?.status !== 'done') throw new QuestionError(409, 'This browser sign-in request changed or is still being saved.');
+      if (Date.now() >= this.deadline(active, goal) || await this.budgetReason(active, goal)) {
+        throw new QuestionError(409, 'Resume the original task budget before answering its browser request.');
+      }
+      if (action !== 'decline') await this.computerCommands.run(async () => {
+        const computer = this.options.computer, status = computer?.status?.();
+        const hold = this.browserHold, matches = hold?.taskId === id && hold.questionId === questionId;
+        if (!computer?.takeover || !computer.returnControl || !saved.browserDriver || computer.browserKey?.() !== saved.browserDriver) {
+          throw new QuestionError(409, 'Reconnect the original browser driver before using this request.');
+        }
+        if (action === 'continue') {
+          if (!matches || status?.mode !== 'user' || status.takingOver) throw new QuestionError(409, 'Take over the original browser request before returning it.');
+          return;
+        }
+        if (hold && !matches || status?.owner && status.owner !== id) throw new QuestionError(409, 'The browser is already in use by another task.');
+        if (!matches) await this.saveBrowserHold({ taskId: id, questionId });
+        await computer.takeover();
+      });
+      if (action !== 'takeover') await this.followUpTask(id, message, requestId, undefined, undefined, { id: questionId }, true);
+    });
+  }
+
   async provideCredential(id: string, questionId: string, value: string | undefined): Promise<void> {
     if (!/^\d{1,20}$/.test(questionId) || value !== undefined && typeof value !== 'string') throw new CredentialError(400, 'Provide a credential request and protected value, or decline.');
     return this.changes.run(async () => {
@@ -2349,6 +2430,7 @@ export class LocalRuntime {
       if (!before && meta.structuredQuestions) await this.dispatchQuestionOutbox(active);
       const questions = meta.structuredQuestions ? await active.harness.snapshot(Questions, active.root.id, ctx) : undefined;
       const saved = question ? questions?.questions[question.id] : undefined;
+      if (!protectedInput && saved?.browserSignIn) throw new QuestionError(400, 'Use the browser sign-in controls to answer this request.');
       if (question && saved?.answer) {
         if (saved.answer.requestId !== key || saved.answer.text !== message) throw new QuestionError(409, 'This question already has a different answer.');
         if (before?.outbox?.requestId === key) {
@@ -2361,6 +2443,7 @@ export class LocalRuntime {
       const input = questions?.current ? await this.latestInput(active) : undefined;
       const asking = questions?.current ? await currentQuestion(active.harness, active.root.id, input?.id, before) : null;
       if ((asking?.credential || question && saved?.credential) && !protectedInput) throw new CredentialError(400, 'Use the protected credential input; never send the value in chat.');
+      if (asking?.browserSignIn && !protectedInput) throw new QuestionError(400, 'Use the browser sign-in controls. Enter login details in the browser.');
       if (question && asking?.id !== question.id) throw new QuestionError(409, 'This question changed. Read the current question before answering.');
       if (question && input?.status !== 'done') throw new QuestionError(409, 'The question is still being saved. Refresh before answering.');
       const fingerprint = answerVersion === undefined ? undefined : createHash("sha256").update(JSON.stringify([answerVersion, message])).digest("hex");
@@ -2525,17 +2608,23 @@ export class LocalRuntime {
       await atomicJson(this.metaFile(id), meta);
       if (await this.goalState(active)) {
         const used = taskUsage(await active.harness.usage(ctx));
-        const updated = await this.updateGoal(active, (goal, record) => {
+        const updated = await this.updateGoal(active, async (goal, record, tx) => {
           const grant = this.resumeBudget(meta, goal);
           goal.tokenLimit = grant.maxTotalTokens === null ? null : used.totalTokens + grant.maxTotalTokens;
           if (grant.maxEstimatedCostUsd !== null) goal.costLimit = used.estimatedCostUsd + grant.maxEstimatedCostUsd;
           if (goal.confirmation) goal.confirmation.deadlineAt = Date.now() + grant.maxDurationMs;
+          const questions = goal.phase === 'waiting_user' ? await tx.doc(Questions, active.root.id) : undefined;
+          const current = questions?.current ? questions.questions[questions.current] : undefined;
+          const signIn = current?.browserSignIn && !current.answer && !current.retired
+            && current.revision === goal.revision && current.epoch === goal.epoch ? current : undefined;
           goal.epoch++; goal.reworks = 0; goal.stalls = 0; goal.lastFingerprint = null;
-          if (["failed", "needs_attention", "blocked", "waiting_user"].includes(goal.phase) || restarting && goal.phase === 'working') {
+          if (signIn) signIn.epoch = goal.epoch;
+          else if (["failed", "needs_attention", "blocked", "waiting_user"].includes(goal.phase) || restarting && goal.phase === 'working') {
             goal.phase = "working"; goal.candidate = null; goal.review = null; goal.lastEvaluated = null;
             goal.outbox = { requestId: `resume:${randomUUID()}`, content: 'Resume the original objective from saved files and history. Read task_status for user requirements. Use {"details":true} for exact confirmed scope and verification evidence and {"delegation":"list"} to find earlier child results. Inspect actual state before further actions and submit actual deliverables for verification.' };
           }
-          goal.reason = null; goal.question = null; record("resumed", `New deadline ${meta.deadlineAt}, cost limit ${goal.costLimit ?? "unset"}, token limit ${goal.tokenLimit ?? "unset"}`);
+          if (!signIn) { goal.reason = null; goal.question = null; }
+          record("resumed", `New deadline ${meta.deadlineAt}, cost limit ${goal.costLimit ?? "unset"}, token limit ${goal.tokenLimit ?? "unset"}`);
         });
         await stopObsoleteDelegations(active.harness, updated, ctx);
         await stopObsoleteApprovals(active.harness, updated);

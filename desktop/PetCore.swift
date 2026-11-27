@@ -116,6 +116,7 @@ struct PetChildQuestion: Decodable, Equatable {
     var options: [String]?
     var detail: String?
     var credential: PetCredentialRequest?
+    var browserSignIn: String?
 }
 struct PetDelegation: Decodable, Equatable {
     let conversationId: Int

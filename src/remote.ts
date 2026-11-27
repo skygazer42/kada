@@ -847,7 +847,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             throw new HttpError(400, 'Invalid thread history cursor.');
           }
           const history = await runtime.sharedThreadMessages(id, cursor === null ? undefined : Number(cursor) as EntryId);
-          const question = status.userQuestion && !status.userQuestion.credential ? {
+          const question = status.userQuestion && !status.userQuestion.credential && !status.userQuestion.browserSignIn ? {
             id: status.userQuestion.id, text: redactCredentials(status.userQuestion.text),
             options: status.userQuestion.options.map(redactCredentials),
           } : null;
@@ -936,11 +936,11 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             return {
               id: run.id, revision: meta.workItem.revision, objective: run.objective, status: run.status,
               reason: run.goal?.reason ?? run.initializationError ?? null, question: run.goal?.question ?? null,
-              ...(run.userQuestion ? { userQuestion: run.userQuestion } : {}),
+              ...(run.userQuestion && !run.userQuestion.browserSignIn ? { userQuestion: run.userQuestion } : {}),
               summary: run.status === "completed" ? run.goal?.candidate?.summary ?? null : null,
               steps: (run.goal?.plan ?? []).map(({ id, title, status }) => ({ id, title, status })),
               childQuestions,
-              answerVersion: canReply ? run.workItemAnswerVersion : null,
+              answerVersion: canReply && !run.userQuestion?.browserSignIn ? run.workItemAnswerVersion : null,
               controls: canControl ? run.remoteControls : [], controlVersion: canControl ? run.remoteControlVersion : null,
             };
           }

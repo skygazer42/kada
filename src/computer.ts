@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -7,6 +7,7 @@ import { defineExtension, defineTool, GenerationTask, hook, type Extension, type
 import type { ComputerConfig } from "./config.js";
 import { SerialQueue } from "./util.js";
 import { VERSION } from "./version.js";
+import { Questions, saveQuestion } from "./questions.js";
 
 const browserAdapter = "kada-agent-browser-cli";
 
@@ -87,8 +88,14 @@ export class ComputerBridge {
     // Old tasks retain their per-call serialized interface. New tasks use forTask().
     return this.extension();
   }
-  forTask(owner: string): Extension { return this.extension(owner); }
+  forTask(owner: string, allowSignIn = false): Extension { return this.extension(owner, allowSignIn); }
   release(owner: string): void { if (this.lease?.owner === owner) this.lease = undefined; }
+
+  browserKey() {
+    if (!this.ready || this.client?.getServerVersion()?.name !== browserAdapter || !this.config) return undefined;
+    const { command, args, env } = this.config;
+    return createHash('sha256').update(JSON.stringify([command, args, env?.AGENT_BROWSER_SESSION ?? null])).digest('hex');
+  }
 
   status() {
     const lease = this.lease && this.lease.expiresAt > Date.now() ? this.lease : undefined;
@@ -150,7 +157,7 @@ export class ComputerBridge {
   private observer(tool: Tool): boolean {
     return this.config?.observationTools ? this.config.observationTools.includes(tool.name) : tool.annotations?.readOnlyHint === true;
   }
-  private extension(owner?: string): Extension {
+  private extension(owner?: string, allowSignIn = false): Extension {
     const client = this.client;
     if (!client) throw new Error("Computer driver is not connected");
     const isObservation = this.tools.map((tool) => this.observer(tool));
@@ -242,6 +249,23 @@ export class ComputerBridge {
         execute: async () => { this.release(owner); return { output: [{ type: "text", text: "Desktop released" }] }; },
       }),
     ] : [];
+    const signIn = owner && allowSignIn && client.getServerVersion()?.name === browserAdapter ? [defineTool({
+      name: 'computer_request_sign_in',
+      description: 'Ask the user to take over the observed browser for login or human verification. Call alone and wait. The user enters passwords or codes in the browser. After they return control, call computer_begin and observe again.',
+      parameters: Type.Object({ step: Type.Union([Type.Literal('login'), Type.Literal('verification')]) }, { additionalProperties: false }),
+      replay: 'safe', executionMode: 'sequential', callers: ['model'],
+      execute: async ({ step }, api, context) => {
+        const saved = (await api.snapshot(Questions, api.conversationId, context))?.questions[String(api.taskId)];
+        if (saved?.browserSignIn) return saveQuestion(api, saved, false, false, context);
+        return this.agentCall(async () => {
+          context.abortSignal?.throwIfAborted();
+          const status = this.status(), browserDriver = this.browserKey();
+          if (!browserDriver || status.owner !== owner || !status.observed) throw new Error('Acquire the browser and observe the current page before asking for sign-in.');
+          const text = step === 'login' ? 'Sign in in the current browser.' : 'Complete the verification in the current browser.';
+          return saveQuestion(api, { text, options: [], browserSignIn: step, browserDriver }, false, false, context);
+        });
+      },
+    })] : [];
     const guides = this.resources.length ? [defineTool({ name: "computer_guide", description: "List the connected driver's bundled instructions, or read one advertised resource URI. Read its main skill and platform instructions before operating apps. This reads documentation; it does not grant permissions.",
       parameters: Type.Object({ uri: Type.Optional(Type.String()) }), replay: "safe",
       execute: async (args, _api, context) => {
@@ -255,7 +279,7 @@ export class ComputerBridge {
       // Replacing a previously sent block can invalidate the provider's cached prefix.
       beforeRequest: ({ messages }) => pruneBrowserObservations(messages),
     })] : [];
-    return defineExtension({ name: "local_computer", tools: [...remote, ...lease, ...guides], hooks });
+    return defineExtension({ name: "local_computer", tools: [...remote, ...lease, ...signIn, ...guides], hooks });
   }
   async close(): Promise<void> {
     const client = this.client;

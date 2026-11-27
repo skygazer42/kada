@@ -258,6 +258,9 @@ struct PetBubble: View {
                     PetCredentialReply(question: question, busy: model.busy) { value in
                         model.provideCredential(question, taskID: task.id, value: value)
                     }.id(task.id + ":" + question.id)
+                } else if question.browserSignIn != nil {
+                    Text("在本机终端接回此任务，再用 /sign-in \(question.id) 接管浏览器。")
+                        .textSelection(.enabled)
                 } else {
                 PetQuestionReply(question: question, busy: model.busy) { text, requestID in
                     model.answerQuestion(question, taskID: task.id, text: text, requestID: requestID)

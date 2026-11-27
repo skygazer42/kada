@@ -17,6 +17,7 @@ import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions
 import {defineExtension,hook,ToolTask,type ToolExecutionApi,type JsonObject} from '@earendil-works/pi-durable';
 import {ComputerBridge} from '../src/computer.js';
 import {cloudModels} from '../src/models.js';
+import {modelAccountRefusal} from '../src/routine-account-backoff.js';
 import {serve} from '../src/server.js';
 import {createClient,type TaskStatus} from '../src/client.js';
 import {until} from '../test/helpers.js';
@@ -30,10 +31,8 @@ const command=flags.command ?? process.env.AGENT_BROWSER_COMMAND ?? 'agent-brows
 const artifactRoot=resolve('.harness');await mkdir(artifactRoot,{recursive:true});
 const directory=await mkdtemp(join(artifactRoot,'computer-browser-'));
 const workspace=join(directory,'workspace');await mkdir(workspace);
-let stage='setup',requests=0,handoffFinished=false,firstObserved=false;
-let firstObservation!:()=>void,finishHandoff!:()=>void;
-const observed=new Promise<void>(done=>{firstObservation=done;});
-const handoff=new Promise<void>(done=>{finishHandoff=done;});
+let stage='setup',requests=0;
+const verificationCode = 'KADA-FIXTURE-' + randomUUID();
 const usage={inputTokens:0,outputTokens:0,cachedTokens:0,totalTokens:0,estimatedCostUsd:null};
 const proof:Record<string,unknown>={};
 const app={value:'',operatorChanged:false,updates:[] as string[]};
@@ -68,8 +67,10 @@ async function modelsForSmoke(names:{snapshot:string;fill:string;click:string}):
     const results=(context:TranscriptContext,name:string)=>context.messages.filter(message=>message.role==='toolResult'&&message.toolName===name);
     const call=(name:string,args:JsonObject={})=>fauxAssistantMessage(fauxToolCall(name,args),{stopReason:'toolUse'});
     provider.setResponses(Array.from({length:16},()=>async(context:TranscriptContext)=>{
-      if(results(context,'computer_begin').length<(handoffFinished ? 2 : 1)) return call('computer_begin');
-      if(results(context,names.snapshot).length<(handoffFinished ? 2 : 1)) return call(names.snapshot,{interactive:true});
+      const returned = context.messages.some(message => message.role === 'user' && String(message.content).includes('The user finished the requested browser step'));
+      if(results(context,'computer_begin').length<(returned ? 2 : 1)) return call('computer_begin');
+      if(results(context,names.snapshot).length<(returned ? 2 : 1)) return call(names.snapshot,{interactive:!returned});
+      if(!returned) return call('computer_request_sign_in', { step: 'verification' });
       const snapshot=strings(results(context,names.snapshot).at(-1)?.content);
       if(!results(context,names.fill).length) return call(names.fill,{selector:ref(snapshot,'textbox','Result'),text:'assistant-final'});
       if(results(context,names.snapshot).length<3) return call(names.snapshot,{interactive:true});
@@ -99,6 +100,8 @@ async function modelsForSmoke(names:{snapshot:string;fill:string;click:string}):
   };
   const observe=(stream:ReturnType<typeof native.stream>)=>{void stream.result().then(message=>{
     usage.inputTokens+=message.usage.input;usage.outputTokens+=message.usage.output;usage.cachedTokens+=message.usage.cacheRead;usage.totalTokens+=message.usage.totalTokens;
+    const refusal = modelAccountRefusal(message);
+    if (refusal) proof.providerAccountRefusal = refusal;
   });return stream;};
   models.setProvider(createProvider({id:'siliconflow',models:[{...model,maxTokens:limits.maxOutputTokens}],baseUrl:model.baseUrl,
     auth:{apiKey:{name:'SiliconFlow local browser validation',resolve:async()=>({auth:{apiKey}})}},
@@ -112,15 +115,38 @@ try {
     if(req.url==='/state') {
       if(req.method==='POST') {
         let raw='';for await(const chunk of req) raw+=String(chunk);
-        const value=JSON.parse(raw).value;
-        if(!['operator-step','assistant-final'].includes(value)) {res.writeHead(400);res.end();return;}
+        const input=JSON.parse(raw).value;
+        const value = input === verificationCode && !app.operatorChanged ? 'operator-step' : input === 'assistant-final' && app.operatorChanged ? input : undefined;
+        if(!value) {res.writeHead(400);res.end();return;}
         app.value=value;app.operatorChanged ||= value==='operator-step';app.updates.push(value);
       }
       res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(app));return;
     }
     if(req.url!=='/') {res.writeHead(404);res.end();return;}
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
-    res.end('<!doctype html><html lang="en"><title>Kada browser handoff verification</title><body><h1>Local handoff fixture</h1><label>Result<input id="result" aria-label="Result"></label><button id="apply">Apply result</button><p id="current" role="status">No update yet</p><script>document.querySelector("#apply").onclick=async()=>{const r=await fetch("/state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value:document.querySelector("#result").value})});const s=await r.json();document.querySelector("#current").textContent=s.value+"; operator changed: "+s.operatorChanged;};</script></body></html>');
+    res.end(`<!doctype html><html lang="en"><title>Kada browser handoff verification</title><body>
+      <h1>Local handoff fixture</h1>
+      <section id="gate" ${app.operatorChanged ? 'hidden' : ''}>
+        <label>Verification code<input id="code" aria-label="Verification code" autocomplete="off"></label>
+        <button id="verify">Verify local sign-in</button>
+      </section>
+      <section id="work" ${app.operatorChanged ? '' : 'hidden'}>
+        <label>Result<input id="result" aria-label="Result"></label><button id="apply">Apply result</button>
+      </section>
+      <p id="current" role="status">${app.value || 'Verification required'}</p>
+      <script>
+        async function send(value) {
+          const reply = await fetch('/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({value}) });
+          if (!reply.ok) return;
+          const state = await reply.json();
+          document.querySelector('#code').value = '';
+          document.querySelector('#gate').hidden = state.operatorChanged;
+          document.querySelector('#work').hidden = !state.operatorChanged;
+          document.querySelector('#current').textContent = state.value;
+        }
+        document.querySelector('#verify').onclick = () => send(document.querySelector('#code').value);
+        document.querySelector('#apply').onclick = () => send(document.querySelector('#result').value);
+      </script></body></html>`);
   });
   const pagePort=await listen(page),url=`http://127.0.0.1:${pagePort}/`;
   const {stdout:cliVersion}=await promisify(execFile)(command,['--version'],{encoding:'utf8',timeout:5000,windowsHide:true});
@@ -142,29 +168,31 @@ try {
       if(Object.keys(call.arguments).some(key=>!allowed.has(key))) return {block:'Only the local smoke page controls are authorized.'};
       return {arguments:{...call.arguments,session,allowedDomains:['127.0.0.1'],timeoutMs:20000}};
     },
-    async afterTool(call,result) {
-      if(call.name!==names.snapshot || firstObserved || result.isError) return;
-      firstObserved=true;firstObservation();await handoff;
-      return {...result,diagnostics:[...(result.diagnostics ?? []),{severity:'info' as const,message:'The operator took control and changed the page. Control is now returned. Your old lease and snapshot are stale; call computer_begin and a new snapshot before any action.'}]};
-    },
   })]});
   const config={dataDir:join(directory,'state'),port:await freePort(),model:model.ref,maxSubagents:1,maxDurationMs:240000,maxTotalTokens:120000,review:false,web:false,discovery:false};
   service=await serve(config,{models:model.models,extensions:[extension,policy],computer:bridge});
   const client=createClient(config);
   stage='agent-observes';
   const task=await client.request<{id:string}>('/v1/tasks','POST',{confirmed:true,workspace,objective:
-    `In the already-open local test page, use computer_begin and ${names.snapshot} first. The host will temporarily take over after that first observation. After control is returned, you MUST call computer_begin again and ${names.snapshot} again, inspect the operator's update, then use ${names.fill} with the current Result textbox ref and text "assistant-final". Take a fresh snapshot, then use ${names.click} on Apply result. Never change browser session or navigate. Write result.json as {"value":"assistant-final","operatorChanged":true}. Release computer_end and submit result.json using task_submit. Only actual tool calls count; do not paste code instead of calls.`,
+    `In the already-open local test page, use computer_begin and ${names.snapshot} first. Call computer_request_sign_in with step verification and wait. The operator will complete the verification in the browser and return control. Then call computer_begin and ${names.snapshot} with interactive=false to read the status and current Result textbox ref. Use ${names.fill} on that textbox with text "assistant-final". Take a new snapshot, then use ${names.click} on Apply result. Keep the original page and session. Write result.json as {"value":"assistant-final","operatorChanged":true}. Release computer_end and submit result.json using task_submit.`,
     acceptance:[{type:'json_value',path:'result.json',pointer:'/value',equals:'assistant-final'},{type:'json_value',path:'result.json',pointer:'/operatorChanged',equals:true}],skills:[]});
-  await Promise.race([observed,new Promise<never>((_,reject)=>{deadline.addEventListener('abort',()=>reject(new Error('First browser observation timed out.')),{once:true});})]);
+  const status = () => client.request<TaskStatus>(`/v1/tasks/${task.id}`);
+  const waiting = await until(status, state => state.status === 'waiting_user' && state.submission?.status === 'done'
+    || ['completed', 'failed', 'blocked', 'budget_limited'].includes(state.status), 150_000);
+  assert.equal(waiting.status, 'waiting_user');
+  const question = waiting.userQuestion;
+  assert.equal(question?.browserSignIn, 'verification');
+  const signIn = (action: 'takeover' | 'continue') => client.request(`/v1/tasks/${task.id}/browser-sign-in/${question!.id}`, 'POST', { action });
   const owned=bridge.forTask(task.id),fill=owned.tools!.find(tool=>tool.name===names.fill)!;
   const attempt=()=>fill.execute({selector:'@e1',text:'blocked'},{ } as ToolExecutionApi,BACKGROUND_CONTEXT);
   stage='operator-takeover';
-  const takeover=await client.request<{mode:string;owner:string|null}>('/v1/computer/takeover','POST',{});assert.equal(takeover.mode,'user');assert.equal(takeover.owner,null);
+  await signIn('takeover');
+  assert.equal(bridge.status().mode, 'user');
   await assert.rejects(attempt(),/control|takeover/i);assert.equal(app.updates.length,0);proof.agentActionsBlockedDuringTakeover=true;
   let snapshot=text(await browser('agent_browser_snapshot',{interactive:true}));
-  await browser('agent_browser_fill',{selector:ref(snapshot,'textbox','Result'),text:'operator-step'});
+  await browser('agent_browser_fill',{selector:ref(snapshot,'textbox','Verification code'),text:verificationCode});
   snapshot=text(await browser('agent_browser_snapshot',{interactive:true}));
-  await browser('agent_browser_click',{selector:ref(snapshot,'button','Apply result')});
+  await browser('agent_browser_click',{selector:ref(snapshot,'button','Verify local sign-in')});
   await until(async()=>app.value,value=>value==='operator-step');
   proof.operator='automated host-side operator using the selected real MCP driver';
   // The verification kills only the bridge-owned SDK child, never a PID inferred from a process name.
@@ -178,10 +206,11 @@ try {
   assert.equal(bridge.status().observed,false);
   proof.driverTransportForcedInterruption=true;
   proof.sameTaskAfterDriverReconnect=true;
-  const returned=await client.request<{mode:string;observed:boolean;owner:string|null}>('/v1/computer/return','POST',{});assert.equal(returned.mode,'agent');assert.equal(returned.owner,null);assert.equal(returned.observed,false);
-  await assert.rejects(attempt(),/lease/i);proof.oldLeaseRejectedAfterReturn=true;
-  stage='agent-reobserves';handoffFinished=true;finishHandoff();
-  const done=await until(()=>client.request<TaskStatus>(`/v1/tasks/${task.id}`),state=>['completed','failed','needs_attention','budget_limited','blocked'].includes(state.status),240000);
+  assert.equal(bridge.status().mode, 'user');
+  await assert.rejects(attempt(),/control/i);
+  stage='agent-reobserves';
+  await signIn('continue');
+  const done=await until(status,state=>['completed','failed','needs_attention','budget_limited','blocked'].includes(state.status),240000);
   assert.equal(done.status,'completed','Task did not deliver a verified result.');
   assert.deepEqual(app.updates,['operator-step','assistant-final']);
   const backend=await (await fetch(url+'state',{signal:deadline})).json();assert.equal(backend.value,'assistant-final');assert.equal(backend.operatorChanged,true);
@@ -189,6 +218,10 @@ try {
   const tools=done.messages.filter(message=>message.role==='toolResult');
   const snapshots=tools.filter(message=>message.role==='toolResult'&&message.toolName===names.snapshot&&!message.isError);assert(snapshots.length>=3);
   assert(snapshots.some(message=>JSON.stringify(message.content).includes('operator-step')));
+  assert(!JSON.stringify(done.messages).includes(verificationCode));
+  assert.equal(done.messages.filter(message => message.role === 'user' && String(message.content).includes('The user finished the requested browser step')).length, 1);
+  proof.browserVerificationCodeKeptOutOfTranscript = true;
+  proof.originalSignInRequestResumed = true;
   assert.equal(tools.filter(message=>message.role==='toolResult'&&message.toolName===names.fill&&!message.isError).length,1);
   assert.equal(tools.filter(message=>message.role==='toolResult'&&message.toolName===names.click&&!message.isError).length,1);
   stage='independent-verification';proof.pageAndFileMatch=true;proof.applicationUpdates=app.updates;proof.taskId=task.id;proof.successfulSnapshots=snapshots.length;proof.freshObservationSawOperatorChange=true;proof.taskTokens=done.budget.totalTokens;
@@ -198,12 +231,11 @@ try {
   console.log(JSON.stringify({passed:true,mode:flags.live ? 'siliconflow' : 'scripted-model',modelRequests:requests,taskTokens:done.budget.totalTokens}));
 } catch(error) {
   process.exitCode=1;proof.completed=false;
-  proof.failure=error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed';
+  proof.failure=proof.providerAccountRefusal ? 'provider_account_refusal' : error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed';
   if(!flags.live && error instanceof Error) proof.fixtureDiagnostic=error.message.slice(0,1500);
   console.error(JSON.stringify({passed:false,stage,failure:proof.failure,...(!flags.live ? {diagnostic:proof.fixtureDiagnostic} : {})}));
 } finally {
   workload.abort();
-  finishHandoff();
   await service?.close();await bridge.close();
   try {await browser('agent_browser_close',{},AbortSignal.timeout(15000));proof.browserClosedWithWorkloadAborted=true;}
   catch {proof.browserClosedWithWorkloadAborted=false;proof.completed=false;process.exitCode=1;}

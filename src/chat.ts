@@ -161,6 +161,13 @@ export class ChatSession {
         await this.poll();
         return true;
       }
+      if (command === '/sign-in' || command === '/signed-in' || command === '/decline-sign-in') {
+        if (!this.taskId || !argument || !/^\d{1,20}$/.test(argument)) throw new Error('请使用当前浏览器问题 ID。请在浏览器中输入登录信息。');
+        const action = command === '/sign-in' ? 'takeover' : command === '/signed-in' ? 'continue' : 'decline';
+        await this.client.request(`/v1/tasks/${this.taskId}/browser-sign-in/${argument}`, 'POST', { action });
+        this.info(action === 'takeover' ? `已接管浏览器。完成后输入 /signed-in ${argument}。` : '已把答复交给原任务。');
+        await this.poll(); return true;
+      }
       if (command === '/credential' || command === '/decline-credential') {
         if (!this.taskId || !/^\d+$/.test(argument ?? '')) throw new Error('使用当前凭据问题 ID，不要在命令中填写密钥。');
         const status = await this.client.request<TaskStatus>(`/v1/tasks/${this.taskId}`), question = status.userQuestion;
@@ -480,6 +487,7 @@ export class ChatSession {
       if (!this.printed.has(key)) {
         this.printed.add(key);
         this.info(question.credential ? `${question.text}\n${question.detail ?? ''}\n${question.credential.name} · ${question.credential.origin} · ${question.credential.auth.type}\n/credential ${question.id} 进入无回显输入；/decline-credential ${question.id} 拒绝。不要在聊天中发送密钥。`
+          : question.browserSignIn ? `${question.browserSignIn === 'login' ? '请在当前浏览器登录。' : '请在当前浏览器完成验证。'}\n/sign-in ${question.id} 接管。/signed-in ${question.id} 回交。/decline-sign-in ${question.id} 拒绝。`
           : `${question.text}${question.detail ? '\n' + question.detail : ''}\n${question.options.map((option, index) => `${index + 1}. ${option}`).join('\n')}\n/choose ${question.id} 编号，或直接输入其他答复。`);
       }
     }

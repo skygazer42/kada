@@ -1,0 +1,69 @@
+{
+  "at": "2026-11-27T07:29:24.474Z",
+  "mode": "scripted-model",
+  "realDriver": true,
+  "localPageOnly": true,
+  "fixture": "computer-browser-G0zgXx",
+  "limits": {
+    "modelRequests": 16,
+    "maxOutputTokens": 768,
+    "elapsedMs": 360000
+  },
+  "modelRequests": 0,
+  "usage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cachedTokens": 0,
+    "totalTokens": 0,
+    "estimatedCostUsd": null
+  },
+  "stage": "independent-verification",
+  "proof": {
+    "driverKind": "installed agent-browser CLI",
+    "cliVersion": "agent-browser 0.38.1",
+    "driver": {
+      "name": "kada-agent-browser-cli",
+      "version": "1.0.0"
+    },
+    "model": {
+      "provider": "computer-browser-fixture",
+      "modelId": "scripted"
+    },
+    "agentActionsBlockedDuringTakeover": true,
+    "operator": "automated host-side operator using the selected real MCP driver",
+    "driverTransportForcedInterruption": true,
+    "sameTaskAfterDriverReconnect": true,
+    "browserVerificationCodeKeptOutOfTranscript": true,
+    "originalSignInRequestResumed": true,
+    "pageAndFileMatch": true,
+    "applicationUpdates": [
+      "operator-step",
+      "assistant-final"
+    ],
+    "taskId": "a9479bb8-1080-4ddf-b61e-f4e44257081c",
+    "successfulSnapshots": 3,
+    "freshObservationSawOperatorChange": true,
+    "taskTokens": 64831,
+    "finalSnapshotIncludesVerifiedResult": true,
+    "completed": true,
+    "browserClosedWithWorkloadAborted": true
+  },
+  "siliconflowAttempts": [
+    {
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "modelRequests": 1,
+      "httpStatus": 402,
+      "stage": "agent-observes",
+      "result": "provider_refused",
+      "reason": "insufficient balance"
+    },
+    {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "modelRequests": 1,
+      "httpStatus": 402,
+      "stage": "agent-observes",
+      "result": "provider_refused",
+      "reason": "quota"
+    }
+  ]
+}

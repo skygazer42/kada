@@ -103,8 +103,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const controls = config.computer ? computer : options?.computer;
       if (url.pathname === '/v1/computer' && req.method === 'GET') return send(200,controls?.status?.() ?? {connected:false,mode:'disabled',owner:null,observed:false,busy:false,takingOver:false});
       if (['/v1/computer/takeover','/v1/computer/return'].includes(url.pathname) && req.method === 'POST') {
-        if (!controls?.takeover || !controls.returnControl) throw new Error('Computer control is disabled. Select an existing driver before taking control.');
-        return send(200,url.pathname.endsWith('/takeover') ? await controls.takeover() : await controls.returnControl());
+        return send(200, await runtime.computerControl(url.pathname.endsWith('/takeover') ? 'takeover' : 'return'));
       }
       if (url.pathname === "/v1/environment" && req.method === "GET") return send(200, await runtime.localSetup());
       if (url.pathname === "/v1/environment/memory" && req.method === "GET") {
@@ -509,6 +508,15 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (typeof requestId !== 'string' || typeof answer !== 'string') throw new Error('Provide requestId and answer strings.');
         await runtime.answerQuestion(questionAnswer[1]!, questionAnswer[2]!, requestId, answer);
         return send(200, { requestId });
+      }
+      const signIn = /^\/v1\/tasks\/([a-f0-9-]{36})\/browser-sign-in\/(\d+)$/.exec(url.pathname);
+      if (signIn && req.method === 'POST') {
+        const input = await body(req);
+        if (Object.keys(input).length !== 1 || input.action !== 'takeover' && input.action !== 'continue' && input.action !== 'decline') {
+          return send(400, { error: 'Choose takeover, continue or decline. Enter login details in the browser.' });
+        }
+        await runtime.browserSignIn(signIn[1]!, signIn[2]!, input.action);
+        return send(200, { ok: true });
       }
       const credentialInput = /^\/v1\/tasks\/([a-f0-9-]{36})\/credentials\/(\d+)$/.exec(url.pathname);
       if (credentialInput && req.method === 'POST') {
