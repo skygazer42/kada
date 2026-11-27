@@ -19,3 +19,5 @@ Rakazo 为获得授权的账号读取即将发生的日程。Google Calendar MCP
 ## 浏览器项目绑定
 
 项目 MCP 设置页显示当前 Gmail 与 Google 日历绑定。候选连接按项目已启用的只读工具及其修订计算。页面持原项目授权，保存与解除复用终端的来源配置，储存失败时保留表单输入。真实 Chromium 在合成连接上验证两种绑定、无效时区恢复、刷新后读回配置及单独解除 Gmail。 [Rakazo 的已连接应用列表](https://github.com/elie222/rakazo/blob/e64d73292179/apps/mobile/components/integrations/connected-apps.tsx#L58) · [项目范围 API 回归](../../../test/mcp-tools.test.ts)
+
+日历连接允许只读 `list-calendars` 时，设置页可请求所填账号的日历列表。列表只投影日历 ID、标题和时区。真实 Chromium 验证从列表选择、填入 ID 和时区、保存及刷新后读回。API 回归验证限制在当前项目以及撤去工具权限后的拒绝。 [原日历列表](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/handlers/core/ListCalendarsHandler.ts#L8) · [回归](../../../test/mcp-tools.test.ts)

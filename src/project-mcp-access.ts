@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { projectRoot, type McpTools } from './mcp-tools.js';
+import { projectRoot, type McpPin, type McpTools } from './mcp-tools.js';
 import { createLocalBrowserSessions } from './local-browser-sessions.js';
 import { projectMcpPage } from './project-mcp-page.js';
-import type { ProjectCalendars } from './project-calendars.js';
+import { calendarOptionsTool, type ProjectCalendars } from './project-calendars.js';
 import type { ProjectGmail } from './project-gmail.js';
 
 const prefix = '/project-mcp';
@@ -48,18 +48,23 @@ export function createProjectMcpAccess(mcp: McpTools, apps: { gmail: ProjectGmai
       return send(200, { tools: await mcp.setProjectTools(project, input.tools) });
     }
     const source = path === prefix + '/gmail-source' ? apps.gmail : path === prefix + '/calendar-source' ? apps.calendar : undefined;
-    if (source || path === prefix + '/bindings') {
+    if (source || path === prefix + '/bindings' || path === prefix + '/calendar-options') {
       if (await projectRoot(project) !== project) return send(409, { error: 'The original project changed. Reopen the project settings.' });
       if (source && req.method === 'PUT') return send(200, await source.setSource(project, await readBody(req)));
       if (source && req.method === 'DELETE') return send(200, await source.clearSource(project));
-      if (!source && req.method === 'GET') {
+      if (path === prefix + '/calendar-options' && req.method === 'POST') {
+        return send(200,await apps.calendar.options(project,await readBody(req)));
+      }
+      if (path === prefix + '/bindings' && req.method === 'GET') {
         const [gmail, calendar, pins] = await Promise.all([apps.gmail.source(project), apps.calendar.source(project), mcp.pins(project)]);
-        const candidates = (names: string[]) => pins.filter(pin => names.every(name => pin.tools.includes(name) &&
-          !pin.approvalTools?.includes(name) && pin.discovery?.some(tool => tool.name === name && tool.readOnly)))
-          .map(({ id, revision }) => ({ id, revision }));
+        const canRead = (pin: McpPin,name: string) => pin.tools.includes(name) &&
+          !pin.approvalTools?.includes(name) && pin.discovery?.some(tool => tool.name === name && tool.readOnly);
+        const candidates = (names: string[]) => pins.filter(pin => names.every(name => canRead(pin,name)));
         return send(200, {
-          gmail: { source:gmail.source, connections:candidates(['search_gmail_messages','get_gmail_message_content']) },
-          calendar: { source:calendar.source, connections:candidates(['list-events']) },
+          gmail: { source:gmail.source, connections:candidates(['search_gmail_messages','get_gmail_message_content'])
+            .map(({id,revision}) => ({id,revision})) },
+          calendar: { source:calendar.source, connections:candidates(['list-events'])
+            .map(pin => ({id:pin.id,revision:pin.revision,...(canRead(pin,calendarOptionsTool) ? {canListCalendars:true} : {})})) },
         });
       }
       return send(405, { error: 'Method not allowed.' });

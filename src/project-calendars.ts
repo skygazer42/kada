@@ -14,11 +14,23 @@ type CalendarEvent = { id: string; title: string; day: string; start: string; en
 export const calendarMutations = ['create-event','update-event','delete-event'] as const;
 export type CalendarMutation = typeof calendarMutations[number];
 export const calendarFreeBusyTool = 'get-freebusy';
+export const calendarOptionsTool = 'list-calendars';
 
 export class CalendarError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
 function record(value: unknown) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function calendarPayload(result: Awaited<ReturnType<McpTools['runReadOnly']>>) {
+  try {
+    if (result.isError) throw new Error('Provider error.');
+    const text = result.content.length === 1 && result.content[0]?.type === 'text' ? result.content[0].text : undefined;
+    if (!text || Buffer.byteLength(text) > 1_000_000) throw new Error('Unexpected calendar response.');
+    const payload = record(JSON.parse(text));
+    if (payload) return payload;
+  } catch { /* report a bounded provider error */ }
+  throw new CalendarError(502,'The provider did not return a supported Google Calendar response.');
 }
 
 function parseSource(input: unknown): CalendarSource {
@@ -138,6 +150,27 @@ export class ProjectCalendars {
       return { project, source: null };
     });
   }
+  async options(workspace: string, input: Record<string,unknown>) {
+    if (Object.keys(input).some(key => !['id','revision','account'].includes(key)) ||
+      typeof input.account !== 'string' || !/^[a-z0-9_-]{1,64}$/.test(input.account)) {
+      throw new CalendarError(400,'Provide the tested Calendar MCP connection and one account nickname.');
+    }
+    const project = await projectRoot(workspace);
+    const check = normalizeMcpPrecheck({id:input.id,revision:input.revision,tool:calendarOptionsTool,arguments:{account:input.account}});
+    await this.checkPermission(project,check);
+    const result = await this.mcp.runReadOnly(project,check,AbortSignal.timeout(15_000));
+    await this.checkPermission(project,check);
+    const payload = calendarPayload(result);
+    if (!Array.isArray(payload.calendars)) throw new CalendarError(502,'The provider did not return the calendars for this account.');
+    return {calendars:payload.calendars.flatMap(value => {
+      const item = record(value);
+      if (!item || item.deleted === true || typeof item.id !== 'string' || !item.id.trim() ||
+        item.id.length > 512 || /^[\s]*\[/.test(item.id) || /[\u0000-\u001f\u007f]/.test(item.id)) return [];
+      const title = item.summaryOverride ?? item.summary;
+      return [{id:item.id,title:typeof title === 'string' && title.trim() ? redactCredentials(title.slice(0,500)) : item.id,
+        timeZone:typeof item.timeZone === 'string' ? item.timeZone : null}];
+    })};
+  }
   async month(workspace: string, month: string, expectedProject?: string) {
     const { from, to } = monthBounds(month);
     return this.range(workspace,from,to,{ project:expectedProject });
@@ -159,16 +192,7 @@ export class ProjectCalendars {
     });
     await this.checkPermission(project,check);
     await ensureSource();
-    try {
-      if (result.isError) throw new Error('Provider error.');
-      const text = result.content.length === 1 && result.content[0]?.type === 'text' ? result.content[0].text : undefined;
-      if (!text || Buffer.byteLength(text) > 1_000_000) throw new Error('Unexpected calendar response.');
-      const payload = record(JSON.parse(text));
-      if (!payload) throw new Error('Unexpected calendar response.');
-      return payload;
-    } catch {
-      throw new CalendarError(502,'The provider did not return a supported Google Calendar response.');
-    }
+    return calendarPayload(result);
   }
   async range(workspace: string, from?: string, to?: string,
     expected?: { project?: string; fingerprint?: string; signal?: AbortSignal }) {

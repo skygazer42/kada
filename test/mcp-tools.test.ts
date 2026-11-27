@@ -116,19 +116,26 @@ test('the local MCP page edits only the linked project and distinguishes inherit
   const addOffice = [
     "require('node:readline').createInterface({input:process.stdin}).on('line',line=>{",
     "const request=JSON.parse(line);if(request.id===undefined)return;",
-    "const tools=['search_gmail_messages','get_gmail_message_content','list-events'].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:true}}));",
-    "const result={initialize:{protocolVersion:request.params?.protocolVersion,serverInfo:{name:'office-fixture',version:'1'},capabilities:{tools:{}}},'tools/list':{tools}}[request.method];",
+    "const tools=['search_gmail_messages','get_gmail_message_content','list-events','list-calendars'].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:true}}));",
+    "let result={initialize:{protocolVersion:request.params?.protocolVersion,serverInfo:{name:'office-fixture',version:'1'},capabilities:{tools:{}}},'tools/list':{tools}}[request.method];",
+    "if(request.method==='tools/call') { const valid=request.params.name==='list-calendars' && request.params.arguments.account==='work';",
+    "result={isError:!valid,content:[{type:'text',text:JSON.stringify({calendars:[{id:'team-calendar',summary:'Team calendar',timeZone:'UTC'},{id:'deleted',deleted:true}]})}]};}",
     "console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result}));});",
   ].join('\n');
   await server.runtime.mcp.configure({id:'office',transport:'stdio',command:process.execPath,args:['-e',addOffice]});
   const {revision} = await server.runtime.mcp.test('office');
-  await server.runtime.mcp.enable('office',['search_gmail_messages','get_gmail_message_content','list-events'],revision);
+  await server.runtime.mcp.enable('office',['search_gmail_messages','get_gmail_message_content','list-events','list-calendars'],revision);
   assert.equal((await call('bindings','GET')).status,401);
   const available = await (await call('bindings','GET',token)).json();
   assert.deepEqual(available,{
     gmail:{source:null,connections:[{id:'office',revision}]},
-    calendar:{source:null,connections:[{id:'office',revision}]},
+    calendar:{source:null,connections:[{id:'office',revision,canListCalendars:true}]},
   });
+  const discovery = {id:'office',revision,account:'work'};
+  assert.equal((await call('calendar-options','POST',undefined,discovery)).status,401);
+  assert.equal((await call('calendar-options','POST',token,{...discovery,workspace:other})).status,400);
+  assert.deepEqual(await (await call('calendar-options','POST',token,discovery)).json(),
+    {calendars:[{id:'team-calendar',title:'Team calendar',timeZone:'UTC'}]});
   const mail = {id:'office',revision,email:'project@example.invalid',allowAssistant:true};
   const calendar = {id:'office',revision,account:'work',calendarId:'primary',timeZone:'UTC',allowAssistant:true};
   assert.equal((await call('gmail-source','PUT',token,{...mail,workspace:other})).status,400);
@@ -142,6 +149,7 @@ test('the local MCP page edits only the linked project and distinguishes inherit
   assert.equal((await call('tools','PUT',token,{tools:[]})).status,200);
   const revoked = await (await call('bindings','GET',token)).json();
   assert.deepEqual(revoked.gmail,{source:mail,connections:[]});
+  assert.equal((await call('calendar-options','POST',token,discovery)).status,409);
   assert.equal((await call('gmail-source','DELETE',token)).status,200);
   assert.equal((await server.runtime.gmail.source(fixture.workspace)).source,null);
   assert.deepEqual((await server.runtime.calendars.source(fixture.workspace)).source,calendar);

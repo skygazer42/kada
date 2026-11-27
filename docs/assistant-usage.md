@@ -282,6 +282,8 @@ npm run harness -- remote unshare-approval 任务ID 动作ID 账户ID 设备ID �
 
 通过 `npm run harness -- mcp browser --workspace E:/project` 打开项目设置。在 **应用连接** 中可以选择已经授权的 MCP 连接，保存或解除 Gmail、Google 日历绑定，并设置是否允许本机助手访问。
 
+已启用只读 `list-calendars` 时，填写账号别名后可以读取该账号的日历，选中后会填入日历 ID，并在时区留空时带入所选日历的时区。
+
 ```json
 {
   "id": "calendar",

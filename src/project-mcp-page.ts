@@ -26,6 +26,7 @@ export const projectMcpPage = String.raw`<!doctype html>
     details { padding:10px 0; border-top:1px solid #dce3da; }
     summary { cursor:pointer; overflow-wrap:anywhere; }
     .binding-label { display:grid; margin:10px 0; }
+    .binding-label[hidden] { display:none; }
     .binding-label input, .binding-label select { min-width:0; width:100%; padding:8px; font:inherit; border:1px solid #a5b5ab; border-radius:6px; }
     .binding-action { display:flex; gap:10px; flex-wrap:wrap; }
     .secondary { background:#fff; color:#146857; }
@@ -64,6 +65,8 @@ export const projectMcpPage = String.raw`<!doctype html>
       <form id="calendar-binding">
         <label class="binding-label">日历 MCP 连接<select name="connection" required></select></label>
         <label class="binding-label">账号别名<input name="account" maxlength="64" required></label>
+        <button type="button" class="secondary" name="discover" hidden>读取可用日历</button>
+        <label class="binding-label" id="calendar-choices" hidden>可用日历<select name="selectedCalendar"></select></label>
         <label class="binding-label">日历 ID<input name="calendarId" placeholder="primary" maxlength="512" required></label>
         <label class="binding-label">IANA 时区<input name="timeZone" placeholder="Asia/Shanghai" maxlength="128" required></label>
         <label><input name="allowAssistant" type="checkbox">允许助手访问 Google 日历</label>
@@ -131,17 +134,26 @@ async function refresh() {
 function bindingEditor(kind, fields, display) {
   const form = field(kind + '-binding'), connection = form.elements.connection;
   const clear = form.elements.clear, submit = form.querySelector('[type=submit]');
+  const discover = form.elements.discover, found = form.elements.selectedCalendar;
+  const choices = discover ? field('calendar-choices') : undefined;
   const status = form.querySelector('.binding-status'), current = field(kind + '-bound');
   const identity = item => item ? JSON.stringify([item.id,item.revision]) : '';
-  let source = null, candidates = [], pending = false, initialized = false, version = 0;
+  let source = null, candidates = [], calendars = [], pending = false, initialized = false, version = 0;
+  const selectedConnection = () => candidates.find(item => identity(item) === connection.value);
 
   function controls() {
-    const eligible = candidates.some(item => identity(item) === connection.value);
+    const eligible = selectedConnection();
     connection.disabled = pending || !candidates.length;
     for (const name of fields) form.elements[name].disabled = pending;
     form.elements.allowAssistant.disabled = pending;
     submit.disabled = pending || !eligible;
     clear.disabled = pending || !source;
+    if (discover) {
+      discover.hidden = eligible?.canListCalendars !== true;
+      discover.disabled = pending || !form.elements.account.value.trim();
+      found.disabled = pending;
+      choices.hidden = discover.hidden || calendars.length === 0;
+    }
   }
 
   function render(next, resetFields) {
@@ -167,9 +179,9 @@ function bindingEditor(kind, fields, display) {
 
   async function saveBinding(method) {
     if (pending) return;
-    const item = candidates.find(candidate => identity(candidate) === connection.value);
+    const item = selectedConnection();
     if (method === 'PUT' && !item) return;
-    const body = method === 'PUT' ? { ...item, allowAssistant:form.elements.allowAssistant.checked } : undefined;
+    const body = method === 'PUT' ? { id:item.id,revision:item.revision,allowAssistant:form.elements.allowAssistant.checked } : undefined;
     if (body) for (const name of fields) body[name] = form.elements[name].value.trim();
     pending = true;
     version++;
@@ -178,6 +190,7 @@ function bindingEditor(kind, fields, display) {
     controls();
     try {
       const saved = await request(kind + '-source',method,body);
+      if (method === 'DELETE') calendars = [];
       render({source:saved.source,connections:candidates},true);
       status.textContent = method === 'PUT' ? '已保存绑定' : '已解除绑定';
     } catch (error) {
@@ -190,7 +203,43 @@ function bindingEditor(kind, fields, display) {
     }
   }
 
-  connection.addEventListener('change',controls);
+  async function discoverCalendars() {
+    const item = selectedConnection(), account = form.elements.account.value.trim();
+    if (pending || !item?.canListCalendars || !account) return;
+    pending = true;
+    status.textContent = '正在读取日历';
+    status.classList.remove('error');
+    controls();
+    try {
+      const result = await request('calendar-options','POST',{id:item.id,revision:item.revision,account});
+      calendars = result.calendars;
+      found.replaceChildren(new Option('选择日历',''));
+      for (const entry of calendars) found.add(new Option(entry.title,entry.id));
+      status.textContent = calendars.length ? '请选择日历' : '此账号没有可选日历';
+    } catch (error) {
+      status.classList.add('error');
+      status.textContent = error.message;
+    } finally {
+      pending = false;
+      controls();
+    }
+  }
+  function resetCalendarChoices() {
+    calendars = [];
+    controls();
+  }
+
+  connection.addEventListener('change',resetCalendarChoices);
+  if (discover) {
+    form.elements.account.addEventListener('input',resetCalendarChoices);
+    discover.addEventListener('click',() => void discoverCalendars());
+    found.addEventListener('change',() => {
+      const selected = calendars.find(calendar => calendar.id === found.value);
+      if (!selected) return;
+      form.elements.calendarId.value = selected.id;
+      if (selected.timeZone && !form.elements.timeZone.value.trim()) form.elements.timeZone.value = selected.timeZone;
+    });
+  }
   form.addEventListener('submit',event => { event.preventDefault(); void saveBinding('PUT'); });
   clear.addEventListener('click',() => void saveBinding('DELETE'));
   controls();
