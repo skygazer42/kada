@@ -13,6 +13,7 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 import { conversationAnswer } from '../src/conversation.js';
 import { localEnvironment, localExecution, taskCompaction } from '../src/execution.js';
 import { cloudModels } from '../src/models.js';
+import { modelAccountRefusal, type AccountRefusal } from '../src/routine-account-backoff.js';
 import { LocalRuntime } from '../src/runtime.js';
 
 const selfTest = process.argv.includes('--self-test');
@@ -85,6 +86,7 @@ async function compare(arm: ComparisonArm) {
   const modelUsage: Promise<void>[] = [];
   const nativeCalls: Record<string, number> = {};
   let firstRequestTools: { count: number; bytes: number; source: 'transcript' | 'provider-payload' } | null = null;
+  let accountRefusal: AccountRefusal | undefined;
   let modelRequests = 0, providerErrors = 0, userContinuationMessages = 0, reworks = 0, stage = 'start', execution = 'pending';
   const models = createModels(), nativeTools = localExecution();
   const nativeNames = new Set(nativeTools.tools!.map(tool => tool.name));
@@ -131,13 +133,15 @@ async function compare(arm: ComparisonArm) {
         signal: input?.signal ? AbortSignal.any([input.signal, deadline]) : deadline, onPayload };
     };
     const observe = (stream: ReturnType<typeof native.stream>) => {
-      modelUsage.push(stream.result().then(({ usage: spent, stopReason }) => {
+      modelUsage.push(stream.result().then(message => {
+        const { usage: spent, stopReason } = message;
         usage.inputTokens += spent.input;
         usage.outputTokens += spent.output;
         usage.cachedTokens += spent.cacheRead;
         usage.cacheWriteTokens += spent.cacheWrite;
         usage.totalTokens += spent.totalTokens;
         if (stopReason === 'error' || stopReason === 'aborted') providerErrors++;
+        accountRefusal ??= modelAccountRefusal(message);
       }, () => { providerErrors++; }));
       return stream;
     };
@@ -171,7 +175,7 @@ async function compare(arm: ComparisonArm) {
   const openKada = () => new LocalRuntime({ dataDir, port: 4317, model, maxSubagents: 1, maxDurationMs: limits.maxDurationMs,
     maxTotalTokens: limits.maxTotalTokens, review: false, web: false, discovery: true }, { models, discovery: { home }, extensions: [scope] });
   let pi: Harness | undefined, kada: LocalRuntime | undefined, draft: string | undefined;
-  let failure: { stage: string; reason: string } | undefined;
+  let failure: { stage: string; reason: string; accountRefusal?: AccountRefusal } | undefined;
   let executionPassed = false;
   async function checkDraft() {
     stage = 'verify_draft_before_operator';
@@ -247,10 +251,11 @@ async function compare(arm: ComparisonArm) {
     assert.equal(userContinuationMessages, 1);
     executionPassed = true;
   } catch (error) {
-    const reason = deadline.aborted ? 'deadline_exceeded' : error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed';
-    failure = { stage, reason };
+    const reason = deadline.aborted ? 'deadline_exceeded' : accountRefusal ? 'provider_account_refusal' :
+      error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed';
+    failure = { stage, reason, ...(accountRefusal ? { accountRefusal } : {}) };
     if (deadline.aborted) execution = 'timed_out';
-    console.error(JSON.stringify({ arm, stage, failure: reason,
+    console.error(JSON.stringify({ arm, stage, failure: reason, ...(accountRefusal ? { accountRefusal } : {}),
       ...(selfTest && error instanceof Error ? { diagnostic: error.message } : {}) }));
   } finally {
     await pi?.close(ctx);
