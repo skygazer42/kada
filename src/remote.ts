@@ -62,7 +62,7 @@ export const attachmentLimit = 5 * 1024 * 1024;
 const originalArchiveLimit = 50 * 1024 * 1024;
 const downloadLimit = 25 * 1024 * 1024;
 const uploadLifetime = 60 * 60_000;
-const maxAttachments = 4;
+export const maxAttachments = 4;
 export const supportedTypes: ReadonlySet<string> = new Set([
   "application/octet-stream", "application/json", "application/pdf",
   "image/png", "image/jpeg", "image/gif", "image/webp",

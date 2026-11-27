@@ -608,6 +608,34 @@ npm run harness -- telegram
 
 `/new` 开新聊天。回复原 Bot 消息可继续那条聊天。`/status` 查看原任务和未取得回执的发送，同时重新显示当前待确认或待答内容。`/delivery` 明确请求再发当前任务的核验产物。停止连接器期间，daemon 中已受理的任务可以继续执行。重新运行连接器会接回原会话和回执。 [实现与测试](superpowers/plans/2026-11-27-telegram.md)
 
+## Discord 私信入口
+
+为 Discord Bot 配置一个专用 Kada 设备。用本机 daemon 的配置启动连接器。
+
+```powershell
+npm run harness -- remote pair discord bot
+```
+
+把专用 Bot 令牌和上面签发的 Kada 配对令牌放入对应环境变量。Discord 用户 ID 用字符串填写。
+
+```json
+{
+  "discord": {
+    "userId": "123456789012345678",
+    "botTokenEnv": "KADA_DISCORD_BOT_TOKEN",
+    "pairingTokenEnv": "KADA_DISCORD_PAIRING_TOKEN"
+  }
+}
+```
+
+```powershell
+npm run harness -- discord
+```
+
+首次连接从当时最新的消息开始记录。启动后，在该 Bot 私信发文字或文档。每条消息可附 4 份文档，每份最多 5 MiB。针对 Bot 显示的任务说明点 **Reply** 并输入 `!confirm`。答复待问也用 **Reply**，任务完成后原产物作为文件发回。
+
+`!new` 新开会话。回复旧 Bot 消息可接回原任务。用 `!status` 查看状态和未取得回执的发送，或重新显示当前待确认、待回答内容。`!delivery` 可以重新请求核验产物。断开期间收到的消息会在连接后按原顺序补读。 [实现与测试](superpowers/plans/2026-11-27-discord.md)
+
 ## 电脑接管与分工
 
 ```powershell

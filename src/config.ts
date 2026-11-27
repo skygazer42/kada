@@ -5,6 +5,11 @@ export interface ModelRef { provider: string; modelId: string }
 export interface RemoteComputer { name: string; origin: string }
 export type GithubWebhookConfig = { routineId: string; secretEnv: string };
 export interface TelegramConfig { userId: number; botTokenEnv: string; pairingTokenEnv: string }
+export interface DiscordConfig { userId: string; botTokenEnv: string; pairingTokenEnv: string }
+
+export function discordSnowflake(value: unknown): value is string {
+  return typeof value === "string" && /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 0xffff_ffff_ffff_ffffn;
+}
 export interface ComputerConfig {
   command: string;
   args?: string[];
@@ -41,6 +46,7 @@ export interface Config {
   remoteComputers?: RemoteComputer[];
   remotePush?: boolean;
   telegram?: TelegramConfig;
+  discord?: DiscordConfig;
   githubIssuePolling?: string[];
   githubIssueTokenEnv?: string;
   githubWebhooks?: GithubWebhookConfig[];
@@ -141,10 +147,10 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
       throw new Error("remoteComputers must contain unique origins.");
     }
   }
+  const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
   let telegram: TelegramConfig | undefined;
   if (raw.telegram !== undefined) {
     const input = raw.telegram as Partial<TelegramConfig> | null;
-    const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
     if (!input || typeof input !== "object" || Array.isArray(input) ||
       Object.keys(input).some(key => !["userId", "botTokenEnv", "pairingTokenEnv"].includes(key)) ||
       typeof input.userId !== "number" || !Number.isSafeInteger(input.userId) || input.userId < 1 ||
@@ -153,6 +159,17 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
       throw new Error("telegram requires a private userId and botTokenEnv and pairingTokenEnv variable names.");
     }
     telegram = { userId: input.userId, botTokenEnv: input.botTokenEnv, pairingTokenEnv: input.pairingTokenEnv };
+  }
+  let discord: DiscordConfig | undefined;
+  if (raw.discord !== undefined) {
+    const input = raw.discord as Partial<DiscordConfig> | null;
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+      Object.keys(input).some(key => !["userId", "botTokenEnv", "pairingTokenEnv"].includes(key)) ||
+      !discordSnowflake(input.userId) || typeof input.botTokenEnv !== "string" || !envName.test(input.botTokenEnv) ||
+      typeof input.pairingTokenEnv !== "string" || !envName.test(input.pairingTokenEnv)) {
+      throw new Error("discord requires a userId string and botTokenEnv and pairingTokenEnv variable names.");
+    }
+    discord = { userId: input.userId, botTokenEnv: input.botTokenEnv, pairingTokenEnv: input.pairingTokenEnv };
   }
   const maxEstimatedCostUsd = raw.maxEstimatedCostUsd ?? 1;
   if (typeof maxEstimatedCostUsd !== "number" || !Number.isFinite(maxEstimatedCostUsd) || maxEstimatedCostUsd <= 0) throw new Error("maxEstimatedCostUsd must be a positive number");
@@ -174,6 +191,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),
     ...(remoteComputers?.length ? { remoteComputers } : {}),
     ...(telegram ? { telegram } : {}),
+    ...(discord ? { discord } : {}),
     ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
     ...(githubIssueTokenEnv ? { githubIssueTokenEnv } : {}),
     ...(githubWebhooks ? { githubWebhooks: githubWebhooks.map(({ routineId, secretEnv }) => ({ routineId, secretEnv })) } : {}),

@@ -85,6 +85,7 @@ try {
     console.log("\nGitHub Issue Webhook：daemon 配置 githubWebhooks: [{ routineId, secretEnv }]，入口 POST /hooks/github/规则ID；JSON 原始正文按 X-Hub-Signature-256 验签。默认关闭，外部代理只转发该 Webhook 路径。");
     console.log("GitHub PR Webhook 使用同一配置，规则类型为 pull_request.opened、pull_request.reopened、pull_request.synchronize、pull_request.closed 或 pull_request.ready_for_review。原任务保留仓库、编号、headSha/baseSha 及 draft/merged；可按这些标量精确匹配。");
     console.log("Telegram 私聊入口用 telegram 配置指定用户和令牌环境变量，再运行 npm run harness -- telegram。");
+    console.log("Discord 私信入口用 discord 配置指定用户和令牌环境变量，再运行 npm run harness -- discord。");
   } else if (command === "chat") {
     const assistant = selectedAssistant(), collaborators = selectedCollaborators();
     if (id && (assistant || collaborators || browserProfile)) throw new Error('仅新会话可以选择助手、同事和浏览器。');
@@ -94,16 +95,16 @@ try {
     console.log(daemon.started ? `已启动后台服务（PID ${daemon.pid}），退出聊天后任务仍可继续。` : "已连接本地后台服务。");
     await runChat(createClient(config), { taskId: id, workspace: args.values.workspace ? resolve(args.values.workspace) : assistant || collaborators ? process.cwd() : undefined,
       assistant, collaborators, browserProfile });
-  } else if (command === "telegram") {
+  } else if (command === "telegram" || command === "discord") {
     const { ensureDaemon } = await import("./daemon.js");
-    const { runTelegram } = await import("./telegram.js");
-    if (!config.telegram) throw new Error("Configure telegram before starting the Telegram connector.");
+    if (!config[command]) throw new Error("Configure " + command + " before starting the connector.");
+    const run = command === "telegram" ? (await import("./telegram.js")).runTelegram : (await import("./discord.js")).runDiscord;
     await ensureDaemon(config, args.values.config);
     const controller = new AbortController();
     const stop = () => controller.abort();
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    try { await runTelegram(config, controller.signal); }
+    try { await run(config, controller.signal); }
     finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
   } else if (command === "serve") {
     const { serve } = await import("./server.js");
