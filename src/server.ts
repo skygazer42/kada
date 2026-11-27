@@ -402,6 +402,19 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'POST') return send(201, await runtime.createRoom(await body(req)));
         return send(405, { error: 'Method not allowed' });
       }
+      const roomAccount = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})\/accounts(?:\/([A-Za-z0-9][A-Za-z0-9_-]{0,79}))?$/.exec(url.pathname);
+      if (roomAccount) {
+        const [, id, accountId] = roomAccount;
+        const meta = await runtime.metadata(id!).catch(error => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        });
+        if (!meta?.room) return send(404, { error: 'Assistant room not found.' });
+        if (!accountId && req.method === 'GET') return send(200, await devices.roomAccounts(id!));
+        if (accountId && (req.method === 'PUT' || req.method === 'DELETE')) {
+          return send(200, await devices.setRoomAccount(id!, accountId, req.method === 'PUT' ? await body(req) : null));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       const roomFile = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})\/messages\/(\d+)\/attachments\/(\d+)$/.exec(url.pathname);
       if (roomFile && req.method === 'GET') {
         return send(200, await runtime.roomAttachment(roomFile[1]!, Number(roomFile[2]), Number(roomFile[3])));

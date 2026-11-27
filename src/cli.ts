@@ -60,6 +60,7 @@ try {
     console.log('\nrun 或 chat 接受可重复的 --collaborator ID@修订。跨项目协作使用 --collaborator "ID@修订=接收项目目录"。确认任务后，主助手可向选定的同事派活。用 /assistant-work 查看工作，/reply-assistant 答复，/guide-assistant 补充说明，/stop-assistant 停止原工作。');
     console.log('\n本机助手群组\n  rooms list | rooms show 群组ID [历史游标]\n  rooms add "群组名称" 助手ID@修订 助手ID@修订 […] --workspace 路径\n  跨项目成员可填写 "助手ID@修订=成员项目目录"\n  rooms edit 群组ID 修改.json\n  rooms send 群组ID 助手ID "消息" [请求ID] [--room-file 路径]');
     console.log('  rooms share|unshare 群组ID 账户ID 设备ID\n  rooms share-replies|unshare-replies 群组ID 账户ID 设备ID\n  rooms share-files|unshare-files 群组ID 账户ID 设备ID');
+    console.log('  rooms accounts 群组ID\n  rooms grant-account 群组ID 账户ID viewer|participant [files]\n  rooms revoke-account 群组ID 账户ID');
     console.log('  rooms file 群组ID 消息ID 附件编号');
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
@@ -172,6 +173,14 @@ try {
           requestId: requestId ?? randomUUID(), files: args.values['room-file'] });
       } else if (action === 'file' && rest.length === 3) {
         result = await request(path + '/' + segment(roomOrTitle) + '/messages/' + segment(memberId) + '/attachments/' + segment(message));
+      } else if (action === 'accounts' && rest.length === 1) {
+        result = await request(path + '/' + segment(roomOrTitle) + '/accounts');
+      } else if (action === 'grant-account' && (message === 'viewer' || message === 'participant') &&
+        (rest.length === 3 || rest.length === 4 && requestId === 'files')) {
+        result = await request(path + '/' + segment(roomOrTitle) + '/accounts/' + segment(memberId), 'PUT',
+          { role: message, files: requestId === 'files' });
+      } else if (action === 'revoke-account' && rest.length === 2) {
+        result = await request(path + '/' + segment(roomOrTitle) + '/accounts/' + segment(memberId), 'DELETE');
       } else if (/^(?:un)?share(?:-replies|-files)?$/.test(action) && rest.length === 3) {
         result = await request(path + '/' + segment(roomOrTitle) + '/' + action, 'POST', { accountId: memberId, deviceId: message });
       } else throw new Error('Use rooms list, add, show, edit, send, file, share or unshare. See help for arguments.');

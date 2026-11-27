@@ -3,12 +3,20 @@ import { createRemoteCredential, type RemoteDevice } from './remote.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
 export type SharedApproval = { taskId: string; approvalId: string; digest: string };
+type RoomAccountRole = 'viewer' | 'participant';
+type RoomAccountGrant = { roomId: string; accountId: string; role: RoomAccountRole; files: boolean };
+const pairingId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+const isRoomAccountRole = (value: unknown): value is RoomAccountRole => value === 'viewer' || value === 'participant';
 
 /** Pairing and approval sharing are available only behind the owner's daemon authentication. */
 export class RemoteDevices {
   private changes = new SerialQueue();
   private path:string;
-  constructor(dataDir:string) { this.path = join(dataDir,'remote','devices.json'); }
+  private roomAccountsPath: string;
+  constructor(dataDir:string) {
+    this.path = join(dataDir,'remote','devices.json');
+    this.roomAccountsPath = join(dataDir,'remote','room-accounts.json');
+  }
   async credentials():Promise<RemoteDevice[]> {
     try { return await readJson<RemoteDevice[]>(this.path); }
     catch(error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
@@ -52,6 +60,40 @@ export class RemoteDevices {
     });
   }
 
+  private async readRoomAccounts(): Promise<RoomAccountGrant[]> {
+    const grants = await readJson<RoomAccountGrant[]>(this.roomAccountsPath).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    });
+    if (!Array.isArray(grants) || grants.some(grant => !grant || typeof grant.accountId !== 'string' || !pairingId.test(grant.accountId) ||
+        typeof grant.roomId !== 'string' || !/^[a-f0-9-]{36}$/.test(grant.roomId) || !isRoomAccountRole(grant.role) || typeof grant.files !== 'boolean')) {
+      throw new Error('Invalid saved room account access.');
+    }
+    return grants;
+  }
+
+  roomAccounts(roomId: string) {
+    return this.changes.run(async () => (await this.readRoomAccounts()).filter(grant => grant.roomId === roomId));
+  }
+
+  setRoomAccount(roomId: string, accountId: string, input: Record<string, unknown> | null) {
+    if (!pairingId.test(accountId)) throw Object.assign(new Error('Provide a valid paired account ID.'), { status: 400 });
+    if (input && (!isRoomAccountRole(input.role) || input.files !== undefined && typeof input.files !== 'boolean' ||
+        Object.keys(input).some(key => key !== 'role' && key !== 'files'))) {
+      throw Object.assign(new Error('Choose the viewer or participant role and an optional boolean files permission.'), { status: 400 });
+    }
+    return this.changes.run(async () => {
+      const grants = (await this.readRoomAccounts()).filter(grant => grant.roomId !== roomId || grant.accountId !== accountId);
+      if (!input) {
+        await atomicJson(this.roomAccountsPath, grants);
+        return { revoked: true };
+      }
+      const grant = { roomId, accountId, role: input.role as RoomAccountRole, files: input.files === true };
+      await atomicJson(this.roomAccountsPath, [...grants, grant]);
+      return grant;
+    });
+  }
+
   async setSharedWorkItem(accountId: string, deviceId: string, id: string, shared: boolean, access: 'view' | 'replies' | 'controls' | 'edits' = 'view') {
     this.validate(accountId, deviceId);
     return this.changes.run(async () => {
@@ -76,16 +118,25 @@ export class RemoteDevices {
     });
   }
 
-  async withPairedDevice<T>(tokenHash: string, action: (device: RemoteDevice) => Promise<T>) {
+  async withPairedDevice<T>(tokenHash: string, action: (device: RemoteDevice) => Promise<T>, scope?: 'shared-rooms') {
     return this.changes.run(async () => {
       const device = (await this.credentials()).find(item => item.tokenHash === tokenHash);
       if (!device) return;
-      return action(device);
+      if (scope !== 'shared-rooms') return action(device);
+      const grants = new Map(device.sharedThreads?.map(grant => [grant.taskId, grant]));
+      for (const account of await this.readRoomAccounts()) {
+        if (account.accountId !== device.accountId) continue;
+        const grant = { ...grants.get(account.roomId), taskId: account.roomId };
+        if (account.role === 'participant') grant.replies = true;
+        if (account.files) grant.files = true;
+        grants.set(account.roomId, grant);
+      }
+      return action({ ...device, sharedThreads: [...grants.values()] });
     });
   }
 
   private validate(accountId:unknown,deviceId:unknown):asserts accountId is string {
-    if (![accountId,deviceId].every(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id))) throw new Error('Use 1–80 letters, numbers, underscores or hyphens for account and device IDs.');
+    if (![accountId,deviceId].every(id => typeof id === 'string' && pairingId.test(id))) throw new Error('Use 1–80 letters, numbers, underscores or hyphens for account and device IDs.');
   }
   async pair(accountId:string,deviceId:string) {
     this.validate(accountId,deviceId);

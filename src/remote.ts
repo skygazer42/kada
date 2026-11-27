@@ -796,7 +796,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
                   ...(grant.files ? { href: `/remote/api/shared-rooms/${id}/attachments/${message.id}/${file.id}` } : {}) })) } : {}) })),
             active: view.active ? { memberId: view.active.memberId } : null, nextBefore: view.nextBefore,
           };
-        });
+        }, 'shared-rooms');
         if (!result) throw new HttpError(401, 'Enter this device’s pairing token.');
         if (result !== true) send(response, 200, result);
       } else if (options.sharedDevices && sharedThread) {

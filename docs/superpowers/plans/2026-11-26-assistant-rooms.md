@@ -22,6 +22,14 @@
 
 ## 实施与验证
 
+### 群组账户授权
+
+本机 owner 为群组选定获准查看或发言的配对账户，附件下载是可选权限。访问时核对当前设备配对和账户权限。新配对设备沿同一账户生效，降级和撤回作用于该账户的后续请求。 [OpenMausBot 成员权限更新与会话撤回](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/cloud-team-roster.ts#L87)
+
+账户和设备授予的权限可以叠加。授权只用于该群组的公开记录、批准的发言和附件。验收核对账户隔离、重启后配对设备、降级、附件撤回和账户撤回。
+
+端到端回归用终端授予账户，重启后为同一账户配对第二台设备。两台设备沿原群组获得角色，其他账户请求被拒绝。降级和撤回立即影响后续发送与下载。重叠的设备授权按该设备原有权限生效。 [账户授权回归](../../../test/shared-assistant-rooms.test.ts)
+
 ### 跨项目群组
 
 本机用户可为群组成员指定其项目的工作目录。成员按已选修订和工作目录使用原 Pi 会话。由本机 owner 发出的群组消息可调用成员已有的文件工具名单。配对设备的发言继续使用原群组权限。改绑目录使使用旧目录的原回合和排队消息退出，旧消息保留原回执。 [OpenMausBot 目标会话目录](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/handoff-files.ts#L71) · [Rakazo 成员更新](https://github.com/elie222/rakazo/blob/e64d73292179/packages/db/src/spaces/groups.ts#L440)

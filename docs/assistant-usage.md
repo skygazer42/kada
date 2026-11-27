@@ -189,6 +189,14 @@ npm run harness -- rooms show 群组ID
 
 `rooms share-files 群组ID 账户ID 设备ID` 授予该设备下载固定附件的权限，`rooms unshare-files` 单独撤回。撤回群组查看会同时撤回下载。 [附件权限验收](superpowers/plans/2026-11-26-room-attachments.md)
 
+要让同一账户的所有配对设备访问群组，可授予账户级权限。`viewer` 允许查看，`participant` 允许查看和发言，末尾加 `files` 允许下载。在已有账户上再次授予会更新该账户的角色。设备直接获授的权限也参与访问判断。 [账户授权与回归](superpowers/plans/2026-11-26-assistant-rooms.md#群组账户授权)
+
+```powershell
+npm run harness -- rooms grant-account 群组ID research participant files
+npm run harness -- rooms accounts 群组ID
+npm run harness -- rooms revoke-account 群组ID research
+```
+
 ## 应用 API 凭据
 
 新本机主会话可请求提供 API 凭据。卡片列出名称、用途、HTTPS 站点与认证方式；核对后输入 `/credential 问题ID`，再在终端的无回显提示中粘贴值。命令本身只填问题 ID。用 `/decline-credential 问题ID` 拒绝。macOS 已接入独立密码字段，编译与实机交互仍待验证。普通消息、选项答复和管道不能提供凭据；手机共享卡提示回本机处理。
