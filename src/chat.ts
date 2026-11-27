@@ -9,7 +9,7 @@ import type { McpSettingsProposal } from './mcp-tools.js';
 import type { MemoryFactView } from "./user-memory.js";
 import { errorText, SerialQueue } from "./util.js";
 import { assistantText, briefText, progressText, usageText, verificationText } from "./presentation.js";
-import type { AssistantRef } from './assistants.js';
+import type { AssistantCollaboratorRef, AssistantRef } from './assistants.js';
 import { isConfirmation } from "./preparation.js";
 import { conversationAnswer as answer } from "./conversation.js";
 
@@ -32,7 +32,7 @@ export class ChatSession {
   private shownApprovals = new Map<string, string>();
   private shownAssistantWork = new Map<string, string>();
   private pendingThread?: { source: string; title: string; message: string; reportBack: boolean; modelId?: string; requestId: string };
-  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef, private collaborators?: AssistantRef[]) {}
+  constructor(private client: HarnessClient, private emit: (event: ChatEvent) => void, private workspace?: string, private protectedInput?: () => Promise<string>, private assistant?: AssistantRef, private collaborators?: AssistantCollaboratorRef[]) {}
   private info(text: string): void { this.emit({ kind: "info", text }); }
   private select(id?: string): void { this.taskId = id; this.printed.clear(); this.activity = ""; this.shownBrief = undefined; this.shownApprovals.clear(); this.shownAssistantWork.clear(); }
   async attach(id: string): Promise<void> {
@@ -527,7 +527,7 @@ export class ChatSession {
 }
 
 export async function runChat(client: HarnessClient, options: {
-  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef; collaborators?: AssistantRef[];
+  taskId?: string; workspace?: string; input?: Readable; output?: Writable; intervalMs?: number; assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[];
 } = {}): Promise<void> {
   if (options.taskId && (options.assistant || options.collaborators)) throw new Error('仅新会话可以选择助手与同事。');
   const input = options.input ?? process.stdin;

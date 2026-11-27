@@ -29,7 +29,13 @@ function parseAssistant(value: string) {
   return assistantRef({ id: match[1], revision: Number(match[2]) });
 }
 const selectedAssistant = () => args.values.assistant === undefined ? undefined : parseAssistant(args.values.assistant);
-const selectedCollaborators = () => args.values.collaborator?.map(parseAssistant);
+const selectedCollaborators = () => args.values.collaborator?.map(value => {
+  const separator = value.indexOf('=');
+  if (separator < 0) return parseAssistant(value);
+  const path = value.slice(separator + 1);
+  if (!path.trim()) throw new Error('请指定同事的项目工作目录。');
+  return { ...parseAssistant(value.slice(0, separator)), workspace: resolve(path) };
+});
 
 try {
   if (args.values.help || command === "help") {
@@ -45,7 +51,7 @@ try {
     console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
     console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
     console.log('\n工作区快照（本机）\n  snapshots save 任务ID "快照名称"\n  snapshots list 任务ID\n  snapshots preview 任务ID 快照ID\n  snapshots restore 任务ID 快照ID 预览版本');
-    console.log('\nrun 或 chat 接受可重复的 --collaborator ID@修订。确认任务后，主助手可向选定的同事派活。用 /assistant-work 查看工作，/reply-assistant 答复，/guide-assistant 补充说明，/stop-assistant 停止原工作。');
+    console.log('\nrun 或 chat 接受可重复的 --collaborator ID@修订。跨项目协作使用 --collaborator "ID@修订=接收项目目录"。确认任务后，主助手可向选定的同事派活。用 /assistant-work 查看工作，/reply-assistant 答复，/guide-assistant 补充说明，/stop-assistant 停止原工作。');
     console.log('\n本机助手群组\n  rooms list | rooms show 群组ID [历史游标]\n  rooms add "群组名称" 助手ID@修订 助手ID@修订 […] --workspace 路径\n  rooms edit 群组ID 修改.json\n  rooms send 群组ID 助手ID "消息" [请求ID] [--room-file 路径]');
     console.log('  rooms share|unshare 群组ID 账户ID 设备ID\n  rooms share-replies|unshare-replies 群组ID 账户ID 设备ID\n  rooms share-files|unshare-files 群组ID 账户ID 设备ID');
     console.log('  rooms file 群组ID 消息ID 附件编号');

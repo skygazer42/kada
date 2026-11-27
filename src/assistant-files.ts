@@ -27,7 +27,8 @@ export async function publishAssistantBytes(workspace: Workspace, path: string, 
   return expected;
 }
 
-export async function prepareAssistantFiles(workspace: Workspace, id: string, paths: string[], direction: 'inputs' | 'outputs' = 'inputs'): Promise<AssistantFile[]> {
+export async function prepareAssistantFiles(workspace: Workspace, id: string, paths: string[],
+  direction: 'inputs' | 'outputs' = 'inputs', destination = workspace): Promise<AssistantFile[]> {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(id) || paths.length > 5) throw new Error('Provide an original work ID and up to five input files.');
   const files: AssistantFile[] = [];
   for (const input of paths) {
@@ -35,16 +36,16 @@ export async function prepareAssistantFiles(workspace: Workspace, id: string, pa
     if (!stat.isFile() || stat.size > maxBytes) throw new Error('Assistant inputs require regular files of at most 5 MiB.');
     if (files.some(file => file.sourcePath === sourcePath)) throw new Error('Duplicate assistant input path.');
     const source = await workspace.inspect(sourcePath);
-    files.push({ ...source, sourcePath, path: await workspace.path(join('agents', 'assistant-work', id, direction, files.length + '-' + basename(sourcePath))) });
+    files.push({ ...source, sourcePath, path: await destination.path(join('agents', 'assistant-work', id, direction, files.length + '-' + basename(sourcePath))) });
   }
   return files;
 }
 
-export async function copyAssistantFiles(workspace: Workspace, files: AssistantFile[]): Promise<void> {
+export async function copyAssistantFiles(workspace: Workspace, files: AssistantFile[], destination = workspace): Promise<void> {
   for (const file of files) {
-    const target = await workspace.path(file.path);
+    const target = await destination.path(file.path);
     let saved: FileSnapshot | undefined;
-    try { saved = await workspace.inspect(target); }
+    try { saved = await destination.inspect(target); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (saved) {
       if (!matches(saved, file)) throw new Error('The fixed assistant input changed; the saved copy was not overwritten.');
@@ -66,6 +67,6 @@ export async function copyAssistantFiles(workspace: Workspace, files: AssistantF
         throw new Error('The original assistant input changed while copying.');
       }
     } finally { await opened.close(); }
-    await publishAssistantBytes(workspace, target, bytes);
+    await publishAssistantBytes(destination, target, bytes);
   }
 }

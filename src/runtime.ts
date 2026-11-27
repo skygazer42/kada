@@ -49,7 +49,8 @@ import { chatWorkItemsExtension } from './chat-work-items.js';
 import { Questions, QuestionError, currentQuestion, questionExtension, recordQuestionAnswer } from './questions.js';
 import { ApplicationCredentials, CredentialError, type CredentialNetwork } from './application-credentials.js';
 import { credentialTools, credentialExecution } from './credential-tools.js';
-import { Assistants, AssistantError, assistantRef, type AssistantRef, type AssistantPin } from './assistants.js';
+import { Assistants, AssistantError, assistantCollaboratorRef, assistantProject, assistantRef,
+  type AssistantRef, type AssistantPin, type AssistantCollaboratorRef, type AssistantCollaboratorPin } from './assistants.js';
 import { assistantPolicy, assistantTools } from './assistant-policy.js';
 import { chatAssistantsExtension } from './chat-assistants.js';
 import { chatModelProposals } from './chat-model-proposals.js';
@@ -79,7 +80,8 @@ function workItemAnswerVersion(meta: TaskMeta, goal?: GoalState): string | null 
 export interface TaskMeta {
   id: string;
   assistant?: AssistantPin;
-  collaborators?: AssistantPin[];
+  collaborators?: AssistantCollaboratorPin[];
+  collaborationProject?: string;
   room?: AssistantPin[];
   roomRevision?: number;
   chartDelivery?: true;
@@ -610,7 +612,7 @@ export class LocalRuntime {
     return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback), ...(memoryScope ? { memoryScope } : {}) };
   }
 
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; room?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; routineGmail?:RoutineGmailMatch; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;requireRoutineAdmission?:()=>Promise<void>;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[]; room?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; routineGmail?:RoutineGmailMatch; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;requireRoutineAdmission?:()=>Promise<void>;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
@@ -623,13 +625,13 @@ export class LocalRuntime {
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
       const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
       if (assistant && (options.remote || workspace === undefined)) throw new AssistantError(400, 'Select an assistant only for a new local task with its existing project workspace.');
-      let collaboratorRefs: AssistantRef[] | undefined;
+      let collaboratorRefs: AssistantCollaboratorRef[] | undefined;
       if (options.collaborators !== undefined) {
         if (options.remote || options.workItem || options.routineOccurrenceId || workspace === undefined || this.config.maxSubagents < 1 ||
           !Array.isArray(options.collaborators) || !options.collaborators.length || options.collaborators.length > 16) {
           throw new AssistantPeerError(400, 'Select between one and sixteen collaborators for a new local project task with workers enabled.');
         }
-        collaboratorRefs = options.collaborators.map(assistantRef);
+        collaboratorRefs = options.collaborators.map(assistantCollaboratorRef);
         if (new Set(collaboratorRefs.map(ref => ref.id)).size !== collaboratorRefs.length || collaboratorRefs.some(ref => ref.id === assistant?.id)) {
           throw new AssistantPeerError(400, 'Choose distinct collaborators other than the coordinating assistant.');
         }
@@ -669,7 +671,18 @@ export class LocalRuntime {
       const room = options.room ? await Promise.all(options.room.map(pin)) : undefined;
       const model = selectedModel ? await selectThreadModel(this.options.models, selectedModel)
         : room?.[0]?.model ?? validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
-      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(pin)) : undefined;
+      const collaborationProject = collaboratorRefs?.some(ref => ref.workspace !== undefined)
+        ? await assistantProject(requestedWorkspace) : undefined;
+      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(async ({ workspace: target, ...ref }) => {
+        if (!target) return pin(ref);
+        const destination = await Workspace.open(target, { create: false }).catch(error => {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === 'ENOENT' || code === 'ENOTDIR') throw new AssistantError(400, 'Choose an existing collaborator workspace.');
+          throw error;
+        });
+        const fallback = await this.providers.selected(this.config.model, destination.root);
+        return { ...await this.pinAssistant(destination.root, ref, fallback), workspace: destination.root };
+      })) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace, { create: !thread && !room });
       const localChat = !options.remote && !room;
@@ -717,6 +730,7 @@ export class LocalRuntime {
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
         ...(thread ? { thread: { ...thread, revision: 1 } } : {}),
         ...(collaborators ? { collaborators } : {}),
+        ...(collaborationProject ? { collaborationProject } : {}),
         ...(room ? { room } : {}),
         ...(this.config.workspaceSnapshots && localChat ? { snapshotBeforeTurn: true as const } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
@@ -1265,7 +1279,10 @@ export class LocalRuntime {
     if (this.closing) throw new Error("Runtime is shutting down");
     let active = this.active.get(meta.id);
     if (!active) {
-      const workspace = await Workspace.open(meta.workspace);
+      const workspace = await Workspace.open(meta.workspace, { create: !meta.collaborationProject });
+      if (meta.collaborationProject && workspace.root !== meta.workspace) {
+        throw new AssistantPeerError(409, 'The original coordinator workspace changed.');
+      }
       const registry = createRegistry();
       const remote=meta.remotePolicy==='workspace';
       const posts = remote ? [] : [threadPostExtension(() => this.currentRootInput(this.active.get(meta.id)!))];
@@ -1821,7 +1838,7 @@ export class LocalRuntime {
   private peerControl(active: Active): AssistantPeerControlRunner {
     return action => active.childAdmission.run(async () => {
       const goal = await this.goalState(active);
-      return action({ root: active.root.id, project: active.meta.collaborators![0]!.project, originTaskId: active.meta.id,
+      return action({ root: active.root.id, project: active.meta.collaborationProject ?? active.meta.collaborators![0]!.project, originTaskId: active.meta.id,
         enabled: active.meta.control === 'active' && !!goal && !await this.budgetReason(active, goal),
         requiresConfirmation: !!active.meta.preparation, deadlineAt: this.deadline(active, goal), assistant: active.meta.assistant });
     });

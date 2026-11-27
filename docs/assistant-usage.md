@@ -162,6 +162,12 @@ npm run harness -- run "请研究员核对资料，再由主助手提交结果" 
 
 目前从本机终端和 owner API 操作。站立会话归属于原任务和来源会话，任务状态可查到原工作 ID、角色修订、用量和留下的文件。[协作契约与验收](specs/2026-11-26-assistant-collaboration.md)
 
+跨项目时，在协作者修订后加上接收项目的目录。用接收项目的 `assistants list` 查到 ID。出现在同一任务中的协作者通过各自工作目录执行已授权的文件与协作工具，明确附件随原工作复制，结果可以从 `/assistant-work` 查看。 [跨项目验收](specs/2026-11-26-assistant-collaboration.md#跨项目派活)
+
+```powershell
+npm run harness -- run "请报告项目的审核员核对附件" --workspace E:/analysis --collaborator "助手ID@1=E:/reporting"
+```
+
 ## 助手群组
 
 从项目的命名助手中选 2 到 8 位成员及修订。用成员 ID 点名答复。成员使用固定版本的指令、模型和 Pi 会话，并读取已经发生的近期群组消息。回复期间可从终端或已授权的手机继续发送，每个群组最多保留八条等待消息，按接收顺序处理。保存请求 ID 可查询或重试同一条消息。 [排队验收](superpowers/plans/2026-11-26-assistant-room-queue.md)

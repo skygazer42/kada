@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { Models } from '@earendil-works/pi-ai';
 import type { ModelRef } from './config.js';
 import { memoryProject } from './memory-sources.js';
@@ -10,6 +10,8 @@ export type AssistantRef = { id: string; revision: number };
 type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[]; memoryScope?: 'shared' | 'isolated' };
 export type Assistant = AssistantRef & Definition & { project: string; archived: boolean; createdAt: number; updatedAt: number };
 export type AssistantPin = AssistantRef & Definition & { project: string; model: ModelRef };
+export type AssistantCollaboratorRef = AssistantRef & { workspace?: string };
+export type AssistantCollaboratorPin = AssistantPin & { workspace?: string };
 export type AssistantMutation = { requestId: string; project: string; workspace: string };
 type StoredAssistant = Assistant & { operations?: { requestId: string; fingerprint: string; result: Assistant }[] };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -31,6 +33,15 @@ export function assistantRef(input: unknown): AssistantRef {
   const value = fields(input, ['id', 'revision']);
   if (typeof value.id !== 'string' || !uuid.test(value.id)) throw new AssistantError(400, 'Provide an assistant ID and revision.');
   return { id: value.id, revision: revision(value.revision) };
+}
+export function assistantCollaboratorRef(input: unknown): AssistantCollaboratorRef {
+  const { id, revision, workspace } = fields(input, ['id', 'revision', 'workspace']);
+  const ref = assistantRef({ id, revision });
+  if (workspace === undefined) return ref;
+  if (typeof workspace !== 'string' || !isAbsolute(workspace) || workspace.length > 8192 || workspace.includes('\0')) {
+    throw new AssistantError(400, 'Choose an existing absolute collaborator workspace.');
+  }
+  return { ...ref, workspace: resolve(workspace) };
 }
 function text(value: unknown, label: string, limit: number, blank = false): string {
   if (typeof value !== 'string' || !blank && !value.trim() || value.length > limit || value.includes('\0')) throw new AssistantError(400, `Provide assistant ${label} of up to ${limit} characters.`);

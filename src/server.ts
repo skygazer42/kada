@@ -7,7 +7,7 @@ import type { Config } from "./config.js";
 import { ComputerBridge } from "./computer.js";
 import { VERSION } from "./version.js";
 import { LocalRuntime, type RuntimeOptions } from "./runtime.js";
-import { AssistantError, type AssistantRef } from './assistants.js';
+import { AssistantError, type AssistantRef, type AssistantCollaboratorRef } from './assistants.js';
 import { cloudModels } from "./models.js";
 import { errorText } from "./util.js";
 import { taskView } from "./task-view.js";
@@ -428,7 +428,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (input.mode !== undefined && input.mode !== "chat") throw new Error("mode must be chat when supplied");
         if (input.mode === "chat" && input.confirmed === true) throw new Error("An ordinary conversation cannot preconfirm a task");
         return send(201, await runtime.create(input.objective, input.workspace, input.acceptance, { prepare: input.confirmed !== true, chat: input.mode === "chat",skills:input.skills as SkillSelection[]|undefined,
-          assistant: input.assistant as AssistantRef | undefined, collaborators: input.collaborators as AssistantRef[] | undefined }));
+          assistant: input.assistant as AssistantRef | undefined, collaborators: input.collaborators as AssistantCollaboratorRef[] | undefined }));
       }
       const threadRoute = /^\/v1\/tasks\/([a-f0-9-]{36})\/(threads?)$/.exec(url.pathname);
       if (threadRoute) {

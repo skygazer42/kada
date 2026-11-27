@@ -93,6 +93,14 @@ Runtime 尚未安装该扩展，不能从正常任务入口使用。固定文件
 
 实现提交 `d30e071` 的不可变内容通过 TruffleHog 3.100.1 扫描（15.6秒），类型/构建、公开测试类型及笔记/提交检查通过。独立代码审查仍不可用：子代理任务正文丢失，CLI 在快照问题修正为不可变提交后仍因认证401失败；凭据扫描不等同代码审查。
 
+## 跨项目派活
+
+本机用户创建任务时，可为选定助手修订指定接收项目的绝对工作目录。服务端用该目录核对助手归属并保存规范路径。主任务确认后，模型从已保存名单和角色权限交集选择助手。原任务用量、超时、停止和重启恢复由同一 Pi 会话树管理。 [OpenMausBot 来源与目标](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/runtime-coordinator.ts#L259) · [Pi 的逐会话执行环境](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/durable/README.md#environment)
+
+含有显式接收目录的任务为各同事绑定对应工作区。各同事从固定角色和本次工作说明获取指令，可使用授权交集内的 Pi 文件工具和协作工具。输入与结果由各自原工作区核对，按固定哈希拷入接收方。返工读取原工作区的固定输入副本。 [OpenMausBot 目标目录与文件落点](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/handoff-files.ts#L270) · [Rakazo 原运行及目标检查](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/bots/group-handoff.ts#L74) · [交接身份与文件](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/bots/group-handoff.ts#L99)
+
+合成模型走正常终端和 owner API。验证启动时的目录授权、原任务确认、目录越界拒绝、源指令隔离、二进制附件、重启后答复、返工原副本和多级文件回交。 [跨项目集成回归](../../test/assistant-peer-project.test.ts)
+
 ## 本机协作入口与恢复
 
 新本机任务通过 `--collaborator ID@修订` 或 owner API 固定助手名单。准备阶段保留原确认入口，确认后才向模型注册派活工具。终端可读取原工作和结果、答复、补充说明及按已显示版本停止单项工作。已选角色与工作随原任务接回。测试核对未选助手、其他任务的工作 ID、迟到答复及未认证 API 的拒绝行为。[入口回归](../../test/assistant-peer-entry.test.ts)

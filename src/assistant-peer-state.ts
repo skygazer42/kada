@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { AssistantEntry, defineDoc, InboxDoc, LiveDoc, type ConversationId, type ConversationRecord, type EntryId, type SubmissionId, type TaskId, type Tx } from '@earendil-works/pi-durable';
-import type { AssistantPin, AssistantRef } from './assistants.js';
+import type { AssistantCollaboratorPin, AssistantRef } from './assistants.js';
 import type { FileSnapshot } from './workspace.js';
 export type AssistantWorkFile = FileSnapshot & { sourcePath?: string };
 
 export type AssistantPeerEpoch = { revision: number; epoch: number };
-type PeerPin = Omit<AssistantPin, 'model'> & { model: { provider: string; modelId: string } };
+type PeerPin = Omit<AssistantCollaboratorPin, 'model'> & { model: { provider: string; modelId: string } };
 export type AssistantSeat = {
   root: ConversationId; source: ConversationId; conversationId: ConversationId; anchor: TaskId; key: string; kind: 'standing' | 'new';
   pin: PeerPin; tools: string[]; createdAt: number;
@@ -30,12 +30,13 @@ export const AssistantPeers = defineDoc<AssistantPeerState>({ kind: 'local.assis
   initial: () => ({ seats: {}, work: {}, stopped: {} }), checkpointWhen: () => true });
 export type AssistantAdmission = {
   root: ConversationId; source: ConversationId; project: string; parentId?: string; sourceRole?: AssistantRef; tools: string[];
+  collaborators?: readonly AssistantCollaboratorPin[];
   originTaskId?: string;
   enabled: boolean; requiresConfirmation: boolean; now: number; deadlineAt: number; maxPeers: number; maxWorks: number; maxDepth: number;
   goal: AssistantPeerEpoch & { initialized: boolean; phase: string; confirmation?: unknown };
 };
 export type AssistantWorkIntent = {
-  requestId: string; assistant: AssistantPin; instructions: string; tools: string[]; files: AssistantWorkFile[];
+  requestId: string; assistant: AssistantCollaboratorPin; instructions: string; tools: string[]; files: AssistantWorkFile[];
   mode: 'standing' | 'new' | ConversationId; reworkOf?: string;
 };
 type NativeWork = { conversation: ConversationRecord; anchor: TaskId; taskId: TaskId };
@@ -72,7 +73,13 @@ export async function claimAssistantWork(tx: Tx, authority: AssistantAdmission, 
   }
   if (!authority.enabled || !authority.goal.initialized || authority.goal.phase !== 'working' || authority.requiresConfirmation && !authority.goal.confirmation ||
     authority.now >= authority.deadlineAt || authority.maxPeers < 1) throw new AssistantPeerError(409, 'Assistant work requires the original active execution goal and budget.');
-  if (intent.assistant.project !== authority.project) throw new AssistantPeerError(404, 'Assistant not found in the original project.');
+  if (intent.assistant.workspace) {
+    const permitted = authority.collaborators?.some(role => role.id === intent.assistant.id && role.revision === intent.assistant.revision &&
+      role.project === intent.assistant.project && role.workspace === intent.assistant.workspace);
+    if (!permitted) throw new AssistantPeerError(404, 'Assistant not authorized for this collaborator workspace.');
+  } else if (intent.assistant.project !== authority.project) {
+    throw new AssistantPeerError(404, 'Assistant not found in the original project.');
+  }
   if (intent.reworkOf) {
     const original = ownWork(state, intent.reworkOf), seat = original && state.seats[String(original.target)];
     if (!original || original.root !== authority.root || original.source !== authority.source || !seat) throw new AssistantPeerError(404, 'Original assistant work not found in this source.');
@@ -185,7 +192,8 @@ export function assistantWorkView(state: AssistantPeerState | undefined, id: str
   const seat = state!.seats[String(work.target)];
   if (!seat) throw new AssistantPeerError(409, 'The original assistant conversation record is missing.');
   return { id: work.id, source: work.source, conversationId: work.target, conversationKind: seat.kind, nativeTaskId: work.taskId, origin: copy(work.origin), parentId: work.parentId ?? null, reworkOf: work.reworkOf ?? null, depth: work.depth,
-    assistant: { ...work.assistant, name: seat.pin.name }, brief: work.brief.slice(0, 1000), truncated: work.brief.length > 1000,
+    assistant: { ...work.assistant, name: seat.pin.name, ...(seat.pin.workspace ? { workspace: seat.pin.workspace } : {}) },
+    brief: work.brief.slice(0, 1000), truncated: work.brief.length > 1000,
     files: copy(work.files), outputs: copy(work.outputs ?? []), questions: Object.values(work.questions ?? {}).map(question => ({ id: question.id, text: question.text, createdAt: question.createdAt,
       options: question.options ? [...question.options] : null, detail: question.detail ?? null, answer: question.answer ? { text: question.answer.text } : null })),
     result: work.result ? copy(work.result) : null, stop: work.stop ? copy(work.stop) : null, controlVersion: controlVersion(work) };

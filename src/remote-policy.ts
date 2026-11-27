@@ -2,6 +2,7 @@ import { copyFile, mkdir, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/chord/context";
 import { AgentDoc, defineExtension, defineTool, hook, ToolTask, type Extension } from "@earendil-works/pi-durable";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
@@ -15,6 +16,19 @@ const allowedTools = new Set([
   "task_prepare", "task_status", "task_plan", "task_checkpoint", "task_submit", "task_blocked", "review_result", "ask_user",
 ]);
 const nativePath = (path: string) => path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+export const nativeFileTools = new Set(["read", "write", "edit"]);
+
+export async function scopedNativeFileArguments(workspace: Workspace, name: string, args: Record<string, unknown>, cwd: string, context: Context) {
+  // Match Pi's path aliases and environment expansion before checking the boundary.
+  const input = nativePath(args.path as string);
+  const absolute = getOrThrow(await localEnvironment(cwd).absolutePath(input, context));
+  const path = await workspace.path(nativePath(absolute), cwd);
+  if (name === "read") {
+    for (const variant of [path.replace(/ (AM|PM)\./gi, "\u202F$1."), path.normalize("NFD"),
+      path.replace(/'/g, "\u2019"), path.normalize("NFD").replace(/'/g, "\u2019")]) await workspace.path(variant, cwd);
+  }
+  return { ...args, path };
+}
 
 /** A tool boundary for remote conversations, not an operating-system sandbox. */
 export function remoteFilePolicy(workspace: Workspace): Extension {
@@ -25,16 +39,8 @@ export function remoteFilePolicy(workspace: Workspace): Extension {
       if (!agent?.cwd) return { block: "The remote conversation has no workspace directory." };
       const cwd = await workspace.path(agent.cwd);
       const args = call.arguments;
-      if (["read", "write", "edit"].includes(call.name)) {
-        // Match Pi's @/Unicode-space aliases and environment expansion before checking the boundary.
-        const input = nativePath(args.path as string);
-        const absolute = getOrThrow(await localEnvironment(cwd).absolutePath(input, context));
-        const path = await workspace.path(nativePath(absolute), cwd);
-        if (call.name === "read") {
-          for (const variant of [path.replace(/ (AM|PM)\./gi, "\u202F$1."), path.normalize("NFD"),
-            path.replace(/'/g, "\u2019"), path.normalize("NFD").replace(/'/g, "\u2019")]) await workspace.path(variant, cwd);
-        }
-        return { arguments: { ...args, path } };
+      if (nativeFileTools.has(call.name)) {
+        return { arguments: await scopedNativeFileArguments(workspace, call.name, args, cwd, context) };
       }
       if (["read_file", "write_file", "list_files"].includes(call.name)) await workspace.path((args.path ?? ".") as string, cwd);
       if (call.name === "copy_file") {
