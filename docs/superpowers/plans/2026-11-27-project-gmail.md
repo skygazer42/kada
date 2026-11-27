@@ -26,7 +26,7 @@ Pi 事务同时登记选中的邮件 ID 及原发生项。恢复时沿同一发�
 
 草稿和发送可附带工作区文件。创建审批时只保存原路径、字节数及 SHA-256，实际执行前重新读取并校验，发送给 Google Workspace MCP 的参数使用标准 Base64。审批预览提供附件版本，文件同长却改动时会停止派发。 [附件参数](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2697) · [原 MIME 封装](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L1294)
 
-合成账号回归核对草稿、发送以及标签参数，并验证拒绝发送、重复批准、附件变化和邮箱换绑。真实发件和转发仍待补充或验收。 [草稿](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L3290) · [发送](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2622) · [标签](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L4584) · [本机回归](../../../test/project-gmail.test.ts)
+回复批准时固定原线程及目标邮件的 RFC Message-ID。转发批准时固定原 Gmail 邮件 ID，并保存是否携带原附件的选项。合成账号回归核对草稿、发送、回复、转发以及标签参数，并验证拒绝发送、重复批准、附件变化和邮箱换绑。第三方账号上的实际投递仍待验收。 [草稿](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L3290) · [回复参数](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2679) · [转发实现](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2887) · [标签](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L4584) · [本机回归](../../../test/project-gmail.test.ts)
 
 ## 附件读取和交付
 

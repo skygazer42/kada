@@ -371,6 +371,7 @@ export function projectGmailExtension(gmail: ProjectGmail, workspace: string, fi
 export function projectGmailWrites(gmail: ProjectGmail, scope: ApplicationApprovalScope, tools: GmailMutation[]) {
   const addresses = Type.Optional(Type.Array(Type.String({ pattern:'^[^\\s@,<>]+@[^\\s@,<>]+\\.[^\\s@,<>]+$', maxLength:320 }),
     { minItems:1,maxItems:20,uniqueItems:true }));
+  const originalId = Type.String({ pattern:'^[A-Za-z0-9_-]{1,128}$' });
   const stage = async (tool: GmailMutation, input: Record<string,unknown>, api: ToolExecutionApi, context: Context, paths?: string[]) => {
     const { source,pin } = await gmail.mutationTarget(scope,tool);
     const target = paths?.length ? {...scope,attachments:await gmail.attachmentSnapshots(scope.workspace,paths)} : scope;
@@ -385,23 +386,33 @@ export function projectGmailWrites(gmail: ProjectGmail, scope: ApplicationApprov
       name:send ? 'project_gmail_send' : 'project_gmail_draft',
       description:(send ? 'Propose sending a plain-text message from the project mailbox. Specify every recipient.'
         : 'Propose saving a plain-text Gmail draft in the project mailbox.') +
-        ' Use workspace file paths for attachments. Call this tool alone for approval.',
+        ' To reply, identify the original thread and RFC Message-ID. To forward, identify the original Gmail message and choose whether to include its attachments. Use workspace file paths for added attachments. Call this tool alone for approval.',
       parameters:Type.Object({
         to:addresses,cc:addresses,bcc:addresses,
-        subject:Type.String({ minLength:1,maxLength:500,pattern:'^[^\\r\\n]+$' }),
-        body:Type.String({ minLength:1,maxLength:16000 }),
+        subject:Type.Optional(Type.String({ minLength:1,maxLength:500,pattern:'^[^\\r\\n]+$' })),
+        body:Type.Optional(Type.String({ minLength:1,maxLength:16000 })),
         attachments:Type.Optional(Type.Array(Type.String({minLength:1,maxLength:4096}),{minItems:1,maxItems:5,uniqueItems:true})),
+        reply:Type.Optional(Type.Object({threadId:originalId,
+          messageId:Type.String({pattern:'^<[^\\s<>@]+@[^\\s<>@]+>$',maxLength:1024})},{additionalProperties:false})),
+        forward:Type.Optional(Type.Object({id:originalId,includeAttachments:Type.Optional(Type.Boolean())},{additionalProperties:false})),
       },{ additionalProperties:false }),
       replay:'safe', executionMode:'sequential',
-      execute:async ({to,cc,bcc,subject,body,attachments},api,context) => {
+      execute:async ({to,cc,bcc,subject,body,attachments,reply,forward},api,context) => {
         if (send && !to?.length) throw new GmailError(400, 'Provide a recipient for the message.');
         const recipients = [...(to ?? []), ...(cc ?? []), ...(bcc ?? [])];
         if (recipients.some(address => control.test(address))) {
           throw new GmailError(400, 'Provide valid recipient addresses.');
         }
-        if (!subject.trim() || control.test(subject) || !body.trim()) throw new GmailError(400, 'Provide a subject and body.');
+        if (reply && forward) throw new GmailError(400, 'Choose either the original reply target or the original message to forward.');
+        if (reply && control.test(reply.messageId)) throw new GmailError(400, 'Provide the original RFC Message-ID.');
+        if ((!forward && !body?.trim()) || (!reply && !forward && !subject?.trim()) ||
+          (subject !== undefined && (!subject.trim() || control.test(subject)))) {
+          throw new GmailError(400, 'Provide a body for a new message or reply, and a subject for a new message.');
+        }
         return stage(tool,{
-          subject,body,body_format:'plain',
+          body_format:'plain',...(subject === undefined ? {} : {subject}),...(body === undefined ? {} : {body}),
+          ...(reply ? {thread_id:reply.threadId,in_reply_to:reply.messageId} : {}),
+          ...(forward ? {forward_message_id:forward.id,include_forwarded_attachments:forward.includeAttachments === true} : {}),
           ...(to ? {to:to.join(', ')} : {}),...(cc ? {cc:cc.join(', ')} : {}),...(bcc ? {bcc:bcc.join(', ')} : {}),
         },api,context,attachments);
       },
@@ -411,7 +422,7 @@ export function projectGmailWrites(gmail: ProjectGmail, scope: ApplicationApprov
   const modifyLabels = defineTool({
     name:'project_gmail_labels',
     description:'Propose adding or removing exact label IDs from a message in the project mailbox. Call this tool alone for approval.',
-    parameters:Type.Object({ id:Type.String({ pattern:'^[A-Za-z0-9_-]{1,128}$' }),add:labels,remove:labels },
+    parameters:Type.Object({ id:originalId,add:labels,remove:labels },
       { additionalProperties:false }),
     replay:'safe',executionMode:'sequential',
     execute:async ({id,add,remove},api,context) => {

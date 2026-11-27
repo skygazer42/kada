@@ -133,13 +133,17 @@ test('project Gmail drafts, sends and labels use exact approval parameters and r
   const message = { to:['recipient@example.invalid'], cc:['copy@example.invalid'],subject:'Invoice summary',body:'Total 42.',attachments:[filename] };
   const f = await scriptedFixture(context => {
     const initial = JSON.stringify(context.messages.find(entry => entry.role === 'user')?.content) ?? '';
-    const operation = initial.includes('Send') ? 'send' : initial.includes('Label') ? 'labels' : 'draft';
+    const reply = initial.includes('Reply'), forward = initial.includes('Forward');
+    const operation = initial.includes('Send') || reply || forward ? 'send' : initial.includes('Label') ? 'labels' : 'draft';
     const name = 'project_gmail_' + operation;
     const called = context.messages.some(entry => entry.role === 'toolResult' && entry.toolName === name);
     if (called || !hasTool(context,name)) {
       return fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Reviewed the Gmail action.',artifacts:[] }),{ stopReason:'toolUse' });
     }
-    const args = operation === 'labels' ? {id:'abc123',remove:['INBOX']} : message;
+    const args = operation === 'labels' ? {id:'abc123',remove:['INBOX']}
+      : reply ? {to:message.to,body:'Received, thank you.',reply:{threadId:'thread01',messageId:'<original@example.invalid>'}}
+      : forward ? {to:message.to,forward:{id:'abc123',includeAttachments:true}}
+      : message;
     return fauxAssistantMessage(fauxToolCall(name,args),{ stopReason:'toolUse' });
   },{maxDurationMs:90_000});
   let runtime = f.runtime;
@@ -206,6 +210,21 @@ test('project Gmail drafts, sends and labels use exact approval parameters and r
   await decide(stale,'allow');
   await settle(stale.id,'stale');
   assert.equal((await calls()).length,3);
+  await runtime.gmail.setSource(f.workspace,source);
+
+  const reply = await request('Reply to the original email.');
+  const expectedReply = {user_google_email:source.email,from_email:source.email,to:message.to[0],body:'Received, thank you.',
+    body_format:'plain',thread_id:'thread01',in_reply_to:'<original@example.invalid>'};
+  assert.deepEqual(reply.approval.arguments,expectedReply);
+  await decide(reply,'allow');
+  await settle(reply.id,'completed');
+  const forward = await request('Forward the original email and its attachments.');
+  const expectedForward = {user_google_email:source.email,from_email:source.email,to:message.to[0],body_format:'plain',
+    forward_message_id:'abc123',include_forwarded_attachments:true};
+  assert.deepEqual(forward.approval.arguments,expectedForward);
+  await decide(forward,'allow');
+  await settle(forward.id,'completed');
+  assert.deepEqual((await calls()).slice(3),[{name:writes[1],args:expectedReply},{name:writes[1],args:expectedForward}]);
 });
 
 test('only opted-in local chats can read the current authorized project mailbox', async t => {
