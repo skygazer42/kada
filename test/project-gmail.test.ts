@@ -5,10 +5,11 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { createClient } from '../src/client.js';
+import { LocalRuntime } from '../src/runtime.js';
 import { serve } from '../src/server.js';
-import { scriptedFixture } from './helpers.js';
+import { hasTool, scriptedFixture, until } from './helpers.js';
 
 const search = 'search_gmail_messages', read = 'get_gmail_message_content';
 const digest = 'a'.repeat(64);
@@ -75,4 +76,56 @@ test('Gmail search and message pages use one authorized project mailbox and its 
   await daemon.runtime.mcp.setApproval('mail', [read], tested.revision);
   await assert.rejects(client.request(messagePath, 'POST', { id: 'abc123' }), /approval/i);
   assert.deepEqual(await client.request(queryPath, 'POST', { query: 'in:inbox' }), found);
+});
+
+test('only opted-in local chats can read the current authorized project mailbox', async t => {
+  const searchName = 'project_gmail_search', readName = 'project_gmail_read';
+  const f = await scriptedFixture(context => {
+    if (!hasTool(context, searchName)) return fauxAssistantMessage('No chat mailbox.');
+    const input = context.messages.findLastIndex(message => message.role === 'user');
+    const results = context.messages.slice(input + 1).filter(message => message.role === 'toolResult');
+    if (results.at(-1)?.isError) return fauxAssistantMessage('Mailbox permission changed.');
+    if (!results.some(result => result.toolName === searchName)) {
+      return fauxAssistantMessage(fauxToolCall(searchName, { query: 'in:inbox' }), { stopReason: 'toolUse' });
+    }
+    if (!results.some(result => result.toolName === readName)) {
+      return fauxAssistantMessage(fauxToolCall(readName, { id: 'abc123' }), { stopReason: 'toolUse' });
+    }
+    return fauxAssistantMessage('Read the original mailbox.');
+  });
+  let runtime = f.runtime;
+  t.after(async () => { await runtime.close(); await f.close(); });
+  const mcp = runtime.mcp;
+  await mcp.configure({ id: 'mail', transport: 'stdio', command: process.execPath, args: ['-e', mailServer] });
+  const { revision } = await mcp.test('mail');
+  await mcp.enable('mail', [search, read], revision);
+  const source = { id: 'mail', revision, email: 'team@example.invalid' };
+  await runtime.gmail.setSource(f.workspace, source);
+  const ask = 'Check my inbox and read the matching mail.';
+  const old = await runtime.create(ask, f.workspace, [], { chat: true });
+  const answered = (id: string, request = 'initial') => until(() => runtime.status(id), row => row.status === 'answered' && row.submission?.requestId === request);
+  assert.doesNotMatch(JSON.stringify((await answered(old.id)).messages), /"toolName":"project_gmail_/);
+
+  await runtime.gmail.setSource(f.workspace, { ...source, allowAssistant: true });
+  const newTask = await runtime.create(ask, f.workspace, [], { chat: true });
+  const result = await answered(newTask.id);
+  assert.match(JSON.stringify(result.messages), /page-two.*hello/);
+  assert.equal(result.goal, undefined);
+  await runtime.followUp(old.id, ask, 'old-mail');
+  assert.doesNotMatch(JSON.stringify((await answered(old.id, 'user:old-mail')).messages), /"toolName":"project_gmail_/);
+  const remote = await runtime.create(ask, f.workspace, [], { chat: true, remote: true });
+  assert.doesNotMatch(JSON.stringify((await answered(remote.id)).messages), /"toolName":"project_gmail_/);
+
+  await runtime.close();
+  runtime = new LocalRuntime(f.settings, { models: f.models });
+  await runtime.recover();
+  await runtime.followUp(newTask.id, ask, 'reopened-mail');
+  assert.equal((await answered(newTask.id, 'user:reopened-mail')).messages.filter(message => message.role === 'toolResult' && message.toolName === readName && !message.isError).length, 2);
+
+  await runtime.gmail.setSource(f.workspace, { ...source, allowAssistant: true, email: 'changed@example.invalid' });
+  await runtime.followUp(newTask.id, ask, 'changed-mail');
+  const changed = await answered(newTask.id, 'user:changed-mail');
+  assert.match(JSON.stringify(changed.messages), /Mailbox permission changed/);
+  assert.match(JSON.stringify(changed.messages), /The authorized project mailbox changed/);
+  assert.doesNotMatch(JSON.stringify(changed.messages), /changed@example\.invalid/);
 });

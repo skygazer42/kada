@@ -320,6 +320,8 @@ npm run harness -- gmail clear --workspace E:/project
 
 搜索结果提供邮件 ID 和后续页的令牌。把令牌作为 `gmail search` 的第二个参数继续查询。读取正文时，用返回的 `next_offset` 和 `body_sha256` 接回原邮件版本。 [源码与验收](superpowers/plans/2026-11-27-project-gmail.md)
 
+想在本机普通聊天里搜索和阅读这个邮箱时，在同一配置里加上 `"allowAssistant": true`，重新运行 `gmail source`，再打开新聊天。助手读取的搜索结果和邮件正文会发给该聊天使用的模型。用 `false` 或 `gmail clear` 可撤回后续调用。账号、连接修订或项目许可变化也会停止已有聊天的读取。
+
 在看板的 **分配助手** 选择同项目助手与修订。终端工作项 JSON 可带 `"assignee": { "id": "助手ID", "revision": 1 }`，用 `null` 清空。由用户发起工作项运行后，Pi 使用所选角色准备并等待原确认。角色更新后，新运行需要重新选择当前版本，已有运行按原版本处理。
 
 配对手机获得查看后，本机可用 `work-items share-edits 工作项ID 账户ID 设备ID` 开启该卡的 **Edit work item**。手机保存名称、说明、状态、优先级、截止日期或时刻及其时区。旧修订出现冲突时可保留草稿，选择 **Load current fields** 读取最新字段。用 `work-items unshare-edits` 撤回编辑。 [分配与手机编辑验收](superpowers/plans/2026-11-26-work-item-assignees.md)

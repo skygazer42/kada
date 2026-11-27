@@ -29,6 +29,7 @@ import { conversationAnswer, conversationInstructions } from "./conversation.js"
 import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ModelProposalError, ProviderSettings, type ModelProposalDecision } from "./provider-settings.js";
 import { McpProposalError, McpTools, type McpConnectionProposalInput, type McpPin, type McpProposalDecision, type ProjectMcpTool } from "./mcp-tools.js";
+import { ProjectGmail, projectGmailExtension } from './project-gmail.js';
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
@@ -104,6 +105,7 @@ export interface TaskMeta {
   mcpProposals?: true;
   historyRecall?: true;
   projectTaskCatalog?: true;
+  chatGmail?: string;
   projectCatalog?: true;
   threadTools?: true;
   thread?: TaskThread;
@@ -143,7 +145,7 @@ export interface TaskMeta {
   maxReworks?: number;
   maxStalls?: number;
 }
-function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, ...meta }: TaskMeta) { return meta; }
+function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, chatGmail: _chatGmail, ...meta }: TaskMeta) { return meta; }
 
 function roomSummary(meta: TaskMeta & { room: AssistantPin[] }) {
   return { id: meta.id, title: meta.objective, workspace: meta.workspace, control: meta.control, createdAt: meta.createdAt, revision: meta.roomRevision ?? 1,
@@ -208,6 +210,7 @@ const browserSignInCompleted = 'The user finished the requested browser step. Ac
 export class LocalRuntime {
   readonly providers: ProviderSettings;
   readonly mcp: McpTools;
+  readonly gmail: ProjectGmail;
   readonly routines: LocalRoutines;
   readonly workItems: WorkItems<TaskMeta>;
   readonly credentials: ApplicationCredentials;
@@ -228,6 +231,7 @@ export class LocalRuntime {
   constructor(readonly config: Config, private options: RuntimeOptions) {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
+    this.gmail = new ProjectGmail(config.dataDir, this.mcp);
     this.credentials = new ApplicationCredentials(config.dataDir, options.credentialNetwork);
     this.assistants = new Assistants(config.dataDir, options.models);
     this.snapshots = new WorkspaceSnapshots(config.dataDir);
@@ -617,6 +621,7 @@ export class LocalRuntime {
       const files = await Workspace.open(requestedWorkspace, { create: !thread && !room });
       const localChat = !options.remote && !room;
       const workItemProject = options.chat && localChat ? await memoryProject(files.root) : undefined;
+      const chatGmail = workItemProject ? await this.gmail.assistantMailbox(workItemProject) : undefined;
       const credentialProject = localChat ? workItemProject ?? await memoryProject(files.root) : undefined;
       if (options.chat && localChat && !workItemProject) throw new Error('The chat work item project is unavailable.');
       const selection=options.remote ? [] : options.skills;
@@ -649,6 +654,7 @@ export class LocalRuntime {
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
         ...(options.chat && localChat ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
+        ...(chatGmail ? { chatGmail } : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const, chartDelivery: true as const } : {}),
@@ -1197,6 +1203,7 @@ export class LocalRuntime {
         ...(credentialManagement ? [credentialManagement] : []),
         ...(questions ? [questions] : []),
         ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
+        ...(!remote && meta.chatGmail ? [projectGmailExtension(this.gmail, meta.workspace, meta.chatGmail)] : []),
         ...(!remote && meta.chatAssistants ? [chatAssistantsExtension(this.assistants, meta.workspace, meta.chatAssistants.project, meta.id, async () => {
           const current = this.active.get(meta.id); if (!current) throw new Error('The assistant catalog task is not open.');
           const tools = new Map([...current.executionExtensions, ...current.preparationExtensions, ...current.chatExtensions].flatMap(extension => extension.tools ?? [])
