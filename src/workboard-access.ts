@@ -3,10 +3,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { workboardPage } from './workboard-page.js';
 import { WorkItemError, type WorkItemRun, type WorkItems } from './work-items.js';
 import { createLocalBrowserSessions } from './local-browser-sessions.js';
+import type { ProjectCalendars } from './project-calendars.js';
 
 const boardPrefix = '/workboard';
 
-export function createWorkboardAccess<T extends WorkItemRun>(items: WorkItems<T>, origin: string,
+export function createWorkboardAccess<T extends WorkItemRun>(items: WorkItems<T>, calendars: ProjectCalendars, origin: string,
   readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>) {
   const host = new URL(origin).host;
   const sessions = createLocalBrowserSessions();
@@ -39,6 +40,9 @@ export function createWorkboardAccess<T extends WorkItemRun>(items: WorkItems<T>
     }
     const project = sessions.scope(req.headers.authorization);
     if (!project) return send(401, { error: 'Open the workboard again from Kada.' });
+    if (path === boardPrefix + '/calendar' && req.method === 'GET') {
+      return send(200, await calendars.month(project, url.searchParams.get('month') ?? '', project));
+    }
     if (path === boardPrefix + '/board') {
       if (req.method === 'GET') return send(200, await items.board(project, project));
       if (req.method === 'PATCH') return send(200, await items.editBoard(project, await readBody(req), project));

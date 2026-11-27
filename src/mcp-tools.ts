@@ -460,10 +460,16 @@ export class McpTools {
     return pin;
   }
 
-  async samplePrecheck(workspace: string, check: McpPrecheck, signal?: AbortSignal): Promise<{ sha256: string }> {
+  async runReadOnly(workspace: string, check: McpPrecheck, signal?: AbortSignal, beforeDispatch?: () => Promise<void>) {
     const pin = await this.validatePrecheck(workspace, check);
-    const result = await this.call(pin, check.tool, check.arguments, signal, undefined,
-      async () => { await this.validatePrecheck(workspace, check); });
+    return this.call(pin, check.tool, check.arguments, signal, undefined, async () => {
+      await this.validatePrecheck(workspace, check);
+      await beforeDispatch?.();
+    });
+  }
+
+  async samplePrecheck(workspace: string, check: McpPrecheck, signal?: AbortSignal): Promise<{ sha256: string }> {
+    const result = await this.runReadOnly(workspace, check, signal);
     if (result.isError) throw new Error('The MCP precheck returned an error.');
     const value = stableJson({ content: result.content, structuredContent: result.structuredContent });
     if (Buffer.byteLength(value) > 1_000_000) throw new Error('The MCP precheck result exceeds 1 MB.');

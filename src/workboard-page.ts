@@ -73,6 +73,7 @@ export const workboardPage = String.raw`<!doctype html>
     <button id="deadline-today" class="action" type="button">本月</button>
     <button id="deadline-next" class="action" type="button">下个月</button>
   </div>
+  <p id="calendar-status" role="status" aria-live="polite" hidden></p>
   <main id="board" aria-label="项目工作项"></main>
   <dialog id="editor" aria-labelledby="editor-title">
     <div class="dialog-head"><h2 id="editor-title"></h2><button id="close-editor" class="action quiet" type="button">关闭</button></div>
@@ -87,6 +88,7 @@ export const workboardPage = String.raw`<!doctype html>
   const statuses = [['open','待办'], ['parked','搁置'], ['done','已完成']];
   let token, board, busy = false, dragged;
   let viewingDeadlines = false, agendaMonth = new Date();
+  let externalCalendar, calendarRead;
   function element(parent, tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -104,10 +106,10 @@ export const workboardPage = String.raw`<!doctype html>
     get('status').textContent = text;
     get('status').classList.toggle('error', error);
   }
-  async function request(path, method = 'GET', data) {
+  async function request(path, method = 'GET', data, signal) {
     const response = await fetch('/workboard/' + path, { method, headers: {
       ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }),
-    }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+    }, ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal });
     const value = await response.json();
     if (!response.ok) {
       if (response.status === 401) sessionStorage.removeItem(accessKey);
@@ -244,31 +246,65 @@ export const workboardPage = String.raw`<!doctype html>
     if (details.length) element(card, 'span', details.join(' · '), 'meta');
     return card;
   }
+  function selectedMonth() {
+    return String(agendaMonth.getFullYear()).padStart(4, '0') + '-' + String(agendaMonth.getMonth() + 1).padStart(2, '0');
+  }
   function renderDeadlines() {
-    const month = String(agendaMonth.getFullYear()).padStart(4, '0') + '-' + String(agendaMonth.getMonth() + 1).padStart(2, '0');
+    const month = selectedMonth();
     get('deadline-month').textContent = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long' }).format(agendaMonth);
-    const entries = board.columns.flatMap(column => column.items.map(item => ({ item, column })))
-      .filter(({ item }) => item.dueDay?.startsWith(month + '-'))
-      .sort((a, b) => a.item.dueDay.localeCompare(b.item.dueDay) ||
-        (a.item.dueAt || '').localeCompare(b.item.dueAt || '') || a.item.title.localeCompare(b.item.title));
-    if (!entries.length) element(panel, 'p', '本月没有设定截止时间的工作项', 'empty');
+    const entries = board.columns.flatMap(column => column.items
+      .filter(item => item.dueDay?.startsWith(month + '-'))
+      .map(item => ({ day: item.dueDay, time: item.dueAt || '', title: item.title, item, column })));
+    if (externalCalendar?.configured) {
+      entries.push(...externalCalendar.events.map(event => ({ day: event.day, time: event.allDay ? '' : event.start, title: event.title, event })));
+    }
+    entries.sort((a, b) => a.day.localeCompare(b.day) || a.time.localeCompare(b.time) || a.title.localeCompare(b.title));
+    if (!entries.length) element(panel, 'p', externalCalendar?.configured ? '本月没有截止时间或外部日程' : '本月没有设定截止时间的工作项', 'empty');
     let currentDay, cards;
-    for (const { item, column } of entries) {
-      if (item.dueDay !== currentDay) {
-        currentDay = item.dueDay;
+    for (const { day: entryDay, item, column, event } of entries) {
+      if (entryDay !== currentDay) {
+        currentDay = entryDay;
         const day = element(panel, 'section', undefined, 'day');
         const title = element(day, 'h2', currentDay);
         title.id = 'deadline-day-' + currentDay;
         day.setAttribute('aria-labelledby', title.id);
         cards = element(day, 'ol', undefined, 'cards');
       }
-      drawCard(element(cards, 'li'), item, column, true);
+      const row = element(cards, 'li');
+      if (event) {
+        const card = element(row, 'article', undefined, 'card');
+        element(card, 'span', event.title);
+        const time = event.allDay
+          ? '全天 · ' + event.start + ' 至 ' + new Date(Date.parse(event.end) - 86_400_000).toISOString().slice(0, 10)
+          : new Intl.DateTimeFormat('zh-CN', {
+            timeZone: externalCalendar.timeZone, dateStyle: 'short', timeStyle: 'short',
+          }).formatRange(new Date(event.start), new Date(event.end));
+        element(card, 'span', 'Google 日历 · ' + time, 'meta');
+      } else drawCard(row, item, column, true);
+    }
+  }
+  async function loadCalendar() {
+    calendarRead?.abort();
+    const controller = new AbortController();
+    calendarRead = controller;
+    externalCalendar = undefined;
+    get('calendar-status').textContent = '正在读取外部日程';
+    render();
+    try {
+      const data = await request('calendar?month=' + selectedMonth(), 'GET', undefined, controller.signal);
+      if (controller.signal.aborted) return;
+      externalCalendar = data;
+      get('calendar-status').textContent = '';
+      render();
+    } catch (error) {
+      if (!controller.signal.aborted) get('calendar-status').textContent = error.message;
     }
   }
   function render() {
     panel.replaceChildren();
     panel.classList.toggle('deadlines', viewingDeadlines);
     get('deadline-controls').hidden = !viewingDeadlines;
+    get('calendar-status').hidden = !viewingDeadlines;
     get('deadlines').setAttribute('aria-pressed', String(viewingDeadlines));
     if (viewingDeadlines) { renderDeadlines(); return; }
     for (const column of board.columns) {
@@ -311,15 +347,22 @@ export const workboardPage = String.raw`<!doctype html>
   }
   get('add-item').addEventListener('click', () => itemEditor());
   get('add-column').addEventListener('click', () => columnEditor());
-  get('deadlines').addEventListener('click', () => { viewingDeadlines = !viewingDeadlines; render(); });
+  get('deadlines').addEventListener('click', () => {
+    viewingDeadlines = !viewingDeadlines;
+    if (viewingDeadlines) void loadCalendar();
+    else { calendarRead?.abort(); render(); }
+  });
   function shiftMonth(offset) {
     agendaMonth = new Date(agendaMonth.getFullYear(), agendaMonth.getMonth() + offset, 1);
-    render();
+    void loadCalendar();
   }
   get('deadline-prev').addEventListener('click', () => shiftMonth(-1));
-  get('deadline-today').addEventListener('click', () => { agendaMonth = new Date(); render(); });
+  get('deadline-today').addEventListener('click', () => { agendaMonth = new Date(); void loadCalendar(); });
   get('deadline-next').addEventListener('click', () => shiftMonth(1));
-  get('refresh').addEventListener('click', () => void save(async () => {}, '已刷新', false));
+  get('refresh').addEventListener('click', async () => {
+    await save(async () => {}, '已刷新', false);
+    if (viewingDeadlines) await loadCalendar();
+  });
   get('close-editor').addEventListener('click', () => editor.close());
   async function openBoard() {
     const ticket = location.hash.slice(1);

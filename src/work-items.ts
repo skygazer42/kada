@@ -152,7 +152,7 @@ function deadline(item: Pick<Planning, 'dueDate' | 'dueAt'>) {
   if (item.dueDate && item.dueAt) throw new WorkItemError(400, 'Choose a date-only or timed deadline; explicitly clear the previous kind when switching.');
 }
 
-function localCalendarDay(instant: number, timeZone: string) {
+export function localCalendarDay(instant: number, timeZone: string) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
     .formatToParts(instant).map(part => [part.type, part.value]));
   return `${parts.year!.padStart(4, '0')}-${parts.month}-${parts.day}`;

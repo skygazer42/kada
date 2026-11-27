@@ -278,6 +278,26 @@ npm run harness -- remote unshare-approval 任务ID 动作ID 账户ID 设备ID �
 
 项目看板的 **截止日历** 按月份展示已设日期的工作项。带时刻的卡片按其保存时区归到当天。点击同一张卡可编辑截止日期、时刻和时区，保存后日历随原工作项更新。 [截止日历验收](superpowers/plans/2026-11-26-project-workboard.md#截止日历增量)
 
+项目也可接入 Google Calendar MCP。用 `mcp add`、`mcp test` 和 `mcp enable` 配好可直接读取的 `list-events` 工具，再给项目指定一个账号别名、一个日历和显示时区。配置文件里的 `revision` 采用 `mcp test` 返回的当前值。
+
+```json
+{
+  "id": "calendar",
+  "revision": "当前连接修订",
+  "account": "work",
+  "calendarId": "primary",
+  "timeZone": "America/New_York"
+}
+```
+
+```powershell
+npm run harness -- work-items calendar-source source.json --workspace E:/project
+npm run harness -- work-items calendar 2026-11 --workspace E:/project
+npm run harness -- work-items calendar-clear --workspace E:/project
+```
+
+打开看板的截止日历即可浏览本月外部日程。工作项日期沿其保存时区显示，外部日程沿日历来源所选时区显示。 [工具契约与验收](superpowers/plans/2026-11-27-project-calendar.md)
+
 在看板的 **分配助手** 选择同项目助手与修订。终端工作项 JSON 可带 `"assignee": { "id": "助手ID", "revision": 1 }`，用 `null` 清空。由用户发起工作项运行后，Pi 使用所选角色准备并等待原确认。角色更新后，新运行需要重新选择当前版本，已有运行按原版本处理。
 
 配对手机获得查看后，本机可用 `work-items share-edits 工作项ID 账户ID 设备ID` 开启该卡的 **Edit work item**。手机保存名称、说明、状态、优先级、截止日期或时刻及其时区。旧修订出现冲突时可保留草稿，选择 **Load current fields** 读取最新字段。用 `work-items unshare-edits` 撤回编辑。 [分配与手机编辑验收](superpowers/plans/2026-11-26-work-item-assignees.md)

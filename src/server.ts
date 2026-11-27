@@ -22,6 +22,7 @@ import type { RoutineInput } from './routines.js';
 import { watchGithubIssues } from "./github-routine-events.js";
 import { githubWebhook } from './github-webhook.js';
 import { createWorkboardAccess } from './workboard-access.js';
+import { ProjectCalendars } from './project-calendars.js';
 import { createProjectModelAccess } from './project-model-access.js';
 import { createProjectMcpAccess } from './project-mcp-access.js';
 import { createProjectAssistantsAccess } from './project-assistants-access.js';
@@ -50,6 +51,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   const devices = new RemoteDevices(config.dataDir);
   let remote: ReturnType<typeof createRemoteHandler>;
   let workboard: ReturnType<typeof createWorkboardAccess>;
+  let calendars: ProjectCalendars;
   let projectModels: ReturnType<typeof createProjectModelAccess>;
   let projectMcp: ReturnType<typeof createProjectMcpAccess>;
   let projectAssistants: ReturnType<typeof createProjectAssistantsAccess>;
@@ -248,6 +250,18 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         const { workspace } = await body(req);
         if (typeof workspace !== 'string') throw new Error('Provide the project workspace.');
         return send(201, await workboard.link(workspace));
+      }
+      if (url.pathname === '/v1/work-items/calendar-source' || url.pathname === '/v1/work-items/calendar') {
+        const workspace = url.searchParams.get('workspace');
+        if (!workspace) return send(400, { error: 'Provide the project workspace.' });
+        if (url.pathname.endsWith('/calendar')) {
+          if (req.method === 'GET') return send(200, await calendars.month(workspace, url.searchParams.get('month') ?? ''));
+        } else {
+          if (req.method === 'GET') return send(200, await calendars.source(workspace));
+          if (req.method === 'PUT') return send(200, await calendars.setSource(workspace, await body(req)));
+          if (req.method === 'DELETE') return send(200, await calendars.clearSource(workspace));
+        }
+        return send(405, { error: 'Method not allowed' });
       }
       const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|(?:un)?share(?:-(?:replies|controls|edits))?))?$/.exec(url.pathname);
       if (workItem) {
@@ -568,7 +582,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
     const models = options?.models ?? cloudModels();
     runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
-    workboard = createWorkboardAccess(runtime.workItems, `http://127.0.0.1:${config.port}`, body);
+    calendars = new ProjectCalendars(config.dataDir, runtime.mcp);
+    workboard = createWorkboardAccess(runtime.workItems, calendars, `http://127.0.0.1:${config.port}`, body);
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
     projectMcp = createProjectMcpAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
     snapshotsBrowser = createWorkspaceSnapshotAccess(runtime, `http://127.0.0.1:${config.port}`, body);

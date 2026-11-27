@@ -203,6 +203,16 @@ try {
       if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));
       else if (action === 'board') result = await request(path + '/board?workspace=' + encodeURIComponent(workspace));
       else if (action === 'board-link') result = await request(path + '/board-link', 'POST', { workspace });
+      else if (action === 'calendar') {
+        if (!rest[0] || rest.length !== 1) throw new Error('Use work-items calendar YYYY-MM.');
+        result = await request(path + '/calendar?' + new URLSearchParams({ workspace, month: rest[0] }));
+      }
+      else if (action === 'calendar-source') {
+        const calendar = path + '/calendar-source?' + new URLSearchParams({ workspace });
+        if (rest.length > 1) throw new Error('Use work-items calendar-source [SOURCE.json].');
+        result = rest.length ? await request(calendar, 'PUT', await json(rest[0])) : await request(calendar);
+      }
+      else if (action === 'calendar-clear') result = await request(path + '/calendar-source?' + new URLSearchParams({ workspace }), 'DELETE');
       else if (action === 'edit-board') result = await request(path + '/board?workspace=' + encodeURIComponent(workspace), 'PATCH', await json(rest[0]));
       else if (action === 'add') result = await request(path, 'POST', await json(rest[0]));
       else if (action === 'edit') result = await request(path + '/' + segment(rest[0]), 'PATCH', await json(rest[1]));
@@ -215,7 +225,7 @@ try {
         if (rest.length !== 3) throw new Error('Use work-items ' + action + ' <work-item-id> <account-id> <device-id>.');
         result = await request(path + '/' + segment(id) + '/' + action, 'POST', { accountId, deviceId });
       }
-      else throw new Error('Use work-items list, board, board-link, edit-board, add, edit, runs, run, share or unshare. See help for sharing permissions.');
+      else throw new Error('Use work-items list, board, board-link, edit-board, calendar, calendar-source, calendar-clear, add, edit, runs, run, share or unshare.');
     }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {
