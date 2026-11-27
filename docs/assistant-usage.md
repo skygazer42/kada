@@ -173,6 +173,8 @@ npm run harness -- rooms show 群组ID
 
 本机通过 `rooms share 群组ID 账户ID 设备ID` 分享查看，通过 `rooms share-replies 群组ID 账户ID 设备ID` 授予发送权限。手机 Web 的 **Shared rooms** 打开同一群组。用 `rooms unshare-replies` 撤回发送权限，或用 `rooms unshare` 一并撤回查看和发送。 [源码与验收](superpowers/plans/2026-11-26-assistant-rooms.md)
 
+`rooms share-files 群组ID 账户ID 设备ID` 授予该设备下载固定附件的权限，`rooms unshare-files` 单独撤回。撤回群组查看会同时撤回下载。 [附件权限验收](superpowers/plans/2026-11-26-room-attachments.md)
+
 ## 应用 API 凭据
 
 新本机主会话可请求提供 API 凭据。卡片列出名称、用途、HTTPS 站点与认证方式；核对后输入 `/credential 问题ID`，再在终端的无回显提示中粘贴值。命令本身只填问题 ID。用 `/decline-credential 问题ID` 拒绝。macOS 已接入独立密码字段，编译与实机交互仍待验证。普通消息、选项答复和管道不能提供凭据；手机共享卡提示回本机处理。

@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "environment": "Windows, local Chromium, agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "viewOnlyDeviceSawAttachmentReference": true,
+  "authorizedDeviceDownloadedFixedBytes": true,
+  "usableAfterUnchangedPolls": true,
+  "revokingDownloadPreservedRoomView": true
+}

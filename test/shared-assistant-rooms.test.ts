@@ -66,13 +66,32 @@ test('a paired device sees only granted original rooms and sends once under its 
   await server.runtime.sendRoomMessage(room.id, { ...input, requestId: 'owner-file', files: ['private.txt'] });
   await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 6);
   const sharedFile = await (await remote(path)).json();
-  assert.deepEqual(sharedFile.messages.find((message: { attachments?: unknown[] }) => message.attachments)?.attachments,
-    [{ id: 1, name: 'private.txt', bytes: 31 }]);
+  const fileMessage = sharedFile.messages.find((message: { attachments?: unknown[] }) => message.attachments);
+  assert.deepEqual(fileMessage?.attachments, [{ id: 1, name: 'private.txt', bytes: 31 }]);
   assert(!JSON.stringify(sharedFile).includes('Original attached file content.'));
   assert(!JSON.stringify(sharedFile).includes(fixture.workspace));
+  const download = path + '/attachments/' + fileMessage.id + '/1';
+  assert.equal((await remote(download)).status, 403);
+  await grant('share-files', 'one');
+  assert.equal((await remote(download, 1)).status, 403);
+  const authorized = await (await remote(path)).json();
+  assert.equal(authorized.messages.find((message: { id: number }) => message.id === fileMessage.id).attachments[0].href,
+    '/remote/api' + download);
+  const saved = await remote(download);
+  assert.equal(saved.status, 200);
+  assert.match(saved.headers.get('content-disposition') ?? '', /^attachment;/i);
+  assert.equal(await saved.text(), 'Original attached file content.');
+  await grant('unshare-files', 'one');
+  assert.equal((await remote(download)).status, 403);
+  assert.equal((await (await remote(path)).json()).canSend, true);
+  await grant('share-files', 'one');
+  const fixed = await server.runtime.roomAttachment(room.id, fileMessage.id, 1);
+  await writeFile(fixed.path, 'Different content.');
+  assert.equal((await remote(download)).status, 409);
   await grant('unshare', 'one');
   assert.equal((await remote(path)).status, 404);
   assert.equal((await remote(path + '/messages', 0, input)).status, 404);
   await grant('share', 'one');
   assert.equal((await remote(path + '/messages', 0, input)).status, 403);
+  assert.equal((await remote(download)).status, 403);
 });

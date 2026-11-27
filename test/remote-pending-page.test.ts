@@ -53,7 +53,7 @@ const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
 
-function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }, workItems?: WorkItemsFixture, threads?: WorkItemsFixture) {
+function harness(history?: (url: URL, init: RequestInit) => Response | Promise<Response>, sessionWait?: (token: string) => Promise<void>, list = () => Response.json([]), approvals?: { request: ApprovalFixture; confirm?: () => boolean }, workItems?: WorkItemsFixture, threads?: WorkItemsFixture, rooms?: WorkItemsFixture) {
   const local = new Map([["kada:conversation:account:phone", conversationId]]);
   const session = new Map([["kada-device-token", "phone"]]);
   const messages: Message[] = [];
@@ -116,6 +116,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
           if (url.startsWith("/remote/api/action-approvals") && approvals) return approvals.request(init, url);
           if (url.startsWith("/remote/api/work-items") && workItems) return workItems(url, deviceToken, init);
           if (url.startsWith("/remote/api/shared-threads") && threads) return threads(url, deviceToken, init);
+          if (url.startsWith("/remote/api/shared-rooms") && rooms) return rooms(url, deviceToken, init);
           if (url === "/remote/api/session") {
             await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
@@ -124,6 +125,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
               channel: "web", accountId, deviceId, pairingId,
               ...(approvals ? { actionApprovals: true } : {}), ...(workItems ? { workItems: true } : {}),
               ...(threads ? { sharedThreads: true } : {}),
+              ...(rooms ? { sharedRooms: true } : {}),
             });
           }
           if (url === "/remote/api/conversations") {
@@ -371,6 +373,32 @@ const workItemRow = { id: "release-notes", title: "Release notes", revision: 2, 
 function visibleText(node: Element): string {
   return [node.textContent, ...node.children.map(visibleText)].join(" ");
 }
+
+test("a room attachment can still be downloaded after unchanged room polls", async () => {
+  const base = '/remote/api/shared-rooms', path = base + '/original-room';
+  const href = path + '/attachments/2/1';
+  const room = { id: 'original-room', title: 'Shared room', revision: 1, control: 'active', canSend: false,
+    active: null, nextBefore: null, members: [{ id: 'author', name: 'Author' }],
+    messages: [{ id: 2, role: 'attachment', name: 'Author', text: '', attachments: [{ id: 1, name: 'notes.txt', bytes: 19, href }] }] };
+  const f = harness(undefined, undefined, undefined, undefined, undefined, undefined, url => {
+    if (url === base) return Response.json([{ id: room.id, title: room.title }]);
+    if (url === href) return Response.json({ error: 'The saved file changed.' }, { status: 409 });
+    return Response.json(room);
+  });
+  const page = await f.open();
+  const picker = page.field('shared-room');
+  picker.value = room.id;
+  await picker.trigger('change');
+  const displayedButton = () => page.field('shared-room-messages').children[0]?.children.find(node => node.tagName === 'button');
+  const button = displayedButton();
+  assert(button);
+  await page.poll();
+  await page.poll();
+  assert.equal(displayedButton(), button);
+  await button.trigger('click');
+  assert.equal(f.requests.at(-1), href);
+  assert.match(page.field('status').textContent, /saved file changed/i);
+});
 
 test("shared threads open and page the original history, reply and clear revoked access without replacing a draft", async () => {
   let shared = true, answer: { questionId: string; requestId: string; answer: string } | undefined;

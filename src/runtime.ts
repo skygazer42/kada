@@ -56,7 +56,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
-import { RoomError, assistantRooms, pendingRoomTurn, roomAttachment, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
+import { RoomError, assistantRooms, pendingRoomTurn, readRoomAttachment, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
 import { VoiceNoteError, VoiceNotes, readVoiceClip, saveVoiceReply, siliconFlowVoiceSynthesizer, siliconFlowVoiceTranscriber,
   transcriptionText, verifyVoiceReply, voiceNoteKey, type VoiceSynthesizer, type VoiceTranscriber } from './voice-notes.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
@@ -690,11 +690,15 @@ export class LocalRuntime {
   }
 
   async roomAttachment(id: string, entryId: number, attachmentId: number) {
+    return (await this.readRoomAttachment(id, entryId, attachmentId)).file;
+  }
+
+  async readRoomAttachment(id: string, entryId: number, attachmentId: number) {
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
       if (!isRoom(meta)) throw new RoomError(404, 'Assistant room not found.');
       const active = await this.open(meta, false);
-      return roomAttachment(active.root, active.workspace, entryId, attachmentId, ctx);
+      return readRoomAttachment(active.root, active.workspace, entryId, attachmentId, ctx);
     });
   }
 

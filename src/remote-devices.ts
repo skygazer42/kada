@@ -30,7 +30,7 @@ export class RemoteDevices {
     });
   }
 
-  async setSharedThread(accountId: string, deviceId: string, taskId: string, shared: boolean, access: 'view' | 'replies' | 'controls') {
+  async setSharedThread(accountId: string, deviceId: string, taskId: string, shared: boolean, access: 'view' | 'replies' | 'controls' | 'files') {
     this.validate(accountId, deviceId);
     return this.changes.run(async () => {
       const devices = await this.credentials();

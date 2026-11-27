@@ -646,7 +646,13 @@ async function refreshSharedRoom() {
         message.role === "handoff" ? message.name + " handed off to " + message.toName : message.name;
       element("strong", label, item);
       if (message.text) element("p", message.text, item);
-      for (const attachment of message.attachments ?? []) element("p", attachment.name + " · " + attachment.bytes + " bytes", item);
+      for (const attachment of message.attachments ?? []) {
+        const label = attachment.name + " · " + attachment.bytes + " bytes";
+        if (attachment.href) action("Download " + label, item, () => {
+          if (device === identity && id === selectedRoom && item.parentNode === roomMessages) return download(attachment, item);
+        });
+        else element("p", label, item);
+      }
       if (["unanswered", "interrupted", "failed"].includes(message.status)) element("small", taskStatusLabel(message.status), item);
     }
   }

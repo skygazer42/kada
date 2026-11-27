@@ -233,7 +233,7 @@ const RoomAttachText = defineTool({
   },
 });
 
-export async function roomAttachment(root: Conversation, workspace: Workspace, entryId: number, attachmentId: number, context: Context) {
+export async function readRoomAttachment(root: Conversation, workspace: Workspace, entryId: number, attachmentId: number, context: Context) {
   if (!Number.isSafeInteger(entryId) || entryId < 1 || !Number.isSafeInteger(attachmentId) || attachmentId < 1 || attachmentId > 5) {
     throw new RoomError(400, 'Provide the displayed room message ID and attachment number.');
   }
@@ -248,8 +248,8 @@ export async function roomAttachment(root: Conversation, workspace: Workspace, e
     return { ...saved };
   }, context);
   try {
-    const { file } = await workspace.readSnapshot(original.path);
-    if (file.sha256 === original.sha256 && file.bytes === original.bytes) return { ...file, name: basename(original.sourcePath) };
+    const { file, data } = await workspace.readBinarySnapshot(original.path, 1024 * 1024);
+    if (file.sha256 === original.sha256 && file.bytes === original.bytes) return { file: { ...file, name: basename(original.sourcePath) }, data };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }

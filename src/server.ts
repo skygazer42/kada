@@ -349,7 +349,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (roomFile && req.method === 'GET') {
         return send(200, await runtime.roomAttachment(roomFile[1]!, Number(roomFile[2]), Number(roomFile[3])));
       }
-      const room = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})(?:\/(messages|(?:un)?share(?:-replies)?))?$/.exec(url.pathname);
+      const room = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})(?:\/(messages|(?:un)?share(?:-replies|-files)?))?$/.exec(url.pathname);
       if (room) {
         const [, id, action] = room;
         if (!action && req.method === 'GET') {
@@ -362,7 +362,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           if (!(await runtime.metadata(id!)).room) return send(404, { error: 'Assistant room not found.' });
           const { accountId, deviceId } = await body(req);
           if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide the paired account and device IDs.');
-          return send(200, await devices.setSharedThread(accountId, deviceId, id!, action.startsWith('share'), action.endsWith('-replies') ? 'replies' : 'view'));
+          const access = action.endsWith('-files') ? 'files' : action.endsWith('-replies') ? 'replies' : 'view';
+          return send(200, await devices.setSharedThread(accountId, deviceId, id!, action.startsWith('share'), access));
         }
         return send(405, { error: 'Method not allowed' });
       }

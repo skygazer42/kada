@@ -32,7 +32,7 @@ export interface RemoteDevice {
   sharedWorkItemReplies?: string[];
   sharedWorkItemControls?: string[];
   sharedWorkItemEdits?: string[];
-  sharedThreads?: { taskId: string; replies?: true; controls?: true }[];
+  sharedThreads?: { taskId: string; replies?: true; controls?: true; files?: true }[];
 }
 
 export interface RemoteOptions {
@@ -733,11 +733,11 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
       const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(?:\/(answers|child-answers|control))?)?)?$/.exec(route);
       const sharedThread = /^\/remote\/api\/shared-threads(?:\/([a-f0-9-]{36})(?:\/(answers|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?)?$/.exec(route);
-      const sharedRoom = /^\/remote\/api\/shared-rooms(?:\/([a-f0-9-]{36})(?:\/(messages))?)?$/.exec(route);
+      const sharedRoom = /^\/remote\/api\/shared-rooms(?:\/([a-f0-9-]{36})(?:\/(messages)|\/attachments\/(\d+)\/(\d+))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true, sharedRooms: true } : {}) });
       } else if (options.sharedDevices && sharedRoom) {
-        const [, id, messages] = sharedRoom;
+        const [, id, messages, entryId, attachmentId] = sharedRoom;
         if (method !== (messages ? 'POST' : 'GET')) throw new HttpError(405, 'This method is unavailable for shared rooms.');
         const input = messages ? await json(request) : undefined;
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
@@ -754,6 +754,12 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
           if (!grant) throw new HttpError(404, 'Shared room not found.');
           const metadata = await runtime.metadata(id).catch(error => { if (!isMissing(error)) throw error; });
           if (!metadata?.room) throw new HttpError(404, 'Shared room not found.');
+          if (entryId && attachmentId) {
+            if (!grant.files) throw new HttpError(403, 'The host has not shared attachment downloads for this room.');
+            const { file, data } = await runtime.readRoomAttachment(id, Number(entryId), Number(attachmentId));
+            sendFile(response, { ...file, name: redactCredentials(file.name) }, data);
+            return true;
+          }
           if (input) {
             if (!grant.replies) throw new HttpError(403, 'The host has not shared reply access to this room.');
             const { memberId, requestId, message, roomRevision } = input;
@@ -772,12 +778,13 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             members: view.members.map(({ id, name, revision }) => ({ id, name: redactCredentials(name), revision })),
             messages: view.messages.map(({ requestId: _request, originalAnswerId: _answer, text, name, toName, attachments, ...message }) =>
               ({ ...message, text: redactCredentials(text), name: redactCredentials(name), ...(toName === undefined ? {} : { toName: redactCredentials(toName) }),
-                ...(attachments ? { attachments: attachments.map(file => ({ ...file, name: redactCredentials(file.name) })) } : {}) })),
+                ...(attachments ? { attachments: attachments.map(file => ({ ...file, name: redactCredentials(file.name),
+                  ...(grant.files ? { href: `/remote/api/shared-rooms/${id}/attachments/${message.id}/${file.id}` } : {}) })) } : {}) })),
             active: view.active ? { memberId: view.active.memberId } : null, nextBefore: view.nextBefore,
           };
         });
         if (!result) throw new HttpError(401, 'Enter this device’s pairing token.');
-        send(response, 200, result);
+        if (result !== true) send(response, 200, result);
       } else if (options.sharedDevices && sharedThread) {
         const [, id, action] = sharedThread;
         const update = action === 'answers' || action === 'confirm' || action === 'control';
