@@ -33,6 +33,7 @@ import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
+import { chartArtifactExtension } from './chart-preview.js';
 import { taskHandoff } from "./task-view.js";
 import { claudeProject, memoryProject } from './memory-sources.js';
 import { imageInput, inputImageExtension, type InputImage } from './input-images.js';
@@ -78,6 +79,7 @@ export interface TaskMeta {
   collaborators?: AssistantPin[];
   room?: AssistantPin[];
   roomRevision?: number;
+  chartDelivery?: true;
   objective: string;
   workspace: string;
   model: ModelRef;
@@ -618,7 +620,7 @@ export class LocalRuntime {
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
-        ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const } : {}),
+        ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const, chartDelivery: true as const } : {}),
         ...(!room ? { structuredQuestions: true as const } : {}),
         ...(credentialProject ? { credentialProject } : {}),
         ...((options.prepare || options.chat) && this.config.learning && localChat ? { learning: true } : {}),
@@ -1165,6 +1167,7 @@ export class LocalRuntime {
         ...(snapshots ? [snapshots] : []),
         ...(memory ? [memory] : []),
         ...(meta.schemaVersion !== undefined ? [goal] : []),
+        ...(meta.chartDelivery ? [chartArtifactExtension(workspace)] : []),
         ...(questions ? [questions] : []),
         ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []),
         ...(meta.preparation && !remote ? [verification] : []),

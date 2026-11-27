@@ -42,6 +42,10 @@ npm run harness -- voice play 会话ID reply-1
 
 录音上限为 5 MiB，合成结果上限为 16 MiB。再次查询或用同一请求重试会读取保存的回执。 [源码与实际转写和合成验收](superpowers/plans/2026-11-26-voice-notes.md)
 
+## 交付图表
+
+已确认的本机任务可以用 `save_chart` 写出线图或柱状图的 `.chart.json`。任务交付后，用 `files 任务ID` 查编号，再用 `files chart 任务ID 编号` 获取本机预览。浏览器可切换序列、看原数据及下载当前图的 PNG。链接保留验收时的图表快照，有效期十分钟。 [固定源码与实测](superpowers/plans/2026-11-26-chart-preview.md)
+
 ## 工作区快照
 
 保存快照后可预览工作区的文件差异，再提交显示的 `version`。恢复会保存一个撤销快照，回执给出 `undoSnapshotId`，用同一预览与恢复入口可撤销这次操作。重叠任务还在执行或工作区在预览后发生编辑时，恢复返回当前冲突。[实现与验收](superpowers/plans/2026-11-26-workspace-snapshots.md)

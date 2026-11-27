@@ -15,6 +15,7 @@ import { MemoryMutationError } from "./user-memory.js";
 import { createRemoteHandler,quarantineLegacyRemoteTasks } from './remote.js';
 import { RemoteDevices } from './remote-devices.js';
 import { artifactTarget, openLocalPath } from './artifacts.js';
+import { createChartPreviews } from './chart-preview.js';
 import type { SkillSelection } from './skills.js';
 import type { McpDefinition } from './mcp-tools.js';
 import type { RoutineInput } from './routines.js';
@@ -57,6 +58,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   }
   if (!/^[a-f0-9]{64}$/.test(token)) { await release(); throw new Error("Invalid daemon token file"); }
   let ready = false;
+  const chartPreviews = createChartPreviews(`http://127.0.0.1:${config.port}`);
   const server = createServer(async (req, res) => {
     const send = (status: number, data: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -65,7 +67,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','assistant-rooms','voice-notes','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (chartPreviews.handle(req, res, url)) return;
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -280,10 +283,11 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (notification && req.method === 'POST') return send(200,await runtime.readNotification(notification[1]!));
       const taskNotification = /^\/v1\/tasks\/([a-f0-9-]{36})\/notifications\/read$/.exec(url.pathname);
       if (taskNotification && req.method === 'POST') return send(200,await runtime.readTaskNotifications(taskNotification[1]!));
-      const artifacts = /^\/v1\/tasks\/([a-f0-9-]{36})\/artifacts(?:\/(\d+)\/open)?$/.exec(url.pathname);
+      const artifacts = /^\/v1\/tasks\/([a-f0-9-]{36})\/artifacts(?:\/(\d+)\/(open|chart))?$/.exec(url.pathname);
       if (artifacts) {
         if (artifacts[2] === undefined && req.method === 'GET') return send(200,await runtime.artifacts(artifacts[1]!));
         if (artifacts[2] !== undefined && req.method === 'POST') {
+          if (artifacts[3] === 'chart') return send(200, await chartPreviews.issue(await runtime.status(artifacts[1]!), Number(artifacts[2])));
           const input = await body(req);
           if (input.reveal !== undefined && typeof input.reveal !== 'boolean') throw new Error('reveal must be a boolean.');
           const artifact = await artifactTarget(await runtime.status(artifacts[1]!),Number(artifacts[2]));

@@ -48,6 +48,7 @@ try {
     console.log('\n本机助手群组\n  rooms list | rooms show 群组ID [历史游标]\n  rooms add "群组名称" 助手ID@修订 助手ID@修订 […] --workspace 路径\n  rooms edit 群组ID 修改.json\n  rooms send 群组ID 助手ID "消息" [请求ID]');
     console.log('  rooms share|unshare 群组ID 账户ID 设备ID\n  rooms share-replies|unshare-replies 群组ID 账户ID 设备ID');
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
+    console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -274,10 +275,11 @@ try {
       if (!['status','takeover','return'].includes(action)) throw new Error('Use computer status, takeover or return.');
       result = await request('/v1/computer'+(action === 'status' ? '' : '/'+action),action === 'status' ? 'GET' : 'POST',action === 'status' ? undefined : {});
     } else {
-      if (action === 'open') {
+      if (action === 'open' || action === 'chart') {
+        if (action === 'chart' && !await client.healthy('chart-preview')) throw new Error('请重启到支持图表预览的后台版本。');
         const index = Number(rest[1]);
         if (!Number.isSafeInteger(index) || index < 1) throw new Error('Provide the artifact number from files (starting at 1).');
-        result = await request('/v1/tasks/'+segment(rest[0])+'/artifacts/'+(index-1)+'/open','POST',{});
+        result = await request('/v1/tasks/'+segment(rest[0])+'/artifacts/'+(index-1)+'/'+action,'POST',{});
       } else result = await request('/v1/tasks/'+segment(id)+'/artifacts');
     }
     console.log(JSON.stringify(result,null,2));
