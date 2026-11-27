@@ -513,7 +513,7 @@ npm run harness -- remote unshare-thread 会话ID 账户ID 设备ID
 
 支持 Web Locks 的浏览器会按配对和会话保存草稿。关闭页面后，用原配对令牌连接可恢复原文。待发记录保存原消息 ID 和已上传的附件引用，刷新后先查原回执。查不到回执时，可点击 **Retry send** 用原 ID 重发。未上传的本地文件需重新选择。附件过期时，原正文会回到输入框。
 
-daemon 配置 `SILICONFLOW_API_KEY` 后，支持录音的配对浏览器会显示 **Record voice**。每段最多录制 30 秒。点 **Stop and transcribe** 后，音频交给硅基流动转写，文字加入当前草稿，可修改后发送。点 **Cancel recording** 或切换会话会结束本次录音。 [源码与验收](superpowers/plans/2026-11-27-phone-dictation.md)
+daemon 配置 `SILICONFLOW_API_KEY` 后，支持录音的配对浏览器会显示 **Record voice**。每段最多录制 30 秒。点 **Stop and transcribe** 后，音频交给硅基流动转写，文字加入当前草稿，可修改后发送。点 **Cancel recording** 或切换会话会结束本次录音。配对私有会话中的助手答复提供 **Prepare audio**，由硅基流动合成该条答复，生成后可在原消息中播放。 [源码与验收](superpowers/plans/2026-11-27-phone-dictation.md)
 
 已发送的附件随原消息显示。支持的图片和文本可预览，原始文件可下载。预览和下载会校验原始文件的 SHA-256。每个会话最多保存 50 MiB 的附件原件。达到上限后可在新会话继续发送附件。
 

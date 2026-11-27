@@ -40,6 +40,9 @@ export const remotePage = String.raw`<!doctype html>
     .message-user { background: #ede6fb; margin-left: min(8vw, 3rem); }
     .message-assistant { background: #fff; box-shadow: inset 0 0 0 1px var(--line); margin-right: min(8vw, 3rem); }
     .speaker { color: var(--muted); font-size: .78rem; font-weight: 700; }
+    .reply-audio { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .45rem; }
+    .reply-audio audio { width: min(100%, 21rem); }
+    .reply-audio span:empty { display: none; }
     .message-attachments { display: grid; gap: .5rem; margin: .65rem 0 0; padding: 0; list-style: none; }
     .message-attachments li { padding: .6rem; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
     .attachment-actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .35rem; }
@@ -216,6 +219,7 @@ let conversationId = "";
 let pending;
 let editor = { draft: undefined, saving: Promise.resolve() };
 let voiceCapture;
+let replyAudio;
 let busy = false;
 let canSend = true;
 let refreshVersion = 0;
@@ -398,6 +402,7 @@ function choose(id) {
 }
 
 function resetConversationView() {
+  stopReplyAudio();
   refreshVersion++;
   canSend = true;
   historyCursor = null;
@@ -1385,6 +1390,7 @@ async function encodeVoiceClip(recording) {
 recordVoice.addEventListener("click", async () => {
   if (voiceCapture?.finish) { voiceCapture.finish(); return; }
   if (recordVoice.hidden || recordVoice.disabled || voiceCapture) return;
+  stopReplyAudio();
   const capture = voiceCapture = { controller: new AbortController(), text: prompt.value };
   const { signal } = capture.controller;
   voiceStatus.textContent = "Waiting for microphone access…";
@@ -1428,7 +1434,59 @@ recordVoice.addEventListener("click", async () => {
 });
 
 cancelVoice.addEventListener("click", discardVoice);
-window.addEventListener("pagehide", discardVoice);
+window.addEventListener("pagehide", () => { discardVoice(); stopReplyAudio(); });
+
+function stopReplyAudio() {
+  const playback = replyAudio;
+  if (!playback) return;
+  replyAudio = undefined;
+  playback.controller.abort();
+  playback.notice.textContent = "";
+  if (playback.audio) {
+    playback.audio.pause();
+    playback.audio.remove();
+    URL.revokeObjectURL(playback.audio.src);
+    playback.button.hidden = false;
+  }
+}
+
+function presentReplyAudio(article, id, entryId) {
+  const controls = element("div", "", article);
+  controls.className = "reply-audio";
+  const notice = element("span", "", controls);
+  notice.setAttribute("role", "status");
+  let requestId = "phone-reply-" + entryId;
+  const button = action("Prepare audio", controls, async () => {
+    if (voiceCapture) {
+      notice.textContent = "Finish the recording first.";
+      return;
+    }
+    stopReplyAudio();
+    const playback = replyAudio = { controller: new AbortController(), notice, button };
+    const { signal } = playback.controller;
+    notice.textContent = "Preparing audio with SiliconFlow…";
+    try {
+      const response = await request(conversationPath(id) + "/voice-speech", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entryId, requestId }), signal,
+      });
+      const wave = await response.blob();
+      if (signal.aborted) return;
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "metadata";
+      audio.setAttribute("aria-label", "Assistant reply audio");
+      audio.src = URL.createObjectURL(wave);
+      playback.audio = audio;
+      controls.append(audio);
+      button.hidden = true;
+      notice.textContent = "Audio ready.";
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error instanceof RequestError && error.status === 409) requestId = crypto.randomUUID();
+      notice.textContent = error instanceof RequestError ? error.message : "The audio request failed. Try again.";
+    }
+  });
+}
 
 function displayReceipt(receipt, checked = false) {
   const id = conversationId;
@@ -1894,6 +1952,7 @@ async function refresh() {
   if (disconnected) status.textContent = "";
   disconnected = false;
   if (after === null && historyCursor !== null) {
+    stopReplyAudio();
     messages.replaceChildren();
     taskEvents.replaceChildren();
     taskHistory.hidden = true;
@@ -1905,6 +1964,7 @@ async function refresh() {
     element("p", fromUser ? "You" : "Kada", article).classList.add("speaker");
     if (message.text) element("p", message.text, article);
     if (message.attachments?.length) presentAttachments(message.attachments, article);
+    if (!fromUser && message.text && identity.voiceOutput) presentReplyAudio(article, id, message.sequence);
   }
   for (const event of view.progressEvents || []) {
     const row = element("li", event.label + " · ", taskEvents);
@@ -2055,6 +2115,7 @@ signout.addEventListener("click", async () => {
   sessionStorage.removeItem("kada-device-token");
   identity = null;
   discardVoice();
+  stopReplyAudio();
   clearApprovals();
   clearWorkItems();
   clearSharedThreads();

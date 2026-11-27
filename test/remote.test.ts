@@ -56,8 +56,10 @@ function pairing(accountId = "owner", deviceId = "phone") {
   return { token, device: { accountId, deviceId, tokenHash } };
 }
 
+const voiceClip = Buffer.from('524946462800000057415645666d74201000000001000100803e0000007d00000200100064617461040000000000ff7f', 'hex');
+
 test('a paired portal transcribes bounded WAV input without starting a conversation', async t => {
-  const clip = Buffer.from('524946462800000057415645666d74201000000001000100803e0000007d00000200100064617461040000000000ff7f', 'hex');
+  const clip = voiceClip;
   const received: Buffer[] = [];
   let release!: () => void;
   const transcribing = new Promise<void>(resolve => { release = resolve; });
@@ -92,6 +94,55 @@ test('a paired portal transcribes bounded WAV input without starting a conversat
   assert.deepEqual(await response.json(), { text: 'Review forty-two records.' });
   assert.deepEqual(received, [clip]);
   assert.deepEqual(await (await call(owner.token, '/conversations')).json(), []);
+});
+
+test('a paired phone replays the verified audio of the selected reply after later messages and restart', async t => {
+  const spoken: string[] = [];
+  const voiceSynthesizer = async (text: string) => {
+    spoken.push(text);
+    return voiceClip;
+  };
+  const fixture = await scriptedFixture(context => {
+    const input = context.messages.findLast(message => message.role === 'user')?.content;
+    return fauxAssistantMessage(input === 'First question' ? 'Original answer.' : 'Later answer.');
+  }, {}, undefined, { voiceSynthesizer });
+  let reopened: LocalRuntime | undefined;
+  t.after(async () => { await reopened?.close(); await fixture.close(); });
+  const client = pairing(), anotherDevice = pairing('owner', 'tablet');
+  const devices = [client.device, anotherDevice.device];
+  const directory = join(fixture.directory, 'remote');
+  const first = await portal(t, fixture.runtime, directory, devices);
+  const path = '/conversations/voice-reply';
+  const accepted = await first.call(client.token, path + '/messages', turn('first', 'First question'));
+  assert.equal(accepted.status, 202);
+  const original = await until(async () => (await first.call(client.token, path)).json(),
+    view => view.messages.some(message => message.text === 'Original answer.'));
+  const originalReply = original.messages.find(message => message.text === 'Original answer.').sequence;
+  const userMessage = original.messages.find(message => message.role === 'user').sequence;
+  assert.equal((await first.call(client.token, path + '/messages', turn('second', 'Second question'))).status, 202);
+  const latest = await until(async () => (await first.call(client.token, path)).json(),
+    view => view.messages.some(message => message.text === 'Later answer.'));
+  const laterReply = latest.messages.find(message => message.text === 'Later answer.').sequence;
+  const request = (entryId: number) => ({
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entryId, requestId: 'original-playback' }),
+  });
+  assert.equal((await (await first.call(client.token, '/session')).json()).voiceOutput, true);
+  assert.equal((await first.call(anotherDevice.token, path + '/voice-speech', request(originalReply))).status, 404);
+  assert.equal((await first.call(client.token, path + '/voice-speech', request(userMessage))).status, 404);
+  const audio = await first.call(client.token, path + '/voice-speech', request(originalReply));
+  assert.equal(audio.status, 200);
+  assert.equal(audio.headers.get('content-type'), 'audio/wav');
+  assert.deepEqual(Buffer.from(await audio.arrayBuffer()), voiceClip);
+  assert.equal((await first.call(client.token, path + '/voice-speech', request(laterReply))).status, 409);
+  await first.close();
+  await fixture.runtime.close();
+
+  reopened = new LocalRuntime(fixture.settings, { models: fixture.models, voiceSynthesizer });
+  const second = await portal(t, reopened, directory, devices);
+  const replay = await second.call(client.token, path + '/voice-speech', request(originalReply));
+  assert.equal(replay.status, 200);
+  assert.deepEqual(Buffer.from(await replay.arrayBuffer()), voiceClip);
+  assert.deepEqual(spoken, ['Original answer.']);
 });
 
 test('a paired remote chat answers only its original structured question and replays the answer', async t => {

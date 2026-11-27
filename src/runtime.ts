@@ -2452,14 +2452,22 @@ export class LocalRuntime {
   async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[], answerVersion?: string, question?: { id: string; workspace?: string }): Promise<void> {
     return this.changes.run(() => this.followUpTask(id, message, requestId, images, answerVersion, question));
   }
-  private async openVoiceConversation(id: string) {
+  private async openVoiceConversation(id: string, remoteWorkspace?: string) {
     const meta = await this.metadata(id);
-    if (meta.entrypoint !== 'chat' || meta.remotePolicy || meta.room) throw new VoiceNoteError(404, 'Local voice notes require an ordinary local chat.');
+    if (remoteWorkspace !== undefined) {
+      if (meta.remotePolicy !== 'workspace' || meta.workspace !== remoteWorkspace) throw new VoiceNoteError(404, 'Voice conversation not found.');
+    } else if (meta.entrypoint !== 'chat' || meta.remotePolicy || meta.room) {
+      throw new VoiceNoteError(404, 'Local voice notes require an ordinary local chat.');
+    }
     return this.open(meta, false);
   }
 
   get voiceInputAvailable() {
     return Boolean(this.options.voiceTranscriber || process.env.SILICONFLOW_API_KEY?.trim());
+  }
+
+  get voiceOutputAvailable() {
+    return Boolean(this.options.voiceSynthesizer || process.env.SILICONFLOW_API_KEY?.trim());
   }
 
   private voiceTranscriber() {
@@ -2517,29 +2525,31 @@ export class LocalRuntime {
     return saved;
   }
 
-  async renderVoiceReply(id: string, requestId: string) {
+  async renderVoiceReply(id: string, requestId: string, remoteReply?: { workspace: string; entryId: EntryId }) {
     const key = voiceNoteKey(requestId), directory = join(this.directory(id), 'voice');
     const claim = await this.changes.run(async () => {
-      const chat = await this.openVoiceConversation(id);
+      const chat = await this.openVoiceConversation(id, remoteReply?.workspace);
       const previous = (await chat.harness.snapshot(VoiceNotes, ctx))?.speech[key];
       if (previous) {
+        if (remoteReply && previous.answerEntryId !== remoteReply.entryId) throw new VoiceNoteError(409, 'This speech request refers to a different reply.');
         if (!previous.file) throw new VoiceNoteError(409, 'This speech request has no saved audio. Use a new request ID to retry.');
         return { receipt: { id: requestId, answerEntryId: previous.answerEntryId, file: previous.file } };
       }
-      const last = await this.latestInput(chat);
-      if (last?.status !== 'done') throw new VoiceNoteError(409, 'Wait for the original assistant reply before rendering speech.');
-      const entry = await chat.harness.commit(tx => tx.entry(AssistantEntry, last.answer), ctx);
+      const last = remoteReply ? undefined : await this.latestInput(chat);
+      const answerEntryId = remoteReply?.entryId ?? (last?.status === 'done' ? last.answer : undefined);
+      if (answerEntryId === undefined) throw new VoiceNoteError(409, 'Wait for the original assistant reply before rendering speech.');
+      const entry = await chat.harness.commit(tx => tx.entry(AssistantEntry, answerEntryId), ctx);
       const text = entry?.model?.flatMap(message => conversationAnswer(message) ?? []).join('\n').trim();
+      if (remoteReply && !text) throw new VoiceNoteError(404, 'Assistant reply not found.');
       if (!text || text.length > 32000) throw new VoiceNoteError(409, 'The original reply must contain between 1 and 32000 characters for speech.');
       const synthesize = this.options.voiceSynthesizer ?? siliconFlowVoiceSynthesizer();
-      const answerEntryId = last.answer;
       await chat.harness.commit(async tx => { (await tx.doc(VoiceNotes)).speech[key] = { answerEntryId }; }, ctx);
       return { synthesize, answerEntryId, text };
     });
     if (claim.receipt) return claim.receipt;
     const file = await saveVoiceReply(directory, requestId, await claim.synthesize(claim.text));
     await this.changes.run(async () => {
-      const chat = await this.openVoiceConversation(id);
+      const chat = await this.openVoiceConversation(id, remoteReply?.workspace);
       await chat.harness.commit(async tx => { (await tx.doc(VoiceNotes)).speech[key]!.file = file; }, ctx);
     });
     return { id: requestId, answerEntryId: claim.answerEntryId, file };
@@ -2552,7 +2562,13 @@ export class LocalRuntime {
       return (await chat.harness.snapshot(VoiceNotes, ctx))?.speech[key]?.file;
     });
     if (!file) throw new VoiceNoteError(404, 'No saved audio for this speech request.');
-    return verifyVoiceReply(await Workspace.open(join(this.directory(id), 'voice'), { create: false }), file);
+    return (await verifyVoiceReply(await Workspace.open(join(this.directory(id), 'voice'), { create: false }), file)).file;
+  }
+
+  async remoteVoiceReply(id: string, requestId: string, reply: { workspace: string; entryId: EntryId }) {
+    const { file } = await this.renderVoiceReply(id, requestId, reply);
+    const { data } = await verifyVoiceReply(await Workspace.open(join(this.directory(id), 'voice'), { create: false }), file);
+    return data;
   }
   private async saveBrowserHold(hold: BrowserHold | null) {
     await atomicJson(join(this.config.dataDir, 'browser-handoff.json'), hold);

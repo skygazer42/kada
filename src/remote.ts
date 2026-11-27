@@ -707,7 +707,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Content-Security-Policy",
-      "default-src 'none'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+      "default-src 'none'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; media-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
     try {
       if (url.origin !== origin.origin || request.headers.host?.toLowerCase() !== origin.host ||
         request.headers["sec-fetch-site"] === "cross-site" ||
@@ -738,6 +738,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const sharedRoom = /^\/remote\/api\/shared-rooms(?:\/([a-f0-9-]{36})(?:\/(messages)|\/attachments\/(\d+)\/(\d+))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(runtime.voiceInputAvailable ? { voiceInput: true } : {}),
+          ...(runtime.voiceOutputAvailable ? { voiceOutput: true } : {}),
           ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true, sharedRooms: true } : {}) });
       } else if (method === "POST" && route === "/remote/api/transcriptions") {
         if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "audio/wav") {
@@ -1006,7 +1007,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       }
       else if (method === "GET" && route === "/remote/api/conversations") send(response, 200, await list(scope));
       else {
-        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|question-answers|child-answers|child-stop|child-interrupt|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
+        const match = /^\/remote\/api\/conversations\/([^/]+)(?:\/(messages|uploads|confirm|control|question-answers|child-answers|child-stop|child-interrupt|voice-speech|attachments\/[A-Za-z0-9_-]{1,80}\/[a-f0-9-]{36}|artifacts\/[0-9]+\/[a-f0-9]{64}))?$/.exec(route);
         const conversationId = match?.[1];
         if (!conversationId || !idPattern.test(conversationId)) throw new HttpError(404, "Remote endpoint not found.");
         const action = match?.[2];
@@ -1035,6 +1036,15 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             }
             else if (method === "GET" && action?.startsWith("artifacts/")) {
               await download(response, await taskStatus(row), "/remote/api/conversations/" + row.conversationId, route, url.searchParams.get("file"));
+            } else if (method === "POST" && action === "voice-speech") {
+              const { entryId, requestId } = await json(request);
+              if (typeof entryId !== "number" || !Number.isSafeInteger(entryId) || entryId < 1 || typeof requestId !== "string") {
+                throw new HttpError(400, "Provide an assistant reply ID and a speech request ID.");
+              }
+              const { root } = await privateWorkspace(row, false);
+              const audio = await runtime.remoteVoiceReply(row.taskId, requestId, { workspace: root, entryId: entryId as EntryId });
+              response.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": audio.length });
+              response.end(audio);
             } else if (method === "POST" && action === "control") {
               const { action: control, version } = await json(request);
               if ((control !== "pause" && control !== "continue" && control !== "cancel") || typeof version !== "string" || !shaPattern.test(version)) {

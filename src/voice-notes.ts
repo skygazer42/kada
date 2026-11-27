@@ -119,7 +119,7 @@ export async function saveVoiceReply(directory: string, id: string, audio: Uint8
 export async function verifyVoiceReply(workspace: Workspace, file: FileSnapshot) {
   try {
     const { file: current, data } = await workspace.readBinarySnapshot(file.path, speechLimit);
-    if (current.sha256 === file.sha256 && current.bytes === file.bytes && isWave(data)) return current;
+    if (current.sha256 === file.sha256 && current.bytes === file.bytes && isWave(data)) return { file: current, data };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
