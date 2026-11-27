@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "environment": "Windows, Chromium, agent-browser 0.38.1",
+  "viewport": { "width": 390, "height": 844 },
+  "cliLink": true,
+  "roleCreatedAndEdited": true,
+  "archiveAndRestore": true,
+  "modelPreservedOnReload": true,
+  "roleRevisionInTerminalCommand": true,
+  "powerShellWorkspaceArgumentWithSpacesAndApostrophe": true
+}

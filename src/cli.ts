@@ -53,6 +53,7 @@ try {
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
     console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
     console.log('model browser --workspace 路径　生成本机项目模型设置链接。');
+    console.log('assistants browser --workspace 路径　生成本机项目助手设置链接。');
     console.log('mcp browser --workspace 路径　生成本机项目 MCP 工具设置链接。');
     console.log('mcp connections　生成本机 MCP 连接管理链接。');
     console.log('snapshots browser 任务ID　生成对应工作区的本机快照链接。');
@@ -128,11 +129,15 @@ try {
       if (!await client.healthy('named-assistants')) throw new Error('后台尚不支持命名助手；请重启到当前版本。');
       const path = '/v1/assistants';
       if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));
+      else if (action === 'browser') {
+        if (!await client.healthy('project-assistants-page')) throw new Error('请重启到支持项目助手设置页面的后台版本。');
+        result = await request(path + '/browser-link', 'POST', { workspace });
+      }
       else if (action === 'show') result = await request(path + '/' + segment(rest[0]));
       else if (action === 'add') {
         const input = await json(rest[0]); result = await request(path, 'POST', { ...input, workspace: input.workspace ?? workspace });
       } else if (action === 'edit') result = await request(path + '/' + segment(rest[0]), 'PATCH', await json(rest[1]));
-      else throw new Error('Use assistants list, add FILE.json, show ID or edit ID FILE.json.');
+      else throw new Error('Use assistants list, browser, add FILE.json, show ID or edit ID FILE.json.');
     }
     else if (command === 'rooms') {
       if (!await client.healthy('assistant-rooms')) throw new Error('请重启到支持助手群组的后台版本。');

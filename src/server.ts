@@ -24,6 +24,7 @@ import { githubWebhook } from './github-webhook.js';
 import { createWorkboardAccess } from './workboard-access.js';
 import { createProjectModelAccess } from './project-model-access.js';
 import { createProjectMcpAccess } from './project-mcp-access.js';
+import { createProjectAssistantsAccess } from './project-assistants-access.js';
 import { createWorkspaceSnapshotAccess } from './workspace-snapshot-access.js';
 import { createMcpConnectionsAccess } from './mcp-connections-access.js';
 import { runMcpConnectionAction, type McpConnectionAction } from './mcp-connection-actions.js';
@@ -51,6 +52,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   let workboard: ReturnType<typeof createWorkboardAccess>;
   let projectModels: ReturnType<typeof createProjectModelAccess>;
   let projectMcp: ReturnType<typeof createProjectMcpAccess>;
+  let projectAssistants: ReturnType<typeof createProjectAssistantsAccess>;
   let snapshotsBrowser: ReturnType<typeof createWorkspaceSnapshotAccess>;
   let mcpConnections: ReturnType<typeof createMcpConnectionsAccess>;
   let pushRun: Promise<void> | undefined;
@@ -77,7 +79,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (chartPreviews.handle(req, res, url)) return;
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -86,6 +88,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (await projectMcp.handle(req, res, url)) return;
       if (await snapshotsBrowser.handle(req, res, url)) return;
       if (await mcpConnections.handle(req, res, url)) return;
+      if (await projectAssistants.handle(req, res, url)) return;
       if (url.pathname === '/v1/settings/mcp/oauth/callback' && req.method === 'GET') {
         if (req.headers.host !== new URL(`http://127.0.0.1:${config.port}`).host) return send(403, { error: 'Use the local OAuth callback address.' });
         res.setHeader('Referrer-Policy', 'no-referrer');
@@ -214,6 +217,9 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         const id = decodeURIComponent(mcp[1]!);
         return send(200, await runMcpConnectionAction(runtime.mcp, id, mcp[2] as McpConnectionAction, () => body(req),
           `http://127.0.0.1:${config.port}/v1/settings/mcp/oauth/callback`));
+      }
+      if (url.pathname === '/v1/assistants/browser-link' && req.method === 'POST') {
+        return send(201, await projectAssistants.link((await body(req)).workspace));
       }
       if (url.pathname === '/v1/assistants') {
         if (req.method === 'GET') return send(200, await runtime.assistants.list(url.searchParams.get('workspace')));
@@ -550,12 +556,14 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   });
   try {
     const extensions = config.computer ? [await computer.connect(config.computer)] : [];
-    runtime = new LocalRuntime(config, { ...options, models: options?.models ?? cloudModels(), extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
+    const models = options?.models ?? cloudModels();
+    runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
     workboard = createWorkboardAccess(runtime.workItems, `http://127.0.0.1:${config.port}`, body);
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
     projectMcp = createProjectMcpAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
     snapshotsBrowser = createWorkspaceSnapshotAccess(runtime, `http://127.0.0.1:${config.port}`, body);
     mcpConnections = createMcpConnectionsAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
+    projectAssistants = createProjectAssistantsAccess(runtime.assistants, models, `http://127.0.0.1:${config.port}`, body);
     remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),sharedDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
     await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));

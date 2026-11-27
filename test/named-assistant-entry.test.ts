@@ -3,7 +3,7 @@ import test from 'node:test';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fauxAssistantMessage } from '@earendil-works/pi-ai';
 import { serve } from '../src/server.js';
@@ -13,6 +13,54 @@ import { VERSION } from '../src/version.js';
 import { scriptedFixture, until } from './helpers.js';
 
 const execute = promisify(execFile);
+
+test('a local assistant settings link edits only its project and reuses the original revisions', async t => {
+  const f = await scriptedFixture(() => fauxAssistantMessage('No model needed.'));
+  await f.runtime.close();
+  const socket = createServer(); await new Promise<void>(done => socket.listen(0, '127.0.0.1', done));
+  const port = (socket.address() as { port: number }).port; await new Promise<void>(done => socket.close(() => done()));
+  const config = { ...f.settings, port }, server = await serve(config, { models: f.models });
+  t.after(async () => { await server.close(); await f.close(); });
+  const another = join(f.directory, 'another-project');
+  await mkdir(another);
+  const definition = { name: '研究助理', instructions: '保留完整的角色内容。', tools: ['read'] };
+  const foreign = await server.runtime.assistants.create({ workspace: another, ...definition });
+  const client = createClient(config);
+  const { url } = await client.request<{ url: string }>('/v1/assistants/browser-link', 'POST', { workspace: f.workspace });
+  const target = new URL(url);
+  const base = target.origin + target.pathname;
+  const call = (path: string, method: string, body?: unknown, token?: string, origin?: string) => fetch(base + '/' + path, {
+    method, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(origin ? { Origin: origin } : {}),
+      ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  assert.match(await (await fetch(url)).text(), /项目助手/);
+  assert.equal((await call('state', 'GET')).status, 401);
+  const payload = { ticket: target.hash.slice(1) };
+  const { token } = await (await call('session', 'POST', payload)).json();
+  assert.equal((await call('session', 'POST', payload)).status, 401);
+  assert.equal((await call('state', 'GET', undefined, token, 'https://example.test')).status, 403);
+  assert.equal((await call('roles/' + foreign.id, 'GET', undefined, token)).status, 404);
+  assert.equal((await call('roles/' + foreign.id, 'PATCH', { requestId: 'foreign', revision: 1, name: 'Foreign edit' }, token)).status, 404);
+  const body = { ...definition, requestId: 'browser-create-1' };
+  assert.equal((await call('roles', 'POST', { ...body, workspace: another }, token)).status, 400);
+  const created = await call('roles', 'POST', body, token);
+  assert.equal(created.status, 201);
+  const role = await created.json();
+  assert.equal((await (await call('roles', 'POST', body, token)).json()).id, role.id);
+  const edit = 'roles/' + role.id;
+  assert.equal((await (await call(edit, 'GET', undefined, token)).json()).instructions, definition.instructions);
+  const patch = { requestId: 'browser-edit', revision: role.revision, tools: [], archived: true };
+  const archived = await (await call(edit, 'PATCH', patch, token)).json();
+  assert.equal(archived.revision, 2);
+  assert.deepEqual(archived.tools, []);
+  assert.equal(archived.archived, true);
+  assert.equal((await call(edit, 'PATCH', { requestId: 'stale', revision: 1, name: 'Stale title' }, token)).status, 409);
+  assert.equal((await (await call(edit, 'PATCH', { requestId: 'restore', revision: 2, archived: false }, token)).json()).archived, false);
+  const state = await (await call('state', 'GET', undefined, token)).json();
+  assert.deepEqual(state.roles.map((entry: { id: string }) => entry.id), [role.id]);
+  assert(state.models.some((entry: { modelId: string }) => entry.modelId === f.settings.model?.modelId));
+  assert.equal((await server.runtime.list()).length, 0);
+});
 
 test('owner API and CLI manage role revisions, and the terminal selects a role without starting work during setup', async t => {
   const f = await scriptedFixture(context => { assert(JSON.stringify(context.messages).includes('ENTRY_ROLE_416')); return fauxAssistantMessage('Role selected.'); });
