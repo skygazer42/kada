@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
-import { defineExtension, defineTool } from '@earendil-works/pi-durable';
+import { defineExtension, defineTool, type ToolExecutionApi } from '@earendil-works/pi-durable';
+import type { Context } from '@earendil-works/chord';
+import { requestApproval, type ApplicationApprovalScope } from './approvals.js';
 import { normalizeMcpPrecheck, projectRoot, type McpPrecheck, type McpTools } from './mcp-tools.js';
 import { atomicJson, errorText, readJson, SerialQueue } from './util.js';
 
@@ -9,6 +11,8 @@ type GmailSource = { id: string; revision: string; email: string; allowAssistant
 type BoundMailbox = { fingerprint: string; signal?: AbortSignal; routine?: true };
 export type RoutineGmailBinding = { id: string; fingerprint: string };
 export type RoutineGmailMatch = RoutineGmailBinding & { messageIds: string[] };
+export const gmailMutations = ['draft_gmail_message','send_gmail_message','modify_gmail_message_labels'] as const;
+export type GmailMutation = typeof gmailMutations[number];
 
 const searchTool = 'search_gmail_messages';
 const readTool = 'get_gmail_message_content';
@@ -82,7 +86,19 @@ export class ProjectGmail {
   }
   async assistantMailbox(project: string) {
     const source = (await this.read())[project];
-    if (source?.allowAssistant) return mailboxFingerprint(project, source);
+    if (source?.allowAssistant) return { id:source.id, fingerprint:mailboxFingerprint(project, source)! };
+  }
+  async mutationTarget(scope: ApplicationApprovalScope, tool: string) {
+    if (!gmailMutations.some(name => name === tool)) throw new GmailError(400, 'Choose a supported Gmail mutation.');
+    const { project, source } = await this.source(scope.workspace);
+    if (!source?.allowAssistant || mailboxFingerprint(project,source) !== scope.fingerprint) {
+      throw new GmailError(409, 'The authorized project mailbox changed.');
+    }
+    const pin = (await this.mcp.pins(project)).find(item => item.id === source.id && item.revision === source.revision && item.tools.includes(tool));
+    if (!pin || !await this.mcp.requiresApproval(pin,tool)) {
+      throw new GmailError(409, 'Enable this Gmail action for the project with per-action approval.');
+    }
+    return { source,pin };
   }
   async watchMailbox(workspace: string, readMessages: boolean) {
     const { project, source } = await this.source(workspace);
@@ -231,4 +247,61 @@ export function projectGmailExtension(gmail: ProjectGmail, workspace: string, fi
       },
     }),
   ] });
+}
+
+export function projectGmailWrites(gmail: ProjectGmail, scope: ApplicationApprovalScope, tools: GmailMutation[]) {
+  const addresses = Type.Optional(Type.Array(Type.String({ pattern:'^[^\\s@,<>]+@[^\\s@,<>]+\\.[^\\s@,<>]+$', maxLength:320 }),
+    { minItems:1,maxItems:20,uniqueItems:true }));
+  const stage = async (tool: GmailMutation, input: Record<string,unknown>, api: ToolExecutionApi, context: Context) => {
+    const { source,pin } = await gmail.mutationTarget(scope,tool);
+    return requestApproval(pin,tool,{
+      ...input,user_google_email:source.email,
+      ...(tool === 'modify_gmail_message_labels' ? {} : {from_email:source.email}),
+    },api,context,{ gmail:scope });
+  };
+  const compose = (tool: 'draft_gmail_message' | 'send_gmail_message') => {
+    const send = tool === 'send_gmail_message';
+    return defineTool({
+      name:send ? 'project_gmail_send' : 'project_gmail_draft',
+      description:send ? 'Propose sending a plain-text message from the project mailbox. Specify every recipient. Call this tool alone for approval.'
+        : 'Propose saving a plain-text Gmail draft in the project mailbox. Call this tool alone for approval.',
+      parameters:Type.Object({
+        to:addresses,cc:addresses,bcc:addresses,
+        subject:Type.String({ minLength:1,maxLength:500,pattern:'^[^\\r\\n]+$' }),
+        body:Type.String({ minLength:1,maxLength:16000 }),
+      },{ additionalProperties:false }),
+      replay:'safe', executionMode:'sequential',
+      execute:async ({to,cc,bcc,subject,body},api,context) => {
+        if (send && !to?.length) throw new GmailError(400, 'Provide a recipient for the message.');
+        const recipients = [...(to ?? []), ...(cc ?? []), ...(bcc ?? [])];
+        if (recipients.some(address => control.test(address))) {
+          throw new GmailError(400, 'Provide valid recipient addresses.');
+        }
+        if (!subject.trim() || control.test(subject) || !body.trim()) throw new GmailError(400, 'Provide a subject and body.');
+        return stage(tool,{
+          subject,body,body_format:'plain',
+          ...(to ? {to:to.join(', ')} : {}),...(cc ? {cc:cc.join(', ')} : {}),...(bcc ? {bcc:bcc.join(', ')} : {}),
+        },api,context);
+      },
+    });
+  };
+  const labels = Type.Optional(Type.Array(Type.String({pattern:'^[A-Za-z0-9_-]{1,128}$'}),{minItems:1,maxItems:30,uniqueItems:true}));
+  const modifyLabels = defineTool({
+    name:'project_gmail_labels',
+    description:'Propose adding or removing exact label IDs from a message in the project mailbox. Call this tool alone for approval.',
+    parameters:Type.Object({ id:Type.String({ pattern:'^[A-Za-z0-9_-]{1,128}$' }),add:labels,remove:labels },
+      { additionalProperties:false }),
+    replay:'safe',executionMode:'sequential',
+    execute:async ({id,add,remove},api,context) => {
+      if ((!add && !remove) || add?.some(label => remove?.includes(label))) {
+        throw new GmailError(400, 'Provide distinct labels to add or remove.');
+      }
+      return stage('modify_gmail_message_labels',{
+        message_id:id,...(add ? {add_label_ids:add} : {}),...(remove ? {remove_label_ids:remove} : {}),
+      },api,context);
+    },
+  });
+  const registered = { draft_gmail_message:compose('draft_gmail_message'),send_gmail_message:compose('send_gmail_message'),
+    modify_gmail_message_labels:modifyLabels };
+  return defineExtension({ name:'local_project_gmail_writes',tools:tools.map(tool => registered[tool]) });
 }

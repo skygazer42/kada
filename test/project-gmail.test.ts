@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -14,15 +14,17 @@ import { hasTool, scriptedFixture, until } from './helpers.js';
 const search = 'search_gmail_messages', read = 'get_gmail_message_content';
 const digest = 'a'.repeat(64);
 const mailServer = [
+  "const fs=require('node:fs'); const writes=['draft_gmail_message','send_gmail_message','modify_gmail_message_labels'];",
   "const input=require('node:readline').createInterface({input:process.stdin});",
   "input.on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;",
-  "const tools=['search_gmail_messages','get_gmail_message_content'].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:true}}));",
+  "const tools=['search_gmail_messages','get_gmail_message_content',...writes].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:!writes.includes(name)}}));",
   "let result={initialize:{protocolVersion:r.params?.protocolVersion,serverInfo:{name:'local-mail-fixture',version:'1'},capabilities:{tools:{}}},'tools/list':{tools}}[r.method];",
   "if(r.method==='tools/call'){const {name,arguments:a}=r.params;",
   "const hash='a'.repeat(64), p=a.page_offset||0;",
   "let valid=a.user_google_email==='team@example.invalid', text;",
   "if(name==='search_gmail_messages'){valid&&=a.query==='in:inbox' && a.include_headers===true && a.page_size===10 && (!a.page_token || a.page_token==='page-two');",
   "text=a.page_token?'Found the second page':'Found a message. Next page token: page-two';}",
+  "else if(writes.includes(name)){fs.appendFileSync(process.argv[1],JSON.stringify({name,args:a})+'\\n');text='Confirmed '+name;}",
   "else {valid&&=a.message_id==='abc123' && a.body_format==='text' && a.full===false && a.include_links===false && a.format==='full' && (p===0 || p===5 && a.expected_sha256===hash);",
   "text=JSON.stringify({message_id:'abc123',body_format:'text',body:p?'world':'hello',page_offset:p,next_offset:p?null:5,total_chars:10,body_sha256:hash,complete:!!p});}",
   "const changed=name==='get_gmail_message_content' && a.expected_sha256 && a.expected_sha256!==hash;",
@@ -76,6 +78,73 @@ test('Gmail search and message pages use one authorized project mailbox and its 
   await daemon.runtime.mcp.setApproval('mail', [read], tested.revision);
   await assert.rejects(client.request(messagePath, 'POST', { id: 'abc123' }), /approval/i);
   assert.deepEqual(await client.request(queryPath, 'POST', { query: 'in:inbox' }), found);
+});
+
+test('project Gmail drafts, sends and labels use exact approval parameters and reject a later mailbox change', async t => {
+  const message = { to:['recipient@example.invalid'], cc:['copy@example.invalid'],subject:'Invoice summary',body:'Total 42.' };
+  const f = await scriptedFixture(context => {
+    const initial = JSON.stringify(context.messages.find(entry => entry.role === 'user')?.content) ?? '';
+    const operation = initial.includes('Send') ? 'send' : initial.includes('Label') ? 'labels' : 'draft';
+    const name = 'project_gmail_' + operation;
+    const called = context.messages.some(entry => entry.role === 'toolResult' && entry.toolName === name);
+    if (called || !hasTool(context,name)) {
+      return fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Reviewed the Gmail action.',artifacts:[] }),{ stopReason:'toolUse' });
+    }
+    const args = operation === 'labels' ? {id:'abc123',remove:['INBOX']} : message;
+    return fauxAssistantMessage(fauxToolCall(name,args),{ stopReason:'toolUse' });
+  },{maxDurationMs:90_000});
+  let runtime = f.runtime;
+  t.after(async () => { await runtime.close(); await f.close(); });
+  const log = join(f.directory,'mail-actions.jsonl');
+  await writeFile(log,'');
+  await runtime.mcp.configure({ id:'mail', transport:'stdio',command:process.execPath,args:['-e',mailServer,log] });
+  const { revision } = await runtime.mcp.test('mail');
+  const writes = ['draft_gmail_message','send_gmail_message','modify_gmail_message_labels'];
+  await runtime.mcp.enable('mail',[search,read,...writes],revision);
+  await runtime.mcp.setApproval('mail',writes,revision);
+  const source = {id:'mail',revision,email:'team@example.invalid',allowAssistant:true};
+  await runtime.gmail.setSource(f.workspace,source);
+  const calls = async () => (await readFile(log,'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const request = async (objective: string) => {
+    const task = await runtime.create(objective,f.workspace);
+    const status = await until(() => runtime.status(task.id), row => ['waiting_user','completed','failed'].includes(row.status));
+    assert.equal(status.status,'waiting_user');
+    return { id:task.id, approval:status.approvals[0]! };
+  };
+  const decide = ({id,approval}: Awaited<ReturnType<typeof request>>, decision:'allow'|'deny') =>
+    runtime.decideApproval(id,approval.id,decision,approval.digest);
+  const settle = (id: string,state:string) => until(() => runtime.status(id), row => row.approvals[0]?.status === state);
+  const draft = await request('Draft the invoice summary.');
+  const compose = { user_google_email:source.email,from_email:source.email,to:message.to[0],
+    cc:message.cc[0],subject:message.subject,body:message.body,body_format:'plain' };
+  assert.deepEqual(draft.approval.arguments,compose);
+  assert.deepEqual(await calls(),[]);
+  await decide(draft,'allow');
+  await settle(draft.id,'completed');
+  assert.deepEqual(await calls(),[{name:writes[0],args:compose}]);
+
+  const denied = await request('Send the invoice summary.');
+  await decide(denied,'deny');
+  await settle(denied.id,'denied');
+  assert.equal((await calls()).length,1);
+  const send = await request('Send the approved invoice summary.');
+  await runtime.close();
+  runtime = new LocalRuntime(f.settings,{models:f.models});
+  await runtime.recover();
+  await decide(send,'allow');
+  await decide(send,'allow');
+  await settle(send.id,'completed');
+  assert.deepEqual((await calls())[1],{name:writes[1],args:compose});
+
+  const label = await request('Label the original message.');
+  await decide(label,'allow');
+  await settle(label.id,'completed');
+  assert.deepEqual((await calls())[2],{name:writes[2],args:{user_google_email:source.email,message_id:'abc123',remove_label_ids:['INBOX']}});
+  const stale = await request('Send the invoice summary once more.');
+  await runtime.gmail.setSource(f.workspace,{...source,email:'other@example.invalid'});
+  await decide(stale,'allow');
+  await settle(stale.id,'stale');
+  assert.equal((await calls()).length,3);
 });
 
 test('only opted-in local chats can read the current authorized project mailbox', async t => {

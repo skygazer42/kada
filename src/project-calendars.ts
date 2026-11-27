@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
 import { defineExtension, defineTool, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context } from '@earendil-works/chord';
-import { requestApproval } from './approvals.js';
+import { requestApproval, type ApplicationApprovalScope } from './approvals.js';
 import { explicitInstant } from './routine-schedule.js';
 import { normalizeMcpPrecheck, projectRoot, type McpPrecheck, type McpTools } from './mcp-tools.js';
 import { atomicJson, errorText, readJson, redactCredentials, SerialQueue } from './util.js';
@@ -11,7 +11,6 @@ import { localCalendarDay } from './work-items.js';
 
 type CalendarSource = { id: string; revision: string; account: string; calendarId: string; timeZone: string; allowAssistant?: boolean };
 type CalendarEvent = { id: string; title: string; day: string; start: string; end: string; allDay: boolean };
-export type CalendarApprovalScope = { workspace: string; fingerprint: string };
 export const calendarMutations = ['create-event','update-event','delete-event'] as const;
 export type CalendarMutation = typeof calendarMutations[number];
 
@@ -105,7 +104,7 @@ export class ProjectCalendars {
     const fingerprint = assistantFingerprint(project, source);
     if (source && fingerprint) return { id:source.id, fingerprint };
   }
-  async mutationTarget(scope: CalendarApprovalScope, tool: string) {
+  async mutationTarget(scope: ApplicationApprovalScope, tool: string) {
     if (!calendarMutations.some(name => name === tool)) throw new CalendarError(400, 'Choose a supported calendar mutation.');
     const { project, source } = await this.source(scope.workspace);
     if (!source || assistantFingerprint(project,source) !== scope.fingerprint) {
@@ -221,7 +220,7 @@ function validateEventTime(start?: string, end?: string) {
   if (last <= first) throw new CalendarError(400, 'The event must end after it starts.');
 }
 
-export function projectCalendarWrites(calendars: ProjectCalendars, scope: CalendarApprovalScope, taskId: string, tools: CalendarMutation[]) {
+export function projectCalendarWrites(calendars: ProjectCalendars, scope: ApplicationApprovalScope, taskId: string, tools: CalendarMutation[]) {
   const summary = Type.String({ minLength:1,maxLength:500 });
   const time = Type.String({ minLength:1,maxLength:40 });
   const description = Type.Optional(Type.String({ maxLength:4000 }));
@@ -231,9 +230,9 @@ export function projectCalendarWrites(calendars: ProjectCalendars, scope: Calend
   const stage = async (tool: CalendarMutation, input: Record<string,unknown>, api: ToolExecutionApi, context: Context) => {
     const { source, pin } = await calendars.mutationTarget(scope,tool);
     return requestApproval(pin,tool,{
-      account:source.account, calendarId:source.calendarId,
-      ...(tool === 'delete-event' ? {} : {timeZone:source.timeZone}), ...input,
-    },api,context,scope);
+      ...input,account:source.account, calendarId:source.calendarId,
+      ...(tool === 'delete-event' ? {} : {timeZone:source.timeZone}),
+    },api,context,{ calendar:scope });
   };
   const create = defineTool({
     name:'project_calendar_create',

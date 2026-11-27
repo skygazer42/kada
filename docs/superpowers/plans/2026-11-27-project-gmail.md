@@ -19,3 +19,9 @@ Rakazo 派发工具前按当前账号批准范围查找连接。Kada 在邮箱�
 Pi 事务同时登记选中的邮件 ID 及原发生项。恢复时沿同一发生项投递，收件箱按发生项去重，任务沿用原任务 ID。用户暂停、取消或编辑时，可在历史中看到已受理且被中断的邮件批次。任务只获得来源连接的本次匹配邮件读取工具，正文按现有 SHA-256 分页读取。 [DuskBot 投递与游标](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L451) · [Gmail 查询输出](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L1639)
 
 合成 MCP 与 Pi 宿主回归覆盖两页基线、新匹配、移除后重新匹配、规则重启、通知保存后的同一发生项恢复、格式异常、连接撤权，以及任务读取本次邮件并拒绝其他 ID。真实邮箱的触发时延和大查询仍需实测。 [回归](../../../test/routine-gmail.test.ts)
+
+## 邮件写入
+
+项目授权后的执行任务可分别请求保存草稿、发送纯文本邮件、修改原邮件标签。连接需对每种动作启用逐次审批。保存的审批绑定账号、动作和完整参数，执行器在每次派发前检查原邮箱绑定及当前项目许可。收件人、抄送和密送来自原请求，发件账号来自项目绑定。同一审批在重启和重复决定后依照原回执结算。 [Suparagent 写入审批](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/composio_actions.py#L136) · [Rakazo 固定批准的调用](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/approvals/approval-effect.ts#L119)
+
+合成账号回归核对草稿、发送以及标签参数，并验证拒绝发送、重复批准和邮箱换绑。写入适配依照 Google Workspace MCP 的参数。真实发件、转发和附件处理仍待补充或验收。 [草稿](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L3290) · [发送](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2622) · [标签](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L4584) · [本机回归](../../../test/project-gmail.test.ts)
