@@ -112,6 +112,39 @@ test('the local MCP page edits only the linked project and distinguishes inherit
   assert.deepEqual(await server.runtime.mcp.pins(fixture.workspace), []);
   assert.equal((await call('tools', 'PUT', token, { tools: null })).status, 200);
   assert.equal(await server.runtime.mcp.projectTools(fixture.workspace), null);
+
+  const addOffice = [
+    "require('node:readline').createInterface({input:process.stdin}).on('line',line=>{",
+    "const request=JSON.parse(line);if(request.id===undefined)return;",
+    "const tools=['search_gmail_messages','get_gmail_message_content','list-events'].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:true}}));",
+    "const result={initialize:{protocolVersion:request.params?.protocolVersion,serverInfo:{name:'office-fixture',version:'1'},capabilities:{tools:{}}},'tools/list':{tools}}[request.method];",
+    "console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result}));});",
+  ].join('\n');
+  await server.runtime.mcp.configure({id:'office',transport:'stdio',command:process.execPath,args:['-e',addOffice]});
+  const {revision} = await server.runtime.mcp.test('office');
+  await server.runtime.mcp.enable('office',['search_gmail_messages','get_gmail_message_content','list-events'],revision);
+  assert.equal((await call('bindings','GET')).status,401);
+  const available = await (await call('bindings','GET',token)).json();
+  assert.deepEqual(available,{
+    gmail:{source:null,connections:[{id:'office',revision}]},
+    calendar:{source:null,connections:[{id:'office',revision}]},
+  });
+  const mail = {id:'office',revision,email:'project@example.invalid',allowAssistant:true};
+  const calendar = {id:'office',revision,account:'work',calendarId:'primary',timeZone:'UTC',allowAssistant:true};
+  assert.equal((await call('gmail-source','PUT',token,{...mail,workspace:other})).status,400);
+  assert.equal((await call('gmail-source','PUT',token,mail)).status,200);
+  assert.equal((await call('calendar-source','PUT',token,calendar)).status,200);
+  const saved = await (await call('bindings','GET',token)).json();
+  assert.deepEqual(saved.gmail.source,mail);
+  assert.deepEqual(saved.calendar.source,calendar);
+  assert.equal((await server.runtime.gmail.source(other)).source,null);
+  assert.equal((await server.runtime.calendars.source(other)).source,null);
+  assert.equal((await call('tools','PUT',token,{tools:[]})).status,200);
+  const revoked = await (await call('bindings','GET',token)).json();
+  assert.deepEqual(revoked.gmail,{source:mail,connections:[]});
+  assert.equal((await call('gmail-source','DELETE',token)).status,200);
+  assert.equal((await server.runtime.gmail.source(fixture.workspace)).source,null);
+  assert.deepEqual((await server.runtime.calendars.source(fixture.workspace)).source,calendar);
 });
 
 test('C05 MCP discovery alone grants no tools, allowlist gates calls and cancel closes them', async () => {

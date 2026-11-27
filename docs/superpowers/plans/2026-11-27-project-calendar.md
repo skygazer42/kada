@@ -15,3 +15,7 @@ Rakazo 为获得授权的账号读取即将发生的日程。Google Calendar MCP
 执行任务按创建时的项目配置获得日历写入工具。创建、更新和取消分别对应当前连接已开启逐次审批的工具。模型提供日程参数，宿主固定账号、日历及原事件 ID，保存含邀请选项的原审批。重启后继续处理同一审批。派发时复核当前绑定、工具许可、任务修订和时限。创建操作携带由原工具调用生成的 Google Calendar 事件 ID。 [Suparagent 应用审批](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/composio_actions.py#L136) · [Rakazo 审批参数与路由](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/approvals/approval-effect.ts#L119) · [Calendar MCP 创建](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/tools/registry.ts#L358) · [更新](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/tools/registry.ts#L586) · [取消](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/tools/registry.ts#L705)
 
 合成 MCP 回归核对普通聊天确认计划后启动创建、三种写入的准确参数、审批前的零派发、重启后的重复决定以及换绑后的停止。实际 Google 账号还需验收写入和邀请投递。 [回归](../../../test/project-calendar.test.ts)
+
+## 浏览器项目绑定
+
+项目 MCP 设置页显示当前 Gmail 与 Google 日历绑定。候选连接按项目已启用的只读工具及其修订计算。页面持原项目授权，保存与解除复用终端的来源配置，储存失败时保留表单输入。真实 Chromium 在合成连接上验证两种绑定、无效时区恢复、刷新后读回配置及单独解除 Gmail。 [Rakazo 的已连接应用列表](https://github.com/elie222/rakazo/blob/e64d73292179/apps/mobile/components/integrations/connected-apps.tsx#L58) · [项目范围 API 回归](../../../test/mcp-tools.test.ts)

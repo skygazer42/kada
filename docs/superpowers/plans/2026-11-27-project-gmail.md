@@ -33,3 +33,5 @@ Pi 事务同时登记选中的邮件 ID 及原发生项。恢复时沿同一发�
 终端按原邮件 ID 列出附件，并使用附件 ID 与索引下载。执行任务在项目授予只读附件权限后可保存并提交同一文件。触发邮件任务的范围仍以该次匹配的原邮件为准。Google Workspace MCP 提供附件名、索引和完整标准 Base64。Kada 核对响应中的邮件 ID、长度和字节，将文件原子保存到项目路径，并给出 SHA-256。单文件上限为 25 MiB。 [原附件清单](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2058) · [原附件下载](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2324)
 
 合成二进制附件回归覆盖终端保存、原字节和哈希、重复调用、工作区路径、已有文件冲突、撤权以及助手原任务的交付。真实邮箱的附件 ID 刷新及大文件等待真实账号验收。 [回归](../../../test/project-gmail.test.ts)
+
+Gmail 的当前邮箱和助手访问选项也可从项目 MCP 设置页修改。该入口与日历共用原项目授权和连接候选读取。 [浏览器与范围验收](2026-11-27-project-calendar.md#浏览器项目绑定)

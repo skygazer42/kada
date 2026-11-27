@@ -280,6 +280,8 @@ npm run harness -- remote unshare-approval 任务ID 动作ID 账户ID 设备ID �
 
 项目也可接入 Google Calendar MCP。用 `mcp add`、`mcp test` 和 `mcp enable` 配好可直接读取的 `list-events` 工具，再给项目指定一个账号别名、一个日历和显示时区。配置文件里的 `revision` 采用 `mcp test` 返回的当前值。
 
+通过 `npm run harness -- mcp browser --workspace E:/project` 打开项目设置。在 **应用连接** 中可以选择已经授权的 MCP 连接，保存或解除 Gmail、Google 日历绑定，并设置是否允许本机助手访问。
+
 ```json
 {
   "id": "calendar",

@@ -599,7 +599,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])], computer: config.computer ? computer : options?.computer });
     workboard = createWorkboardAccess(runtime.workItems, runtime.calendars, `http://127.0.0.1:${config.port}`, body);
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
-    projectMcp = createProjectMcpAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
+    projectMcp = createProjectMcpAccess(runtime.mcp, { gmail:runtime.gmail, calendar:runtime.calendars },
+      `http://127.0.0.1:${config.port}`, body);
     snapshotsBrowser = createWorkspaceSnapshotAccess(runtime, `http://127.0.0.1:${config.port}`, body);
     mcpConnections = createMcpConnectionsAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
     projectAssistants = createProjectAssistantsAccess(runtime.assistants, models, `http://127.0.0.1:${config.port}`, body);

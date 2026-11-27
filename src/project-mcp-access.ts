@@ -3,10 +3,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { projectRoot, type McpTools } from './mcp-tools.js';
 import { createLocalBrowserSessions } from './local-browser-sessions.js';
 import { projectMcpPage } from './project-mcp-page.js';
+import type { ProjectCalendars } from './project-calendars.js';
+import type { ProjectGmail } from './project-gmail.js';
 
 const prefix = '/project-mcp';
 
-export function createProjectMcpAccess(mcp: McpTools, origin: string, readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>) {
+export function createProjectMcpAccess(mcp: McpTools, apps: { gmail: ProjectGmail; calendar: ProjectCalendars },
+  origin: string, readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>) {
   const host = new URL(origin).host, sessions = createLocalBrowserSessions();
   async function link(workspace: string) {
     return { url: origin + prefix + '?open#' + sessions.ticket(await projectRoot(workspace)) };
@@ -43,6 +46,23 @@ export function createProjectMcpAccess(mcp: McpTools, origin: string, readBody: 
       const input = await readBody(req);
       if (Object.keys(input).some(key => key !== 'tools')) return send(400, { error: 'Provide the project tool selection.' });
       return send(200, { tools: await mcp.setProjectTools(project, input.tools) });
+    }
+    const source = path === prefix + '/gmail-source' ? apps.gmail : path === prefix + '/calendar-source' ? apps.calendar : undefined;
+    if (source || path === prefix + '/bindings') {
+      if (await projectRoot(project) !== project) return send(409, { error: 'The original project changed. Reopen the project settings.' });
+      if (source && req.method === 'PUT') return send(200, await source.setSource(project, await readBody(req)));
+      if (source && req.method === 'DELETE') return send(200, await source.clearSource(project));
+      if (!source && req.method === 'GET') {
+        const [gmail, calendar, pins] = await Promise.all([apps.gmail.source(project), apps.calendar.source(project), mcp.pins(project)]);
+        const candidates = (names: string[]) => pins.filter(pin => names.every(name => pin.tools.includes(name) &&
+          !pin.approvalTools?.includes(name) && pin.discovery?.some(tool => tool.name === name && tool.readOnly)))
+          .map(({ id, revision }) => ({ id, revision }));
+        return send(200, {
+          gmail: { source:gmail.source, connections:candidates(['search_gmail_messages','get_gmail_message_content']) },
+          calendar: { source:calendar.source, connections:candidates(['list-events']) },
+        });
+      }
+      return send(405, { error: 'Method not allowed.' });
     }
     return send(404, { error: 'Project tools action not found.' });
   }
