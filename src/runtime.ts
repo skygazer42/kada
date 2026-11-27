@@ -30,6 +30,7 @@ import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ModelProposalError, ProviderSettings, type ModelProposalDecision } from "./provider-settings.js";
 import { McpProposalError, McpTools, type McpConnectionProposalInput, type McpPin, type McpProposalDecision, type ProjectMcpTool } from "./mcp-tools.js";
 import { ProjectGmail, projectGmailExtension, type RoutineGmailMatch } from './project-gmail.js';
+import { calendarMutations, ProjectCalendars, projectCalendarExtension, projectCalendarWrites, type CalendarMutation } from './project-calendars.js';
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
@@ -106,6 +107,8 @@ export interface TaskMeta {
   historyRecall?: true;
   projectTaskCatalog?: true;
   chatGmail?: string;
+  chatCalendar?: string;
+  calendarWrite?: { fingerprint: string; tools: CalendarMutation[] };
   projectCatalog?: true;
   threadTools?: true;
   thread?: TaskThread;
@@ -146,7 +149,8 @@ export interface TaskMeta {
   maxReworks?: number;
   maxStalls?: number;
 }
-function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, chatGmail: _chatGmail, routineGmail: _routineGmail, ...meta }: TaskMeta) { return meta; }
+function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, chatGmail: _chatGmail,
+  routineGmail: _routineGmail, chatCalendar: _chatCalendar, calendarWrite: _calendarWrite, ...meta }: TaskMeta) { return meta; }
 
 function roomSummary(meta: TaskMeta & { room: AssistantPin[] }) {
   return { id: meta.id, title: meta.objective, workspace: meta.workspace, control: meta.control, createdAt: meta.createdAt, revision: meta.roomRevision ?? 1,
@@ -212,6 +216,7 @@ export class LocalRuntime {
   readonly providers: ProviderSettings;
   readonly mcp: McpTools;
   readonly gmail: ProjectGmail;
+  readonly calendars: ProjectCalendars;
   readonly routines: LocalRoutines;
   readonly workItems: WorkItems<TaskMeta>;
   readonly credentials: ApplicationCredentials;
@@ -233,6 +238,7 @@ export class LocalRuntime {
     this.providers = new ProviderSettings(config.dataDir, options.models);
     this.mcp = new McpTools(config.dataDir);
     this.gmail = new ProjectGmail(config.dataDir, this.mcp);
+    this.calendars = new ProjectCalendars(config.dataDir, this.mcp);
     this.credentials = new ApplicationCredentials(config.dataDir, options.credentialNetwork);
     this.assistants = new Assistants(config.dataDir, options.models);
     this.snapshots = new WorkspaceSnapshots(config.dataDir);
@@ -626,6 +632,7 @@ export class LocalRuntime {
       const workItemProject = options.chat && localChat ? await memoryProject(files.root) : undefined;
       const chatGmail = workItemProject ? await this.gmail.assistantMailbox(workItemProject) : undefined;
       const credentialProject = localChat ? workItemProject ?? await memoryProject(files.root) : undefined;
+      const calendar = credentialProject ? await this.calendars.assistantCalendar(credentialProject) : undefined;
       if (options.chat && localChat && !workItemProject) throw new Error('The chat work item project is unavailable.');
       const selection=options.remote ? [] : options.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
@@ -635,6 +642,13 @@ export class LocalRuntime {
         mcpPins = mcpPins.map(pin => pin.id === connectionId
           ? { ...pin, tools: pin.tools.filter(name => !/(^|_)gmail(_|$)/.test(name)) }
           : pin).filter(pin => pin.tools.length);
+      }
+      const calendarMcp = calendar && mcpPins.find(pin => pin.id === calendar.id);
+      const calendarTools = calendarMcp ? calendarMutations.filter(tool => calendarMcp.tools.includes(tool) && calendarMcp.approvalTools?.includes(tool)) : [];
+      if (calendar && calendarTools.length) {
+        const dedicated = new Set<string>(calendarTools);
+        mcpPins = mcpPins.map(pin => pin.id === calendar.id
+          ? { ...pin, tools:pin.tools.filter(name => !dedicated.has(name)) } : pin).filter(pin => pin.tools.length);
       }
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
         ...(thread ? { thread: { ...thread, revision: 1 } } : {}),
@@ -665,6 +679,8 @@ export class LocalRuntime {
         ...(options.chat && localChat ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(chatGmail ? { chatGmail } : {}),
+        ...(options.chat && calendar ? { chatCalendar:calendar.fingerprint } : {}),
+        ...(calendar && calendarTools.length ? { calendarWrite:{fingerprint:calendar.fingerprint,tools:calendarTools} } : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const, chartDelivery: true as const } : {}),
@@ -1214,6 +1230,7 @@ export class LocalRuntime {
         ...(questions ? [questions] : []),
         ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
         ...(!remote && meta.chatGmail ? [projectGmailExtension(this.gmail, meta.workspace, meta.chatGmail)] : []),
+        ...(!remote && meta.chatCalendar ? [projectCalendarExtension(this.calendars, meta.workspace, meta.chatCalendar)] : []),
         ...(!remote && meta.chatAssistants ? [chatAssistantsExtension(this.assistants, meta.workspace, meta.chatAssistants.project, meta.id, async () => {
           const current = this.active.get(meta.id); if (!current) throw new Error('The assistant catalog task is not open.');
           const tools = new Map([...current.executionExtensions, ...current.preparationExtensions, ...current.chatExtensions].flatMap(extension => extension.tools ?? [])
@@ -1253,12 +1270,17 @@ export class LocalRuntime {
       } }) : undefined;
       const extra = (remote ? [] : this.options.extensions ?? []).filter(e => !(meta.schemaVersion === 3 && this.options.computer && e.name === "local_computer"));
       if (rolePolicy) extra.push(rolePolicy);
-      const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp).extension : undefined;
+      const approvals = !remote && meta.schemaVersion === 3 ? approvalExtension(this.mcp,this.calendars).extension : undefined;
+      const calendarWrites = !remote && meta.calendarWrite
+        ? projectCalendarWrites(this.calendars,{workspace:meta.workspace,fingerprint:meta.calendarWrite.fingerprint},meta.id,meta.calendarWrite.tools) : undefined;
+      if (calendarWrites && meta.calendarWrite) {
+        extra.push(calendarWrites,projectCalendarExtension(this.calendars,meta.workspace,meta.calendarWrite.fingerprint));
+      }
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.routineGmail) extra.push(projectGmailExtension(this.gmail, meta.workspace, meta.routineGmail.fingerprint, meta.routineGmail.messageIds));
       if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id, meta.structuredQuestions === true));
-      const coordinatorOnly = [goal, verification, ...posts, ...(snapshots ? [snapshots] : []), ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
+      const coordinatorOnly = [goal, verification, ...posts, ...(snapshots ? [snapshots] : []), ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(calendarWrites ? [calendarWrites] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
       const extensions = [remote ? remoteFileTools(workspace) : meta.schemaVersion === 3 ? localExecution() : workspaceExtension(workspace), delegationExtension(meta.workspace, meta.maxSubagents, meta.subagentModel, coordinatorOnly,
         meta.schemaVersion === 3 && meta.maxSubagents > 0 ? async tx => {

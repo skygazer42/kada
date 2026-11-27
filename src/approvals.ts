@@ -4,12 +4,14 @@ import { boundOutput } from '@earendil-works/chord/output';
 import { defineDoc, defineExtension, defineTask, LiveDoc, type ConversationId, type Harness, type JsonObject, type TaskId, type ToolExecutionApi, type ToolExecutionResult, type Tx } from '@earendil-works/pi-durable';
 import { changeGoal, GoalDoc, plain } from './goal.js';
 import type { McpPin, McpTools } from './mcp-tools.js';
+import type { CalendarApprovalScope, ProjectCalendars } from './project-calendars.js';
 
 type Approval = {
   id: string; revision: number; epoch: number; pin: Pick<McpPin, 'id' | 'revision' | 'tools'>; tool: string; arguments: JsonObject; digest: string;
   createdAt: number; expiresAt: number; status: 'pending' | 'allowed' | 'denied' | 'dispatching' | 'completed' | 'uncertain' | 'expired' | 'stale';
   decision?: 'allow' | 'deny'; executor?: TaskId<null>; result?: string;
   images?: { type: 'image'; data: string; mimeType: string }[];
+  calendar?: CalendarApprovalScope;
 };
 export const ApprovalDoc = defineDoc<{ requests: Record<string, Approval> }>({
   scope: 'session', kind: 'local.action_approvals', version: 1, initial: () => ({ requests: {} }), checkpointWhen: () => true,
@@ -112,7 +114,8 @@ export async function decideApproval(harness: Harness, mcp: McpTools, id: string
   }, context);
 }
 
-export async function requestApproval(pin: McpPin, tool: string, args: Record<string, unknown>, api: ToolExecutionApi, ctx: typeof context): Promise<ToolExecutionResult> {
+export async function requestApproval(pin: McpPin, tool: string, args: Record<string, unknown>, api: ToolExecutionApi, ctx: typeof context,
+  calendar?: CalendarApprovalScope): Promise<ToolExecutionResult> {
   const receipt = await api.commit(async tx => {
     const goal = await tx.doc(GoalDoc);
     if ((await tx.conversation(api.conversationId))?.owner) throw new Error('Only the main task can request host action approvals.');
@@ -130,9 +133,10 @@ export async function requestApproval(pin: McpPin, tool: string, args: Record<st
     const arguments_ = JSON.parse(JSON.stringify(args)) as JsonObject;
     if (Buffer.byteLength(JSON.stringify(arguments_)) > 32_000) throw new Error('The approval parameters exceed 32 KiB.');
     const createdAt = api.now();
-    const digest = createHash('sha256').update(JSON.stringify([pin.id, pin.revision, tool, arguments_, goal.revision, goal.epoch])).digest('hex');
+    const digest = createHash('sha256').update(JSON.stringify([pin.id, pin.revision, tool, arguments_, goal.revision, goal.epoch,
+      ...(calendar ? [calendar] : [])])).digest('hex');
     requests[id] = { id, revision: goal.revision, epoch: goal.epoch, pin: { id: pin.id, revision: pin.revision, tools: [...pin.tools] }, tool, arguments: arguments_, digest,
-      createdAt, expiresAt: createdAt + 10 * 60_000, status: 'pending' };
+      createdAt, expiresAt: createdAt + 10 * 60_000, status: 'pending', ...(calendar ? { calendar } : {}) };
     await changeGoal(tx, (state, record) => {
       state.phase = 'waiting_user'; state.reason = 'A tool action needs approval.';
       state.question = `Review MCP action ${pin.id}/${tool} with /approvals, then /allow ${id} or /deny ${id}.`;
@@ -143,7 +147,7 @@ export async function requestApproval(pin: McpPin, tool: string, args: Record<st
   return { output: [{ type: 'text', text: JSON.stringify({ approval: receipt, message: 'Action saved for user approval. It has not executed.' }) }], control: { terminate: true } };
 }
 
-export function approvalExtension(mcp: McpTools) {
+export function approvalExtension(mcp: McpTools, calendars?: Pick<ProjectCalendars,'mutationTarget'>) {
   const execute = defineTask<{ id: string; deadline: number }, { phase: 'execute' }, null>({
     name: 'local.approval.execute', version: 1, initial: () => ({ phase: 'execute' }),
     phases: { execute: async (task, runtime, ctx) => {
@@ -173,7 +177,8 @@ export function approvalExtension(mcp: McpTools) {
       let dispatched = false;
       const expiresAt = Math.min(action.expiresAt, task.input.deadline);
       try {
-        const response = await mcp.executeApproved(action.pin, action.tool, action.arguments, runtime.signal, async () => {
+        const { calendar, tool } = action;
+        const response = await mcp.executeApproved(action.pin, tool, action.arguments, runtime.signal, async () => {
           await runtime.commit(async tx => {
             const request = (await tx.doc(ApprovalDoc)).requests[task.input.id];
             const goal = await tx.doc(GoalDoc);
@@ -183,6 +188,10 @@ export function approvalExtension(mcp: McpTools) {
             }
             request.status = 'dispatching';
           }, ctx);
+          if (calendar) {
+            if (!calendars) throw new Error('Calendar approvals are unavailable.');
+            await calendars.mutationTarget(calendar, tool);
+          }
           if (runtime.now() >= expiresAt) throw new Error('The approval expired before dispatch.');
           runtime.signal.throwIfAborted();
           dispatched = true;
