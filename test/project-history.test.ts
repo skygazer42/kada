@@ -46,6 +46,10 @@ test('project history finds original user and assistant text, excludes other pro
   await assert.rejects(f.runtime.readHistory(caller.id, foreign.id, user.entryId), /History message not found/);
   await assert.rejects(f.runtime.readHistory(caller.id, remote.id, user.entryId), /History message not found/);
   await assert.rejects(f.runtime.readHistory(caller.id, source.id, 1), /History message not found/);
+  const unrelated = join(f.settings.dataDir, 'tasks', 'c56cc3b2-d780-468f-8e5d-d1fb31ae0384');
+  await mkdir(unrelated);
+  await writeFile(join(unrelated, 'task.json'), '{');
+  assert.equal((await f.runtime.readHistory(caller.id, user.taskId, user.entryId)).text, '之前决定：HISTORY_42 项目预算 120 元。');
 });
 
 test('a new local assistant uses history search and read without a Goal and keeps source identity after native reset and reopen', async t => {

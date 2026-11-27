@@ -1061,8 +1061,13 @@ export class LocalRuntime {
   async readHistory(callerId: string, taskId: string, entryId: number) {
     return this.changes.run(async () => {
       const { project, owner } = await this.historyProject(callerId);
-      const meta = (await this.metadataList()).find(meta => meta.id === taskId && meta.id !== callerId && !meta.remotePolicy && memoryOwner(meta) === owner);
-      if (meta && Number.isSafeInteger(entryId) && entryId > 0 && await memoryProject(meta.workspace) === project) {
+      if (taskId === callerId || !/^[a-f0-9-]{36}$/.test(taskId) || !Number.isSafeInteger(entryId) || entryId < 1) {
+        throw new Error('History message not found.');
+      }
+      const meta = await this.metadata(taskId).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      });
+      if (meta?.id === taskId && !isRoom(meta) && !meta.remotePolicy && memoryOwner(meta) === owner && await memoryProject(meta.workspace) === project) {
         for await (const message of this.historyMessages(meta)) if (message.entryId === entryId) return { ...message, text: message.text.slice(0, 8000), truncated: message.text.length > 8000 };
       }
       throw new Error('History message not found.');
