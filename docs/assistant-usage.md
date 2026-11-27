@@ -319,10 +319,14 @@ npm run harness -- gmail source mailbox.json --workspace E:/project
 npm run harness -- gmail search "in:inbox" --workspace E:/project
 npm run harness -- gmail read MESSAGE_ID --workspace E:/project
 npm run harness -- gmail read MESSAGE_ID NEXT_OFFSET BODY_SHA256 --workspace E:/project
+npm run harness -- gmail attachments MESSAGE_ID --workspace E:/project
+npm run harness -- gmail download MESSAGE_ID ATTACHMENT_ID mail/receipt.pdf 0 --workspace E:/project
 npm run harness -- gmail clear --workspace E:/project
 ```
 
 搜索结果提供邮件 ID 和后续页的令牌。把令牌作为 `gmail search` 的第二个参数继续查询。读取正文时，用返回的 `next_offset` 和 `body_sha256` 接回原邮件版本。 [源码与验收](superpowers/plans/2026-11-27-project-gmail.md)
+
+启用只读的 `get_gmail_attachment_content` 后，可把附件保存到指定的项目文件。请用最新清单里的附件 ID 和索引。保存回执包含路径、字节数和 SHA-256。同位置重复下载会核对已有字节，内容冲突时保留原文件。项目执行任务也可保存原附件并交付该文件。 [附件验收](superpowers/plans/2026-11-27-project-gmail.md#附件读取和交付)
 
 想在本机普通聊天里搜索和阅读这个邮箱时，在同一配置里加上 `"allowAssistant": true`，重新运行 `gmail source`，再打开新聊天。助手读取的搜索结果和邮件正文会发给该聊天使用的模型。用 `false` 或 `gmail clear` 可撤回后续调用。账号、连接修订或项目许可变化也会停止已有聊天的读取。
 

@@ -330,7 +330,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         const access = action!.endsWith('-controls') ? 'controls' : action!.endsWith('-replies') ? 'replies' : 'view';
         return send(200, await devices.setSharedThread(accountId, deviceId, id!, shared, access));
       }
-      const mailbox = /^\/v1\/gmail\/(source|search|message)$/.exec(url.pathname)?.[1];
+      const mailbox = /^\/v1\/gmail\/(source|search|message|attachments|attachment)$/.exec(url.pathname)?.[1];
       if (mailbox) {
         const workspace = url.searchParams.get('workspace');
         if (!workspace) return send(400, { error: 'Provide the project workspace.' });
@@ -340,7 +340,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           if (req.method === 'DELETE') return send(200, await runtime.gmail.clearSource(workspace));
         } else if (req.method === 'POST') {
           const input = await body(req);
-          return send(200, mailbox === 'search' ? await runtime.gmail.search(workspace, input) : await runtime.gmail.message(workspace, input));
+          if (mailbox === 'search') return send(200,await runtime.gmail.search(workspace,input));
+          if (mailbox === 'attachments') return send(200,await runtime.gmail.attachments(workspace,input));
+          if (mailbox === 'attachment') return send(200,await runtime.gmail.download(workspace,input));
+          return send(200,await runtime.gmail.message(workspace,input));
         }
         return send(405, { error: 'Method not allowed' });
       }

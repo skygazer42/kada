@@ -238,7 +238,13 @@ try {
         result = await request('/v1/gmail/message' + query, 'POST', {
           id: rest[0], ...(rest[1] === undefined ? {} : { offset: Number(rest[1]), sha256: rest[2] }),
         });
-      } else throw new Error('Use gmail source [SOURCE.json], search QUERY [PAGE_TOKEN], read ID [OFFSET SHA256] or clear.');
+      } else if (action === 'attachments' && rest[0] && rest.length === 1) {
+        result = await request('/v1/gmail/attachments' + query,'POST',{id:rest[0]});
+      } else if (action === 'download' && rest[0] && rest[1] && rest[2] && rest.length <= 4) {
+        result = await request('/v1/gmail/attachment' + query,'POST',{
+          id:rest[0],attachmentId:rest[1],path:rest[2],...(rest[3] === undefined ? {} : {index:Number(rest[3])}),
+        });
+      } else throw new Error('Use gmail source [SOURCE.json], search QUERY [PAGE_TOKEN], read ID [OFFSET SHA256], attachments ID, download ID ATTACHMENT_ID PATH [INDEX] or clear.');
     }
     else if (command === 'inbox') result = action === 'read' ? await request('/v1/notifications/'+segment(rest[0])+'/read','POST',{}) : await request('/v1/notifications');
     else if (command === 'model') {

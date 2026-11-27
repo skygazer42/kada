@@ -6,6 +6,8 @@ import type { Context } from '@earendil-works/chord';
 import { requestApproval, type ApplicationApprovalScope } from './approvals.js';
 import { normalizeMcpPrecheck, projectRoot, type McpPrecheck, type McpTools } from './mcp-tools.js';
 import { atomicJson, errorText, readJson, SerialQueue } from './util.js';
+import { publishAssistantBytes } from './assistant-files.js';
+import { Workspace } from './workspace.js';
 
 type GmailSource = { id: string; revision: string; email: string; allowAssistant?: boolean };
 type BoundMailbox = { fingerprint: string; signal?: AbortSignal; routine?: true };
@@ -16,6 +18,8 @@ export type GmailMutation = typeof gmailMutations[number];
 
 const searchTool = 'search_gmail_messages';
 const readTool = 'get_gmail_message_content';
+export const gmailAttachmentTool = 'get_gmail_attachment_content';
+const maxAttachmentBytes = 25 * 1024 * 1024;
 const checksum = /^[a-f0-9]{64}$/;
 const control = /[\u0000-\u001f\u007f]/;
 
@@ -66,6 +70,42 @@ function searchPage(text: string, query: string) {
     throw new GmailError(502, 'The Gmail search did not return a complete list of message IDs.');
   }
   return { ids, next };
+}
+
+function attachmentList(text: string, messageId: string) {
+  const marker = '\n--- ATTACHMENTS ---\n';
+  const normalized = text.replaceAll('\r\n','\n');
+  const offset = normalized.lastIndexOf(marker);
+  if (offset < 0) return [];
+  const rows = normalized.slice(offset + marker.length).trimEnd().split('\n');
+  const attachments = [];
+  for (let row = 0; row < rows.length; row += 3) {
+    const index = row / 3;
+    const title = /^(\d+)\. (.+) \(([^,]+), \d+(?:\.\d+)? KB\)(?: \[in attached message\])?$/.exec(rows[row] ?? '');
+    const id = /^   Attachment ID: ([A-Za-z0-9_-]{1,2048}={0,2})$/.exec(rows[row+1] ?? '')?.[1];
+    const hint = "   Use get_gmail_attachment_content(message_id='" + messageId + "', attachment_id='" + id + "', attachment_index=" + index + ') to download';
+    if (!title || Number(title[1]) !== index + 1 || !id || rows[row+2] !== hint) {
+      throw new GmailError(502, 'The Gmail response did not return a supported attachment list.');
+    }
+    attachments.push({ id,index,name:title[2]!,mimeType:title[3]! });
+  }
+  return attachments;
+}
+
+function attachmentBytes(text: string, messageId: string) {
+  const lines = text.split(/\r?\n/);
+  const size = /^Size: \d+(?:\.\d+)? KB \((\d+) bytes\)$/.exec(lines.find(line => line.startsWith('Size: ')) ?? '');
+  if (lines[0] !== 'Attachment downloaded successfully!' || lines[1] !== 'Message ID: ' + messageId || !size) {
+    throw new GmailError(502, 'The Gmail response did not confirm the original attachment.');
+  }
+  const declared = Number(size[1]);
+  if (declared > maxAttachmentBytes) throw new GmailError(502, 'Gmail attachments are limited to 25 MiB.');
+  const match = /\r?\n📦 Base64 content \((\d+) chars, standard base64\):\r?\n([A-Za-z0-9+/]+={0,2})\s*$/.exec(text);
+  if (!match && declared === 0 && !text.includes('📦 Base64 content (')) return Buffer.alloc(0);
+  if (!match || match[2]!.length !== Number(match[1])) throw new GmailError(502, 'Gmail did not return the full attachment bytes.');
+  const bytes = Buffer.from(match[2]!, 'base64');
+  if (bytes.length !== declared || bytes.toString('base64') !== match[2]) throw new GmailError(502, 'The Gmail attachment bytes did not match the response.');
+  return bytes;
 }
 
 export class ProjectGmail {
@@ -182,7 +222,8 @@ export class ProjectGmail {
       }
       throw new GmailError(502, 'The configured Gmail tool reported an error.');
     }
-    if (!text || Buffer.byteLength(text) > 1_000_000) throw new GmailError(502, 'The Gmail response was invalid or too large.');
+    const maxResponseBytes = tool === gmailAttachmentTool ? Math.ceil(maxAttachmentBytes / 3) * 4 + 65_536 : 1_000_000;
+    if (!text || Buffer.byteLength(text) > maxResponseBytes) throw new GmailError(502, 'The Gmail response was invalid or too large.');
     return text;
   }
   async search(workspace: string, input: Record<string, unknown>, bound?: BoundMailbox) {
@@ -220,6 +261,57 @@ export class ProjectGmail {
     if (sha256 && page.body_sha256 !== sha256) throw new GmailError(409, 'This message changed. Restart its read at offset 0.');
     return page;
   }
+  async attachments(workspace: string, input: Record<string,unknown>, bound?: BoundMailbox) {
+    const { id } = input;
+    if (Object.keys(input).some(key => key !== 'id') || typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+      throw new GmailError(400, 'Provide the original Gmail message ID.');
+    }
+    const text = await this.call(workspace,readTool,{message_id:id,format:'full',body_format:'text',full:false,include_headers:false,include_links:false},bound);
+    return { attachments:attachmentList(text,id) };
+  }
+  async download(workspace: string, input: Record<string,unknown>, bound?: BoundMailbox) {
+    const { id, attachmentId, index, path } = input;
+    if (Object.keys(input).some(key => !['id','attachmentId','index','path'].includes(key)) ||
+      typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id) ||
+      typeof attachmentId !== 'string' || !/^[A-Za-z0-9_-]{1,2048}={0,2}$/.test(attachmentId) ||
+      typeof path !== 'string' || !path.trim() || path.length > 4096 || control.test(path) ||
+      (index !== undefined && (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0))) {
+      throw new GmailError(400, 'Provide the message, attachment ID, path and optional attachment index.');
+    }
+    const files = await Workspace.open(workspace,{create:false});
+    const target = await files.path(path);
+    const text = await this.call(workspace,gmailAttachmentTool,{
+      message_id:id,attachment_id:attachmentId,return_base64:true,...(index === undefined ? {} : {attachment_index:index}),
+    },bound);
+    bound?.signal?.throwIfAborted();
+    return publishAssistantBytes(files,target,attachmentBytes(text,id));
+  }
+}
+
+export function projectGmailFiles(gmail: ProjectGmail, workspace: string, fingerprint: string, messageIds?: readonly string[]) {
+  const id = Type.String({pattern:'^[A-Za-z0-9_-]{1,128}$'});
+  const binding = (id: string, signal?: AbortSignal): BoundMailbox => {
+    if (messageIds && !messageIds.includes(id)) throw new GmailError(403, 'This message is not part of this Gmail occurrence.');
+    return { fingerprint,signal,...(messageIds ? {routine:true} : {}) };
+  };
+  const output = (value: unknown) => ({output:[{ type:'text' as const,text:JSON.stringify(value) }]});
+  return defineExtension({name:'local_project_gmail_files',tools:[
+    defineTool({
+      name:'project_gmail_attachments',
+      description:'List names and original IDs of the attachments on one authorized Gmail message.',
+      parameters:Type.Object({id},{additionalProperties:false}),
+      replay:'safe',
+      execute:async ({id},_api,context) => output(await gmail.attachments(workspace,{id},binding(id,context.abortSignal))),
+    }),
+    defineTool({
+      name:'project_gmail_download_attachment',
+      description:'Save one original Gmail attachment to a chosen path in the task workspace. Use the ID and index returned by project_gmail_attachments. Returns a file path and SHA-256.',
+      parameters:Type.Object({id,attachmentId:Type.String({minLength:1,maxLength:2050}),path:Type.String({minLength:1,maxLength:4096}),
+        index:Type.Optional(Type.Integer({minimum:0,maximum:Number.MAX_SAFE_INTEGER}))},{additionalProperties:false}),
+      replay:'safe',
+      execute:async (args,_api,context) => output(await gmail.download(workspace,args,binding(args.id,context.abortSignal))),
+    }),
+  ]});
 }
 
 export function projectGmailExtension(gmail: ProjectGmail, workspace: string, fingerprint: string, messageIds?: readonly string[]) {

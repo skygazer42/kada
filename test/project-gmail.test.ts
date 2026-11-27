@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -12,12 +13,13 @@ import { serve } from '../src/server.js';
 import { hasTool, scriptedFixture, until } from './helpers.js';
 
 const search = 'search_gmail_messages', read = 'get_gmail_message_content';
+const download = 'get_gmail_attachment_content';
 const digest = 'a'.repeat(64);
 const mailServer = [
   "const fs=require('node:fs'); const writes=['draft_gmail_message','send_gmail_message','modify_gmail_message_labels'];",
   "const input=require('node:readline').createInterface({input:process.stdin});",
   "input.on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;",
-  "const tools=['search_gmail_messages','get_gmail_message_content',...writes].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:!writes.includes(name)}}));",
+  "const tools=['search_gmail_messages','get_gmail_message_content','get_gmail_attachment_content',...writes].map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:!writes.includes(name)}}));",
   "let result={initialize:{protocolVersion:r.params?.protocolVersion,serverInfo:{name:'local-mail-fixture',version:'1'},capabilities:{tools:{}}},'tools/list':{tools}}[r.method];",
   "if(r.method==='tools/call'){const {name,arguments:a}=r.params;",
   "const hash='a'.repeat(64), p=a.page_offset||0;",
@@ -25,6 +27,10 @@ const mailServer = [
   "if(name==='search_gmail_messages'){valid&&=a.query==='in:inbox' && a.include_headers===true && a.page_size===10 && (!a.page_token || a.page_token==='page-two');",
   "text=a.page_token?'Found the second page':'Found a message. Next page token: page-two';}",
   "else if(writes.includes(name)){fs.appendFileSync(process.argv[1],JSON.stringify({name,args:a})+'\\n');text='Confirmed '+name;}",
+  "else if(name==='get_gmail_attachment_content'){valid&&=a.message_id==='abc123' && a.attachment_id==='file01' && a.attachment_index===0 && a.return_base64===true;",
+  "text=\"Attachment downloaded successfully!\\nMessage ID: abc123\\nSize: 0.0 KB (4 bytes)\\nDownload URL: http://127.0.0.1:1/not-used\\n\\n📦 Base64 content (8 chars, standard base64):\\nAAEC/w==\";}",
+  "else if(a.page_offset===undefined){valid&&=a.message_id==='abc123';",
+  "text=\"--- BODY ---\\nbody\\n\\n--- ATTACHMENTS ---\\n1. receipt.bin (application/octet-stream, 0.0 KB)\\n   Attachment ID: file01\\n   Use get_gmail_attachment_content(message_id='abc123', attachment_id='file01', attachment_index=0) to download\";}",
   "else {valid&&=a.message_id==='abc123' && a.body_format==='text' && a.full===false && a.include_links===false && a.format==='full' && (p===0 || p===5 && a.expected_sha256===hash);",
   "text=JSON.stringify({message_id:'abc123',body_format:'text',body:p?'world':'hello',page_offset:p,next_offset:p?null:5,total_chars:10,body_sha256:hash,complete:!!p});}",
   "const changed=name==='get_gmail_message_content' && a.expected_sha256 && a.expected_sha256!==hash;",
@@ -46,7 +52,7 @@ test('Gmail search and message pages use one authorized project mailbox and its 
   const mcp = daemon.runtime.mcp;
   await mcp.configure({ id: 'mail', transport: 'stdio', command: process.execPath, args: ['-e', mailServer] });
   const tested = await mcp.test('mail');
-  await mcp.enable('mail', [search, read], tested.revision);
+  await mcp.enable('mail', [search, read, download], tested.revision);
   const suffix = '?workspace=' + encodeURIComponent(f.workspace);
   const sourcePath = '/v1/gmail/source' + suffix;
   const source = { id: 'mail', revision: tested.revision, email: 'team@example.invalid' };
@@ -75,9 +81,51 @@ test('Gmail search and message pages use one authorized project mailbox and its 
   await writeFile(file, JSON.stringify(config));
   const { stdout } = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'gmail', 'search', 'in:inbox', '--workspace', f.workspace, '--config', file]);
   assert.deepEqual(JSON.parse(stdout), found);
-  await daemon.runtime.mcp.setApproval('mail', [read], tested.revision);
+  const listing = await client.request('/v1/gmail/attachments' + suffix,'POST',{id:'abc123'});
+  assert.deepEqual(listing,{attachments:[{id:'file01',index:0,name:'receipt.bin',mimeType:'application/octet-stream'}]});
+  const save = {id:'abc123',attachmentId:'file01',index:0,path:'mail/receipt.bin'};
+  const { stdout: receipt } = await promisify(execFile)(process.execPath,['--import','tsx','src/cli.ts','gmail','download',
+    save.id,save.attachmentId,save.path,'0','--workspace',f.workspace,'--config',file]);
+  const saved = JSON.parse(receipt) as {path:string;bytes:number;sha256:string};
+  assert.equal(saved.bytes,4);
+  const original = Buffer.from([0,1,2,255]);
+  assert.equal(saved.sha256,createHash('sha256').update(original).digest('hex'));
+  assert.deepEqual(await readFile(saved.path),original);
+  assert.deepEqual(await client.request('/v1/gmail/attachment' + suffix,'POST',save),saved);
+  await assert.rejects(client.request('/v1/gmail/attachment' + suffix,'POST',{...save,path:'../escape.bin'}),/outside.*workspace/i);
+  await writeFile(saved.path,'keep this copy');
+  await assert.rejects(client.request('/v1/gmail/attachment' + suffix,'POST',save),/already exists/i);
+  assert.equal(await readFile(saved.path,'utf8'),'keep this copy');
+  await daemon.runtime.mcp.setApproval('mail', [read,download], tested.revision);
   await assert.rejects(client.request(messagePath, 'POST', { id: 'abc123' }), /approval/i);
+  await assert.rejects(client.request('/v1/gmail/attachment' + suffix,'POST',save),/approval/i);
   assert.deepEqual(await client.request(queryPath, 'POST', { query: 'in:inbox' }), found);
+});
+
+test('a local execution task can use the mailbox attachment receipt as its checked binary artifact', async t => {
+  const path = 'mail/receipt.bin';
+  const f = await scriptedFixture(context => {
+    const listing = 'project_gmail_attachments', save = 'project_gmail_download_attachment';
+    if (!hasTool(context,save)) return fauxAssistantMessage(fauxToolCall('task_submit',{summary:'Attachment tool unavailable.',artifacts:[]}),{stopReason:'toolUse'});
+    const calls = context.messages.filter(entry => entry.role === 'toolResult');
+    if (!calls.some(entry => entry.toolName === listing)) return fauxAssistantMessage(fauxToolCall(listing,{id:'abc123'}),{stopReason:'toolUse'});
+    if (!calls.some(entry => entry.toolName === save)) {
+      assert.match(JSON.stringify(calls),/receipt\.bin.*octet-stream/);
+      return fauxAssistantMessage(fauxToolCall(save,{id:'abc123',attachmentId:'file01',index:0,path}),{stopReason:'toolUse'});
+    }
+    assert.equal(calls.find(entry => entry.toolName === save)?.isError,false);
+    return fauxAssistantMessage(fauxToolCall('task_submit',{summary:'Saved the original attachment.',artifacts:[path]}),{stopReason:'toolUse'});
+  });
+  t.after(() => f.close());
+  const runtime = f.runtime, mcp = runtime.mcp;
+  await mcp.configure({id:'mail',transport:'stdio',command:process.execPath,args:['-e',mailServer]});
+  const {revision} = await mcp.test('mail');
+  await mcp.enable('mail',[search,read,download],revision);
+  await runtime.gmail.setSource(f.workspace,{id:'mail',revision,email:'team@example.invalid',allowAssistant:true});
+  const task = await runtime.create('Download the original receipt attachment.',f.workspace);
+  const result = await until(() => runtime.status(task.id), row => row.status==='completed' || row.status==='failed');
+  assert.equal(result.goal?.candidate?.summary,'Saved the original attachment.');
+  assert.deepEqual(await readFile(join(f.workspace,path)),Buffer.from([0,1,2,255]));
 });
 
 test('project Gmail drafts, sends and labels use exact approval parameters and reject a later mailbox change', async t => {
