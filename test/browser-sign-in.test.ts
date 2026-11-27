@@ -8,6 +8,7 @@ import type { ToolExecutionApi } from '@earendil-works/pi-durable';
 import { ChatSession } from '../src/chat.js';
 import { createClient, type TaskStatus } from '../src/client.js';
 import { ComputerBridge } from '../src/computer.js';
+import { LocalRuntime } from '../src/runtime.js';
 import { serve } from '../src/server.js';
 import { hasTool, scriptedFixture, until } from './helpers.js';
 
@@ -18,6 +19,51 @@ const driver = {
 };
 const snapshot = 'computer_0_agent_browser_snapshot';
 const call = (name: string, args = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: 'toolUse' });
+
+test('new browser tasks keep their original synthetic driver through reconnect and restart', async t => {
+  const first = {...driver,env:{AGENT_BROWSER_SESSION:'fixture-a'}};
+  const second = {...driver,env:{AGENT_BROWSER_SESSION:'fixture-b'}};
+  let bridge = new ComputerBridge();
+  await bridge.connect(first);
+  let mode: 'initial' | 'replaced' | 'restored' = 'initial';
+  const available: boolean[] = [];
+  const f = await scriptedFixture(context => {
+    available.push(hasTool(context,'computer_begin'));
+    return mode === 'restored' ? call('task_submit',{summary:'Original driver restored.',artifacts:[]})
+      : call('task_blocked',{reason:'Waiting for the owner.',question:'Continue this browser task?'});
+  });
+  await f.runtime.close();
+  let runtime = new LocalRuntime(f.settings,{models:f.models,computer:bridge});
+  t.after(async () => { await runtime.close(); await bridge.close(); await f.close(); });
+  const task = await runtime.create('Use the original synthetic browser session.',f.workspace);
+  const wait = (requestId: string, status: string) => until(() => runtime.status(task.id),
+    row => row.status===status && row.submission?.requestId===requestId && row.submission?.status==='done');
+  await wait('initial','waiting_user');
+  const original = bridge.browserKey()!;
+  const begin = bridge.forTask(task.id,true,original).tools!.find(tool => tool.name === 'computer_begin')!;
+  await bridge.connect(second);
+  await assert.rejects(begin.execute({},{} as ToolExecutionApi,BACKGROUND_CONTEXT),/original browser driver/i);
+  assert.equal(bridge.status().owner,null);
+
+  async function restart(config: typeof first) {
+    await runtime.close();
+    await bridge.close();
+    bridge = new ComputerBridge();
+    await bridge.connect(config);
+    runtime = new LocalRuntime(f.settings,{models:f.models,computer:bridge});
+    await runtime.recover();
+  }
+  await restart(second);
+  mode='replaced';
+  await runtime.followUp(task.id,'Check the current browser.','other-driver');
+  await wait('user:other-driver','waiting_user');
+  assert.equal(available.at(-1),false);
+  await restart(first);
+  mode='restored';
+  await runtime.followUp(task.id,'Continue with the original browser.','original-driver');
+  await wait('user:original-driver','completed');
+  assert.equal(available.at(-1),true);
+});
 
 test('a browser sign-in request restores the user takeover after restart and resumes the original task once', async t => {
   let completedTurns = 0;

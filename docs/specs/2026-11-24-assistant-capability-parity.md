@@ -223,6 +223,8 @@ owner 的 Assistants 目录保存项目身份、名称、完整指令、模型�
 
 ## 已定位的能力差距
 
+定时规则的任务或通知在离开本机队列时，复核原 Pi 发生项是否仍获受理。规则取消已保存而中止信号仍在传递时，排队中的产生动作会停止。回归用可控时钟和独立信号等待点证明两个队列的行为。 [Rakazo 发生项事务认领](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/runs/assembly/run-routines.ts#L238) · [两类队列回归](../../test/routine-admission.test.ts)
+
 更广的任务规划、结构化提问、安全凭据、命名助手、跨助手协作、撤销及语音等差距见[参考能力核对表](2026-11-25-reference-capability-matrix.md)。下表保留原来已经定位的具体兼容性与实测缺口，不能视为所有剩余能力。
 
 | 能力 | 基线与剩余工作 | 通过条件 | 参考实现 |

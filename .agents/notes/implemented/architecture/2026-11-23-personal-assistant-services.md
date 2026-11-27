@@ -270,6 +270,12 @@ Gmail 回复保存原线程和具体 RFC Message-ID，转发保存原邮件 ID �
 
 新本机执行任务可固定 `deferOptionalTools`。工具登记沿 Pi 的 deferred 属性，聊天和准备显式展示原可用工具。转入执行时从新的工具列表开始，通过 `tool_search` 加载的项目工具在原会话恢复。 [对照与回归](../../../../docs/experiments/2026-11-24-assistant-optimization-directions.md#p1--缩小首轮工具集合和提示)
 
+形成本机新任务时保存当前浏览器驱动指纹。重启或 MCP 重新连接后，任务继续使用原指纹。 [驱动与恢复](../../../../docs/superpowers/plans/2026-11-27-browser-sign-in-handoff.md)
+
+关闭的已答复及完成任务按原元数据和本机 SQLite 文件版本复用有界摘要。打开任务时清除对应条目。 [目录测试](../../../../docs/superpowers/plans/2026-11-25-project-task-catalog.md#200-条历史任务验证)
+
+排队的定时任务和通知写入以 Pi 事务中的原受理记录为准。任务受理进入宿主队列及保存元数据前后重新核对，通知在进入写入队列和提交前复核。 [取消竞态回归](../../../../test/routine-admission.test.ts)
+
 看板的项目列、顺序和回执与工作项同次原子保存，以便跨列移动在同次写入更新状态和完成时间。首次写入看板元数据后，原数组升级为包含 `items` 和 `boards` 的对象。看板版本绑定列和可见卡片修订，浏览器每个卡片表单固定请求 ID。owner 发放的一次性链接兑换为该项目的看板会话，服务重启后重新领取。[源码对照与验证](../../../../docs/superpowers/plans/2026-11-26-project-workboard.md)
 
 与现有[任务进度记录](../feature/2026-11-23-task-progress.md)部分重叠：该记录负责步骤与活动工具显示，本记录负责新功能的持久身份、认证与原入口契约。审计现有笔记后无过时提案需要替换。

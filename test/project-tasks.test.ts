@@ -138,11 +138,16 @@ test('catalog excludes foreign broken sessions before status reads and reports a
   runtime = new LocalRuntime(f.settings, { models: f.models });
   const caller = await runtime.create('Query', f.workspace, [], { chat: true });
   await until(() => runtime.status(caller.id), row => row.status === 'answered');
-  assert.equal((await runtime.projectTasks(caller.id)).tasks[0].id, source.id);
+  let reads = 0;
+  const readHandoff = runtime['readTaskHandoff'].bind(runtime);
+  runtime['readTaskHandoff'] = (...args) => { reads++; return readHandoff(...args); };
+  const first = await runtime.projectTasks(caller.id);
+  assert.equal(first.tasks[0].id, source.id);
+  assert.deepEqual(await runtime.projectTasks(caller.id),first);
+  assert.equal(reads,1,'a settled closed task should reuse its unchanged Pi summary');
   assert(!runtime['active'].has(foreign.id));
-  await runtime.close();
+  assert(!runtime['active'].has(source.id));
   await writeFile(join(f.directory, 'tasks', source.id, 'session.sqlite'), 'not a SQLite database');
-  runtime = new LocalRuntime(f.settings, { models: f.models });
   await assert.rejects(runtime.projectTasks(caller.id), /database|SQLite/i);
 });
 

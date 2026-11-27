@@ -88,7 +88,9 @@ export class ComputerBridge {
     // Old tasks retain their per-call serialized interface. New tasks use forTask().
     return this.extension();
   }
-  forTask(owner: string, allowSignIn = false): Extension { return this.extension(owner, allowSignIn); }
+  forTask(owner: string, allowSignIn = false, browserDriver?: string): Extension {
+    return this.extension(owner, allowSignIn, browserDriver);
+  }
   release(owner: string): void { if (this.lease?.owner === owner) this.lease = undefined; }
 
   browserKey() {
@@ -140,13 +142,20 @@ export class ComputerBridge {
     });
   }
 
-  private agentCall<T>(call: () => Promise<T>): Promise<T> {
+  private agentCall<T>(call: () => Promise<T>, browserDriver?: string): Promise<T> {
     if (this.mode === "user") return Promise.reject(new Error("The user has desktop control."));
     const generation = this.generation;
     return this.queue.run(async () => {
       this.requireAgentControl(generation);
+      this.requireBrowserDriver(browserDriver);
       return call();
     });
+  }
+
+  private requireBrowserDriver(browserDriver?: string) {
+    if (browserDriver && this.browserKey() !== browserDriver) {
+      throw new Error('Reconnect the original browser driver before using this task.');
+    }
   }
 
   private requireAgentControl(generation: number) {
@@ -157,7 +166,7 @@ export class ComputerBridge {
   private observer(tool: Tool): boolean {
     return this.config?.observationTools ? this.config.observationTools.includes(tool.name) : tool.annotations?.readOnlyHint === true;
   }
-  private extension(owner?: string, allowSignIn = false): Extension {
+  private extension(owner?: string, allowSignIn = false, browserDriver?: string): Extension {
     const client = this.client;
     if (!client) throw new Error("Computer driver is not connected");
     const isObservation = this.tools.map((tool) => this.observer(tool));
@@ -229,7 +238,7 @@ export class ComputerBridge {
           if (block.type === "image") return [{ type: "image", data: block.data, mimeType: block.mimeType }];
           return [{ type: "text", text: JSON.stringify(block) }];
         }) };
-      }),
+      }, browserDriver),
     }));
     const lease = owner ? [
       defineTool({ name: "computer_begin", description: "Acquire the local desktop for one dependent workflow. If busy, continue independent work before retrying. Every new/expired lease requires observing current app state. Read computer_guide when available before using a new driver.", parameters: Type.Object({}), replay: "safe", executionMode: "sequential",
@@ -243,7 +252,7 @@ export class ComputerBridge {
           }
           this.lease.expiresAt = Date.now() + (this.config?.leaseMs ?? 120_000);
           return { output: [{ type: "text", text: "Desktop acquired. Observe current app state; earlier captures and coordinates may be stale. Release with computer_end after this workflow." }] };
-        }),
+        }, browserDriver),
       }),
       defineTool({ name: "computer_end", description: "Release this task's desktop workflow lease so another task can use it.", parameters: Type.Object({}), replay: "safe", executionMode: "sequential",
         execute: async () => { this.release(owner); return { output: [{ type: "text", text: "Desktop released" }] }; },
@@ -263,12 +272,13 @@ export class ComputerBridge {
           if (!browserDriver || status.owner !== owner || !status.observed) throw new Error('Acquire the browser and observe the current page before asking for sign-in.');
           const text = step === 'login' ? 'Sign in in the current browser.' : 'Complete the verification in the current browser.';
           return saveQuestion(api, { text, options: [], browserSignIn: step, browserDriver }, false, false, context);
-        });
+        }, browserDriver);
       },
     })] : [];
     const guides = this.resources.length ? [defineTool({ name: "computer_guide", description: "List the connected driver's bundled instructions, or read one advertised resource URI. Read its main skill and platform instructions before operating apps. This reads documentation; it does not grant permissions.",
       parameters: Type.Object({ uri: Type.Optional(Type.String()) }), replay: "safe",
       execute: async (args, _api, context) => {
+        this.requireBrowserDriver(browserDriver);
         if (!args.uri) return { output: [{ type: "text", text: JSON.stringify(this.resources) }] };
         if (!this.resources.some(r => r.uri === args.uri)) throw new Error("Resource URI was not advertised by this driver");
         const result = await client.readResource({ uri: args.uri }, { signal: context.abortSignal, timeout: 30_000 });

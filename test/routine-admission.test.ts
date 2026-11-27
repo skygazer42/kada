@@ -248,10 +248,12 @@ test("only changed artifacts notify across separate routine workspaces", async (
 
 test("cancelling a claimed routine discards its queued task admission", { timeout: 30_000 }, async () => {
   let modelCalls = 0;
+  const due = Date.UTC(2026, 10, 23, 12);
+  const clock = fakeRoutineClock(due - 60_000);
   const fixture = await scriptedFixture(() => {
     modelCalls += 1;
     return fauxAssistantMessage("This task should never reach the model.");
-  });
+  }, {}, undefined, { routineClock: clock });
   const { runtime } = fixture;
   const create = runtime.create.bind(runtime);
   const queue = (runtime as unknown as { changes: { run<T>(change: () => Promise<T>): Promise<T> } }).changes;
@@ -259,6 +261,8 @@ test("cancelling a claimed routine discards its queued task admission", { timeou
   const blocked = new Promise<void>((resolve) => { unblock = resolve; });
   const ahead = queue.run(() => blocked);
   let admission: ReturnType<typeof runtime.create> | undefined;
+  let cancelling: ReturnType<typeof runtime.routines.cancel> | undefined;
+  const abort = Promise.withResolvers<void>(), abortReached = Promise.withResolvers<void>();
   runtime.create = (...args) => {
     admission = create(...args);
     void admission.catch(() => {});
@@ -269,26 +273,80 @@ test("cancelling a claimed routine discards its queued task admission", { timeou
     const rule = await runtime.routines.create({
       action: "task",
       objective: "An occurrence cancelled while waiting for admission",
-      schedule: { kind: "once", at: new Date(Date.now() + 200).toISOString() },
+      schedule: { kind: "once", at: new Date(due).toISOString() },
       budget,
     });
+    const { harness } = (await runtime.routines['session'])!;
+    const abortTask = harness.abortTask.bind(harness);
+    harness.abortTask = async (...args) => {
+      abortReached.resolve();
+      await abort.promise;
+      return abortTask(...args);
+    };
+    await until(async () => clock.waitingAt(due), Boolean);
+    clock.advanceTo(due);
     const queued = await until(async () => ({ admission }), (value) => Boolean(value.admission));
-    const cancelling = runtime.routines.cancel(rule.id);
+    cancelling = runtime.routines.cancel(rule.id);
     void cancelling.catch(() => {});
+    await abortReached.promise;
     await until(() => runtime.routines.list(), (rules) =>
       rules.some((item) => item.id === rule.id && item.status === "cancelled"));
     unblock();
     await ahead;
+    await assert.rejects(queued.admission!, /no longer admits this occurrence/i);
+    abort.resolve();
     await cancelling;
 
-    await assert.rejects(queued.admission!);
     assert.equal((await runtime.routines.list())[0]?.status, "cancelled");
     assert.deepEqual(await runtime.list(), []);
     assert.equal(modelCalls, 0);
   } finally {
     unblock();
+    abort.resolve();
+    await cancelling?.catch(() => {});
     await ahead;
     runtime.create = create;
     await fixture.close();
   }
+});
+
+test("cancelling an accepted reminder discards a notification queued for writing", async t => {
+  const due = Date.UTC(2026,10,23,12), clock = fakeRoutineClock(due - 60_000);
+  const fixture = await scriptedFixture(() => fauxAssistantMessage("Unused."),{},undefined,{routineClock:clock});
+  const { runtime } = fixture, inbox = runtime['inbox'];
+  const unblock = Promise.withResolvers<void>(), allowAbort = Promise.withResolvers<void>(), abortReached = Promise.withResolvers<void>();
+  let queued: Promise<void> | undefined;
+  let cancelling: ReturnType<typeof runtime.routines.cancel> | undefined;
+  const ahead = inbox['changes'].run(() => unblock.promise);
+  const publish = inbox.notify.bind(inbox);
+  inbox.notify = (...args) => {
+    queued = publish(...args);
+    void queued.catch(() => {});
+    return queued;
+  };
+  t.after(async () => {
+    unblock.resolve(); allowAbort.resolve();
+    await ahead; await cancelling?.catch(() => {});
+    await fixture.close();
+  });
+  const rule = await runtime.routines.create({action:'notify',objective:'This notification should not be written.',
+    schedule:{kind:'once',at:new Date(due).toISOString()}});
+  const {harness} = (await runtime.routines['session'])!;
+  const abort = harness.abortTask.bind(harness);
+  harness.abortTask = async (...args) => {
+    abortReached.resolve();
+    await allowAbort.promise;
+    return abort(...args);
+  };
+  await until(async () => clock.waitingAt(due),Boolean);
+  clock.advanceTo(due);
+  const {work} = await until(async () => ({work:queued}),row => !!row.work);
+  cancelling = runtime.routines.cancel(rule.id);
+  await abortReached.promise;
+  assert.equal((await runtime.routines.list())[0]?.status,'cancelled');
+  unblock.resolve();
+  await assert.rejects(work!,/no longer admits this occurrence/i);
+  allowAbort.resolve();
+  await cancelling;
+  assert.deepEqual(await runtime.notifications(),[]);
 });

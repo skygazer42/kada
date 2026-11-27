@@ -840,6 +840,19 @@ export class LocalRoutines {
     }, context);
   }
 
+  async requireAdmission(occurrence: RoutineOccurrence): Promise<void> {
+    const { harness } = await this.open();
+    await harness.commit(async tx => {
+      const rule = (await tx.doc(routinesDoc)).rules[keyFor(occurrence.routineId)];
+      const claim = occurrence.trigger ? rule?.manual?.claim : rule?.claim;
+      const active = occurrence.trigger ? rule?.status !== 'cancelled' : rule?.status === 'scheduled';
+      if (!rule || rule.revision !== occurrence.revision || !active || claim?.id !== occurrence.id ||
+        (occurrence.trigger && rule.manual?.budgetSettled)) {
+        throw new RoutineError(409, 'The routine no longer admits this occurrence.');
+      }
+    }, context);
+  }
+
   async runNow(id: string, requestId: string): Promise<RoutineOccurrenceRecord> {
     const key = keyFor(inputId(id));
     if (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(requestId)) {

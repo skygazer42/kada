@@ -52,13 +52,15 @@ export class NotificationStore {
       return {ok:true};
     });
   }
-  async notify(occurrence:RoutineOccurrence) {
+  async notify(occurrence:RoutineOccurrence,requireAdmission?:()=>Promise<void>) {
     return this.changes.run(async () => {
+      if (requireAdmission) await requireAdmission();
       const stored = await this.load(), id = hash(['routine',occurrence.id]);
       if (!stored.reminders.some(event => event.id === id)) {
         const count = occurrence.gmail?.messageIds.length;
         const detail = count ? occurrence.objective + ' (' + count + ' new Gmail ' + (count === 1 ? 'match' : 'matches') + ')' : occurrence.objective;
         stored.reminders.push({id,routineId:occurrence.routineId,revision:occurrence.revision,event:'reminder',at:Date.parse(occurrence.scheduledAt),detail,readAt:null});
+        if (requireAdmission) await requireAdmission();
         await atomicJson(this.path,stored);
       }
     });

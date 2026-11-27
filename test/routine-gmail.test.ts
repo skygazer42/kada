@@ -95,7 +95,7 @@ test('scheduled Gmail notifications use a persisted baseline and report each mat
   const release = Promise.withResolvers<void>();
   t.after(() => release.resolve());
   const inbox = f.runtime().inbox, notify = inbox.notify.bind(inbox);
-  inbox.notify = async occurrence => { await notify(occurrence); persisted = true; await release.promise; };
+  inbox.notify = async (...args) => { await notify(...args); persisted = true; await release.promise; };
   const originalSlot = await f.advance(3);
   await until(async () => persisted, Boolean);
   await f.restart();
