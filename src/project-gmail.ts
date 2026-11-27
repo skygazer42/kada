@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
 import { defineExtension, defineTool, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context } from '@earendil-works/chord';
-import { requestApproval, type ApplicationApprovalScope } from './approvals.js';
+import { ApprovalError, requestApproval, type ApplicationApprovalScope, type GmailApprovalScope } from './approvals.js';
 import { normalizeMcpPrecheck, projectRoot, type McpPrecheck, type McpTools } from './mcp-tools.js';
 import { atomicJson, errorText, readJson, SerialQueue } from './util.js';
 import { publishAssistantBytes } from './assistant-files.js';
-import { Workspace } from './workspace.js';
+import { Workspace, type FileSnapshot } from './workspace.js';
 
 type GmailSource = { id: string; revision: string; email: string; allowAssistant?: boolean };
 type BoundMailbox = { fingerprint: string; signal?: AbortSignal; routine?: true };
@@ -139,6 +139,33 @@ export class ProjectGmail {
       throw new GmailError(409, 'Enable this Gmail action for the project with per-action approval.');
     }
     return { source,pin };
+  }
+  async attachmentSnapshots(workspace: string, paths: string[]) {
+    const root = await Workspace.open(workspace,{create:false});
+    const attachments: FileSnapshot[] = [];
+    let remaining = maxAttachmentBytes;
+    for (const path of paths) {
+      if (!path.trim() || control.test(path)) throw new GmailError(400,'Provide valid workspace attachment paths.');
+      const { file } = await root.readBinarySnapshot(path,remaining);
+      if (attachments.some(item => item.path === file.path)) throw new GmailError(400,'Choose each Gmail attachment once.');
+      remaining -= file.bytes;
+      attachments.push(file);
+    }
+    return attachments;
+  }
+  async attachmentPayload(scope: GmailApprovalScope) {
+    try {
+      const root = await Workspace.open(scope.workspace,{create:false});
+      const attachments = [];
+      for (const expected of scope.attachments ?? []) {
+        const { file,data } = await root.readBinarySnapshot(expected.path,expected.bytes);
+        if (file.bytes !== expected.bytes || file.sha256 !== expected.sha256) throw new Error('Attachment snapshot differs.');
+        attachments.push({filename:basename(file.path),content:data.toString('base64')});
+      }
+      return attachments;
+    } catch {
+      throw new ApprovalError(409,'A Gmail attachment changed or became unavailable after the approval was requested.');
+    }
   }
   async watchMailbox(workspace: string, readMessages: boolean) {
     const { project, source } = await this.source(workspace);
@@ -344,26 +371,29 @@ export function projectGmailExtension(gmail: ProjectGmail, workspace: string, fi
 export function projectGmailWrites(gmail: ProjectGmail, scope: ApplicationApprovalScope, tools: GmailMutation[]) {
   const addresses = Type.Optional(Type.Array(Type.String({ pattern:'^[^\\s@,<>]+@[^\\s@,<>]+\\.[^\\s@,<>]+$', maxLength:320 }),
     { minItems:1,maxItems:20,uniqueItems:true }));
-  const stage = async (tool: GmailMutation, input: Record<string,unknown>, api: ToolExecutionApi, context: Context) => {
+  const stage = async (tool: GmailMutation, input: Record<string,unknown>, api: ToolExecutionApi, context: Context, paths?: string[]) => {
     const { source,pin } = await gmail.mutationTarget(scope,tool);
+    const target = paths?.length ? {...scope,attachments:await gmail.attachmentSnapshots(scope.workspace,paths)} : scope;
     return requestApproval(pin,tool,{
       ...input,user_google_email:source.email,
       ...(tool === 'modify_gmail_message_labels' ? {} : {from_email:source.email}),
-    },api,context,{ gmail:scope });
+    },api,context,{ gmail:target });
   };
   const compose = (tool: 'draft_gmail_message' | 'send_gmail_message') => {
     const send = tool === 'send_gmail_message';
     return defineTool({
       name:send ? 'project_gmail_send' : 'project_gmail_draft',
-      description:send ? 'Propose sending a plain-text message from the project mailbox. Specify every recipient. Call this tool alone for approval.'
-        : 'Propose saving a plain-text Gmail draft in the project mailbox. Call this tool alone for approval.',
+      description:(send ? 'Propose sending a plain-text message from the project mailbox. Specify every recipient.'
+        : 'Propose saving a plain-text Gmail draft in the project mailbox.') +
+        ' Use workspace file paths for attachments. Call this tool alone for approval.',
       parameters:Type.Object({
         to:addresses,cc:addresses,bcc:addresses,
         subject:Type.String({ minLength:1,maxLength:500,pattern:'^[^\\r\\n]+$' }),
         body:Type.String({ minLength:1,maxLength:16000 }),
+        attachments:Type.Optional(Type.Array(Type.String({minLength:1,maxLength:4096}),{minItems:1,maxItems:5,uniqueItems:true})),
       },{ additionalProperties:false }),
       replay:'safe', executionMode:'sequential',
-      execute:async ({to,cc,bcc,subject,body},api,context) => {
+      execute:async ({to,cc,bcc,subject,body,attachments},api,context) => {
         if (send && !to?.length) throw new GmailError(400, 'Provide a recipient for the message.');
         const recipients = [...(to ?? []), ...(cc ?? []), ...(bcc ?? [])];
         if (recipients.some(address => control.test(address))) {
@@ -373,7 +403,7 @@ export function projectGmailWrites(gmail: ProjectGmail, scope: ApplicationApprov
         return stage(tool,{
           subject,body,body_format:'plain',
           ...(to ? {to:to.join(', ')} : {}),...(cc ? {cc:cc.join(', ')} : {}),...(bcc ? {bcc:bcc.join(', ')} : {}),
-        },api,context);
+        },api,context,attachments);
       },
     });
   };

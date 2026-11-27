@@ -129,7 +129,8 @@ test('a local execution task can use the mailbox attachment receipt as its check
 });
 
 test('project Gmail drafts, sends and labels use exact approval parameters and reject a later mailbox change', async t => {
-  const message = { to:['recipient@example.invalid'], cc:['copy@example.invalid'],subject:'Invoice summary',body:'Total 42.' };
+  const filename = 'outgoing.txt', content = 'Invoice total 42.';
+  const message = { to:['recipient@example.invalid'], cc:['copy@example.invalid'],subject:'Invoice summary',body:'Total 42.',attachments:[filename] };
   const f = await scriptedFixture(context => {
     const initial = JSON.stringify(context.messages.find(entry => entry.role === 'user')?.content) ?? '';
     const operation = initial.includes('Send') ? 'send' : initial.includes('Label') ? 'labels' : 'draft';
@@ -145,6 +146,8 @@ test('project Gmail drafts, sends and labels use exact approval parameters and r
   t.after(async () => { await runtime.close(); await f.close(); });
   const log = join(f.directory,'mail-actions.jsonl');
   await writeFile(log,'');
+  const path = join(f.workspace,filename);
+  await writeFile(path,content);
   await runtime.mcp.configure({ id:'mail', transport:'stdio',command:process.execPath,args:['-e',mailServer,log] });
   const { revision } = await runtime.mcp.test('mail');
   const writes = ['draft_gmail_message','send_gmail_message','modify_gmail_message_labels'];
@@ -165,11 +168,14 @@ test('project Gmail drafts, sends and labels use exact approval parameters and r
   const draft = await request('Draft the invoice summary.');
   const compose = { user_google_email:source.email,from_email:source.email,to:message.to[0],
     cc:message.cc[0],subject:message.subject,body:message.body,body_format:'plain' };
-  assert.deepEqual(draft.approval.arguments,compose);
+  assert.deepEqual(draft.approval.arguments,{...compose,attachments:[{
+    path,bytes:Buffer.byteLength(content),sha256:createHash('sha256').update(content).digest('hex'),
+  }]});
+  const attachmentPayload = {...compose,attachments:[{filename,content:Buffer.from(content).toString('base64')}]};
   assert.deepEqual(await calls(),[]);
   await decide(draft,'allow');
   await settle(draft.id,'completed');
-  assert.deepEqual(await calls(),[{name:writes[0],args:compose}]);
+  assert.deepEqual(await calls(),[{name:writes[0],args:attachmentPayload}]);
 
   const denied = await request('Send the invoice summary.');
   await decide(denied,'deny');
@@ -182,12 +188,19 @@ test('project Gmail drafts, sends and labels use exact approval parameters and r
   await decide(send,'allow');
   await decide(send,'allow');
   await settle(send.id,'completed');
-  assert.deepEqual((await calls())[1],{name:writes[1],args:compose});
+  assert.deepEqual((await calls())[1],{name:writes[1],args:attachmentPayload});
 
   const label = await request('Label the original message.');
   await decide(label,'allow');
   await settle(label.id,'completed');
   assert.deepEqual((await calls())[2],{name:writes[2],args:{user_google_email:source.email,message_id:'abc123',remove_label_ids:['INBOX']}});
+  const changedFile = await request('Send the original reviewed file.');
+  await writeFile(path,'Invoice total 99.');
+  await decide(changedFile,'allow');
+  const changed = await settle(changedFile.id,'stale');
+  assert.match(changed.approvals[0]?.result ?? '',/attachment changed/);
+  assert.equal((await calls()).length,3);
+  await writeFile(path,content);
   const stale = await request('Send the invoice summary once more.');
   await runtime.gmail.setSource(f.workspace,{...source,email:'other@example.invalid'});
   await decide(stale,'allow');

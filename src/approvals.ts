@@ -4,19 +4,23 @@ import { boundOutput } from '@earendil-works/chord/output';
 import { defineDoc, defineExtension, defineTask, LiveDoc, type ConversationId, type Harness, type JsonObject, type TaskId, type ToolExecutionApi, type ToolExecutionResult, type Tx } from '@earendil-works/pi-durable';
 import { changeGoal, GoalDoc, plain } from './goal.js';
 import type { McpPin, McpTools } from './mcp-tools.js';
+import type { FileSnapshot } from './workspace.js';
 
 export type ApplicationApprovalScope = { workspace: string; fingerprint: string };
-type ApprovalTarget = { calendar: ApplicationApprovalScope; gmail?: never } | { gmail: ApplicationApprovalScope; calendar?: never };
-type ApprovalTargets = Partial<Record<'calendar' | 'gmail', {
-  mutationTarget(scope: ApplicationApprovalScope, tool: string): Promise<unknown>;
-}>>;
+export type GmailApprovalScope = ApplicationApprovalScope & { attachments?: FileSnapshot[] };
+type ApprovalTarget = { calendar: ApplicationApprovalScope; gmail?: never } | { gmail: GmailApprovalScope; calendar?: never };
+type MutationTarget = { mutationTarget(scope: ApplicationApprovalScope, tool: string): Promise<unknown> };
+type ApprovalTargets = {
+  calendar?: MutationTarget;
+  gmail?: MutationTarget & { attachmentPayload(scope: GmailApprovalScope): Promise<{ filename: string; content: string }[]> };
+};
 
 type Approval = {
   id: string; revision: number; epoch: number; pin: Pick<McpPin, 'id' | 'revision' | 'tools'>; tool: string; arguments: JsonObject; digest: string;
   createdAt: number; expiresAt: number; status: 'pending' | 'allowed' | 'denied' | 'dispatching' | 'completed' | 'uncertain' | 'expired' | 'stale';
   decision?: 'allow' | 'deny'; executor?: TaskId<null>; result?: string;
   images?: { type: 'image'; data: string; mimeType: string }[];
-  calendar?: ApplicationApprovalScope; gmail?: ApplicationApprovalScope;
+  calendar?: ApplicationApprovalScope; gmail?: GmailApprovalScope;
 };
 export const ApprovalDoc = defineDoc<{ requests: Record<string, Approval> }>({
   scope: 'session', kind: 'local.action_approvals', version: 1, initial: () => ({ requests: {} }), checkpointWhen: () => true,
@@ -34,7 +38,9 @@ function preview(value: unknown, key = ''): unknown {
 export async function approvalViews(harness: Harness) {
   const state = await harness.snapshot(ApprovalDoc, context);
   return Object.values(state?.requests ?? {}).map(request => ({ id: request.id, connection: request.pin.id,
-    connectionRevision: request.pin.revision, tool: request.tool, arguments: preview(request.arguments), digest: request.digest,
+    connectionRevision: request.pin.revision, tool: request.tool,
+    arguments: preview(request.gmail?.attachments ? { ...request.arguments,attachments:request.gmail.attachments } : request.arguments),
+    digest: request.digest,
     createdAt: request.createdAt, expiresAt: request.expiresAt,
     status: request.status === 'pending' && Date.now() >= request.expiresAt ? 'expired' as const : request.status, decision: request.decision,
     result: request.result }));
@@ -186,7 +192,13 @@ export function approvalExtension(mcp: McpTools, targets?: ApprovalTargets) {
         const { calendar, gmail, tool } = action;
         const scope = calendar ?? gmail;
         const provider = calendar ? targets?.calendar : targets?.gmail;
-        const response = await mcp.executeApproved(action.pin, tool, action.arguments, runtime.signal, async () => {
+        let args: Record<string,unknown> = action.arguments;
+        if (gmail?.attachments?.length) {
+          if (!targets?.gmail) throw new Error('Project Gmail approvals are unavailable.');
+          args = {...args,attachments:await targets.gmail.attachmentPayload(gmail)};
+          runtime.signal.throwIfAborted();
+        }
+        const response = await mcp.executeApproved(action.pin, tool, args, runtime.signal, async () => {
           await runtime.commit(async tx => {
             const request = (await tx.doc(ApprovalDoc)).requests[task.input.id];
             const goal = await tx.doc(GoalDoc);
@@ -211,11 +223,11 @@ export function approvalExtension(mcp: McpTools, targets?: ApprovalTargets) {
         result = JSON.stringify({ isError: response.isError === true, text: bounded.text,
           ...(bounded.droppedBytes ? { omittedBytes: bounded.droppedBytes } : {}) });
         status = 'completed';
-      } catch {
+      } catch (error) {
         if (runtime.signal.aborted) return;
         status = dispatched ? 'uncertain' : runtime.now() >= expiresAt ? 'expired' : 'stale';
         result = dispatched ? 'The tool call did not return a confirmed result. Inspect its effect and connection before retrying.'
-          : 'The action stopped before dispatch. Check the approval deadline, task and MCP connection.';
+          : error instanceof ApprovalError ? error.message : 'The action stopped before dispatch. Check the approval deadline, task and MCP connection.';
       }
       await runtime.commit(async tx => {
         const request = (await tx.doc(ApprovalDoc)).requests[task.input.id];

@@ -332,6 +332,8 @@ npm run harness -- gmail clear --workspace E:/project
 
 项目执行任务可保存草稿、发送纯文本邮件，或按原邮件 ID 增删标签。在已开启助手访问的邮箱连接上启用所需的 `draft_gmail_message`、`send_gmail_message` 或 `modify_gmail_message_labels`，再用 `mcp approval` 开启逐次审批。用 `/approvals` 核对邮箱、收件人、抄送、密送、正文或标签，再用 `/allow` 或 `/deny` 处理。 [邮箱写入及验收](superpowers/plans/2026-11-27-project-gmail.md#邮件写入)
 
+草稿和发送可指定项目内的附件路径。审批会显示各文件的路径、字节数和 SHA-256，文件内容改变后需要重新发起审批。每封邮件可选最多五个文件，合计最多 25 MiB。 [附件写入验收](superpowers/plans/2026-11-27-project-gmail.md#邮件写入)
+
 ### 按 Gmail 搜索触发例行规则
 
 用 `routines add` 保存以下规则。第一次成功检查只登记已有邮件。后续发现新的匹配 ID 时，收件箱会收到一条带匹配数量的通知。每个规则修订对同一邮件只触发一次。
