@@ -293,22 +293,26 @@ test("a task link waits for pairing and only selects a conversation listed for t
   assert.equal(blocked.field("conversation").value, conversationId);
 });
 
-test("a paired browser registers its push worker only after opt-in and can disable delivery", async () => {
-  let subscribed = false;
+test("a paired browser restores a stale server subscription only after opt-in and can disable delivery", async () => {
+  let subscribed = true;
+  let browserSubscription: object | undefined;
+  let allowed = false;
   const calls: string[] = [];
   const subscription = { endpoint: "https://fcm.googleapis.com/fcm/send/test", keys: { p256dh: "client-key", auth: "client-auth" } };
   const page = await harness().open("", {
-    permission: async () => { calls.push("permission"); return "granted"; },
-    serviceWorker: { async register(path: string, options: { scope: string }) {
+    permission: async () => { calls.push("permission"); return allowed ? "granted" : "denied"; },
+    serviceWorker: { async getRegistration() {
+      return { pushManager: { getSubscription: async () => browserSubscription } };
+    }, async register(path: string, options: { scope: string }) {
       assert.equal(path, "/remote/sw.js");
       assert.equal(options.scope, "/remote/");
       calls.push("register");
       return { active: true, pushManager: {
-        getSubscription: async () => null,
+        getSubscription: async () => browserSubscription,
         async subscribe(input: { userVisibleOnly: boolean; applicationServerKey: string }) {
           assert.equal(input.applicationServerKey, "server-key");
           assert.equal(input.userVisibleOnly, true);
-          return subscription;
+          return browserSubscription = subscription;
         },
       } };
     } },
@@ -326,12 +330,18 @@ test("a paired browser registers its push worker only after opt-in and can disab
   });
   const control = page.field("task-notifications");
   assert.equal(control.hidden, false);
+  assert.equal(control.textContent, "Enable task notifications");
   assert.deepEqual(calls, []);
   await control.trigger("click");
+  assert.match(page.field("status").textContent, /Allow notifications/);
+  assert.equal(control.textContent, "Enable task notifications");
+  allowed = true;
+  await control.trigger("click");
   assert.equal(control.textContent, "Disable task notifications");
+  assert.equal(page.field("status").textContent, "");
   await control.trigger("click");
   assert.equal(control.textContent, "Enable task notifications");
-  assert.deepEqual(calls, ["permission", "register", "put", "delete"]);
+  assert.deepEqual(calls, ["permission", "permission", "register", "put", "delete"]);
 });
 
 test("sign-out clears the local pairing even when disabling notifications is unreachable", async () => {

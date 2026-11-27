@@ -344,10 +344,15 @@ async function refreshPushSettings(device) {
   if (!navigator.serviceWorker || typeof PushManager === "undefined" || typeof Notification === "undefined") return;
   try {
     const settings = await get("/push");
+    let subscribed = settings.subscribed;
+    if (subscribed) {
+      const registration = await navigator.serviceWorker.getRegistration("/remote/");
+      subscribed = Boolean(await registration?.pushManager.getSubscription());
+    }
     if (identity !== device) return;
-    pushSettings = settings;
+    pushSettings = { ...settings, subscribed };
     notifications.hidden = !settings.publicKey;
-    notifications.textContent = settings.subscribed ? "Disable task notifications" : "Enable task notifications";
+    notifications.textContent = subscribed ? "Disable task notifications" : "Enable task notifications";
   } catch {
     if (identity === device) notifications.hidden = true;
   }
@@ -2103,8 +2108,15 @@ notifications.addEventListener("click", async () => {
       }, bearer);
     }
     await refreshPushSettings(device);
+    if (identity === device) {
+      if (status.textContent === notifications.dataset.error) status.textContent = "";
+      delete notifications.dataset.error;
+    }
   } catch (error) {
-    if (identity === device) report(error);
+    if (identity === device) {
+      report(error);
+      notifications.dataset.error = status.textContent;
+    }
   } finally { notifications.disabled = false; signout.disabled = false; }
 });
 

@@ -540,6 +540,8 @@ daemon 配置 `SILICONFLOW_API_KEY` 后，支持录音的配对浏览器会显�
 
 要在网页关闭后接收任务待答、子任务待答、确认或完成提醒，在同一份配置设置 `"remotePush": true` 并重启 daemon。手机配对后点击 **Enable task notifications**，再允许浏览器通知。iOS 需先把手机入口添加到主屏幕。通知仅展示通用提醒，点击后进入原设备会话。若浏览器未保留配对令牌，页面会先要求配对。可以在页面点击 **Disable task notifications**，本机也可撤销设备配对。
 
+浏览器清除订阅后，回到门户可重新点击 **Enable task notifications**。如果 daemon 所在网络要求通过 HTTP 代理访问 FCM，可在启动 Node 前配置 `HTTPS_PROXY` 和 `NODE_USE_ENV_PROXY=1`，用 `NO_PROXY` 保留本机直连。 [传输与恢复验收](specs/2026-11-24-assistant-capability-parity.md#已定位的能力差距)
+
 ## 电脑接管与分工
 
 ```powershell

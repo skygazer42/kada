@@ -234,4 +234,6 @@ owner 的 Assistants 目录保存项目身份、名称、完整指令、模型�
 | 应用连接器与主动检查 | GitHub Issue 已支持轮询及签名 Webhook，PR 已支持签名事件及提交身份投影；MCP 可做变更预检及 OAuth 登录；循环项目任务可按近期活动和运行间隔跳过。具体第三方账户、外部投递实测与其他应用事件接入仍待实现或验收。 | 连接器投递真实事件并在断线后接回，主动检查遵守用户选择和预算。 | [Rakazo GitHub Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [DuskBot 应用触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L477) · [Amuse 后台检查](https://github.com/replit/amuse/blob/a71da98873f0/apps/server/src/agent/scheduler.ts#L88) |
 | 手机后台通知实机验收 | Web Push 与会话跳转已有本地回归。真实 Chromium 通过 DevTools 投递合成推送，验证服务工作线程接管已打开的门户、通用提醒和原会话标识。脚本触发通知事件后，原标签页跳到同一配对的原会话 URL。已有标签页关闭或导航失败时会继续查找，已导航的标签页失去焦点时保持同一页面。 | 订阅的实体 iOS 与 Android 手机在页面关闭时经真实推送服务收到提醒，点击后进入有权限的原会话。 | [Codync Android 通知](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) · [接管与导航回归](../../test/remote-worker.test.ts) |
 
+Windows Chrome 在独立测试配置中通过 HTTPS 配对并建立真实 FCM 订阅。关闭门户后，daemon 经当前网络代理发出合成任务待答通知，FCM 返回受理，Chrome GCM 日志记录入站。测试未观察到系统通知卡片。撤销浏览器订阅后，页面可识别本机缺少订阅，用户重新开启后恢复 FCM 订阅。 [订阅恢复回归](../../test/remote-pending-page.test.ts)
+
 应用原生入口、渠道和更广义的桌面操作继续按项目源码核对。AppuBot 的公开仓库提供产品说明与发布资料，无法用它验证 Telegram 实现。 [AppuBot 公开资料](https://github.com/sarthakguptadev/appubot/blob/e0a25494a7c0/README.md)
