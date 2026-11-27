@@ -24,6 +24,7 @@ export interface Config {
   review?: boolean;
   web?: boolean;
   workspaceSnapshots?: boolean;
+  deferOptionalTools?: boolean;
   /** Experimental method learning; snapshotted only for newly created tasks. */
   learning?: boolean;
   /** First-run local Agent/Skill metadata discovery; no plugins are executed by discovery. */
@@ -122,6 +123,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     review: optionalBoolean(raw.review, "review", false),
     web: optionalBoolean(raw.web, "web", true),
     ...(optionalBoolean(raw.workspaceSnapshots, 'workspaceSnapshots', false) ? { workspaceSnapshots: true } : {}),
+    ...(optionalBoolean(raw.deferOptionalTools, 'deferOptionalTools', false) ? { deferOptionalTools: true } : {}),
     learning: optionalBoolean(raw.learning, "learning", false),
     discovery: optionalBoolean(raw.discovery, "discovery", true),
     ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),

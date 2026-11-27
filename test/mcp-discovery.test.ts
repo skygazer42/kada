@@ -17,6 +17,52 @@ if(r.method==='tools/list')result={tools:${JSON.stringify([...tools, { name: 'pr
 if(r.method==='tools/call'){fs.appendFileSync(process.argv[1],r.params.name+'\\n');result={content:[{type:'text',text:r.params.arguments.text}]};}
 console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});`;
 const call = (name: string, args: Record<string, unknown>) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: 'toolUse' });
+
+test('optional execution discovery keeps preparation tools and resumes an already loaded host tool', async t => {
+  const execution: string[][] = [];
+  let reopened = false;
+  const f = await scriptedFixture(context => {
+    const names = getCurrentTools(context.messages).map(tool => tool.name);
+    if (!names.includes('task_submit')) {
+      assert(names.includes('project_tasks'));
+      assert(!names.includes('tool_search'));
+      return call('task_prepare',{outcome:'Review project tasks',deliverables:['Task overview'],inputs:[],
+        criteria:[{text:'Read the requested task list',method:'inspect'}],scope:['Read project tasks'],assumptions:[],questions:[]});
+    }
+    execution.push(names);
+    const results = context.messages.filter(message => message.role === 'toolResult');
+    if (reopened) {
+      assert(names.includes('project_tasks'),'the loaded tool must survive restart');
+      return call('task_submit',{summary:'Project tasks checked.',artifacts:[],
+        criteria:[{id:1,status:'passed',evidence:'The original project task lookup returned its bounded list.'}]});
+    }
+    if (!results.some(message => message.toolName === 'tool_search')) return call('tool_search',{query:'project_tasks',limit:1});
+    if (!results.some(message => message.toolName === 'project_tasks')) return call('project_tasks',{});
+    assert.equal(results.find(message => message.toolName === 'project_tasks')?.isError,false);
+    return call('task_blocked',{reason:'The project tasks were read.',question:'Which item should I prioritize?'});
+  },{deferOptionalTools:true});
+  let runtime = f.runtime;
+  t.after(async () => { await runtime.close(); await f.close(); });
+  const task = await runtime.create('Prepare to review the project task list.',f.workspace,[],{chat:true});
+  const draft = await until(() => runtime.status(task.id), row => row.status==='awaiting_confirmation');
+  await runtime.confirm(task.id,draft.goal!.brief!.revision,draft.briefDigest!);
+  const waiting = await until(() => runtime.status(task.id), row => row.status==='waiting_user' || row.status==='failed');
+  assert.equal(waiting.status,'waiting_user');
+  assert(execution[0]?.includes('tool_search'));
+  assert(!execution[0]?.includes('project_tasks'));
+  assert(!execution[0]?.includes('save_chart'));
+  assert(execution[1]?.includes('project_tasks'));
+  assert(execution.every(names => !names.includes('delegation_ask')));
+  await runtime.close();
+  runtime = new LocalRuntime({...f.settings,deferOptionalTools:false},{models:f.models});
+  await runtime.recover();
+  reopened = true;
+  await runtime.followUp(task.id,'Prioritize the first project item.','priority');
+  const result = await until(() => runtime.status(task.id), row => row.status==='completed' || row.status==='failed');
+  assert.equal(result.status,'completed');
+  assert.equal(execution.at(-1)?.includes('project_tasks'),true);
+});
+
 async function configure(runtime: LocalRuntime, effects: string, count = 21) {
   await runtime.mcp.configure({ id: 'catalog', transport: 'stdio', command: process.execPath, args: ['-e', server, effects] });
   const checked = await runtime.mcp.test('catalog');

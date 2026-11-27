@@ -19,10 +19,10 @@ import { LocalRuntime } from '../src/runtime.js';
 const selfTest = process.argv.includes('--self-test');
 assert(selfTest !== process.argv.includes('--live'), 'Select --self-test or --live.');
 const armArgument = process.argv.find(argument => /^--arm(?:=|$)/.test(argument))?.slice('--arm='.length);
-const availableArms = ['pi', 'kada', 'kada-role'] as const;
+const availableArms = ['pi', 'kada', 'kada-role', 'kada-lazy'] as const;
 type ComparisonArm = typeof availableArms[number];
 const selectedArm = availableArms.find(arm => arm === armArgument);
-assert(armArgument === undefined || selectedArm, 'Select --arm=pi, --arm=kada or --arm=kada-role.');
+assert(armArgument === undefined || selectedArm, 'Select --arm=pi, --arm=kada, --arm=kada-role or --arm=kada-lazy.');
 const arms: readonly ComparisonArm[] = selectedArm ? [selectedArm] : ['pi', 'kada'];
 const preference = 'For this project my daily report title preference is exactly "Daily brief | Iris-7391".';
 const question = 'Which release channel should I use?';
@@ -173,7 +173,8 @@ async function compare(arm: ComparisonArm) {
     settings: { retry: { maxRetries: 2 }, stream: { timeoutMs: 120_000 }, toolExecution: 'parallel', compaction: taskCompaction(models, [model]) },
   }, ctx);
   const openKada = () => new LocalRuntime({ dataDir, port: 4317, model, maxSubagents: 1, maxDurationMs: limits.maxDurationMs,
-    maxTotalTokens: limits.maxTotalTokens, review: false, web: false, discovery: true }, { models, discovery: { home }, extensions: [scope] });
+    maxTotalTokens: limits.maxTotalTokens, review: false, web: false, discovery: true,
+    deferOptionalTools:arm === 'kada-lazy' }, { models, discovery: { home }, extensions: [scope] });
   let pi: Harness | undefined, kada: LocalRuntime | undefined, draft: string | undefined;
   let failure: { stage: string; reason: string; accountRefusal?: AccountRefusal } | undefined;
   let executionPassed = false;

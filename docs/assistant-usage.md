@@ -257,6 +257,8 @@ npm run harness -- mcp project-clear --workspace E:/project
 
 新建本机任务固定的 MCP 工具总数超过 20 个时，执行阶段先使用 Pi 的 `tool_search` 按工具名、英文描述或参数搜索，再加载需要的工具。已加载工具随原 Pi 会话保存，压缩和重启后仍可用。搜索只覆盖该任务固定的工具清单，实际调用仍核对当前连接与审批；加载工具不代表获得新权限。普通聊天和任务准备阶段不开放 MCP 执行工具，旧任务保持原来的直接工具列表。
 
+本机配置可选 `"deferOptionalTools": true`。新执行任务用 `tool_search` 按需加载项目查询、记忆、凭据、图表、Gmail 和日历工具。普通聊天和准备阶段直接提供各自可用的查询工具。可用 `node --import tsx scripts/compare-assistant-handoff.ts --self-test --arm=kada-lazy` 复测首轮工具定义与接回。 [对照与源码](experiments/2026-11-24-assistant-optimization-directions.md#p1--缩小首轮工具集合和提示)
+
 项目可以从全局已启用的工具中选择一个子集。`tools.json` 格式为 `[{"id":"local-tools","tool":"工具名"}]`，空数组关闭该项目新任务的所有 MCP 工具。`project-clear` 恢复继承全局设置。
 
 已启用的工具可要求逐次审批。任务停在待答状态后，用 `/approvals` 查看参数、摘要和有效期，再用 `/allow 动作ID` 或 `/deny 动作ID` 答复。批准绑定已展示的动作，断线后重发同一个决定会查询原回执。执行已派发但回执丢失时，任务会报告结果未知。

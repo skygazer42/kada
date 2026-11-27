@@ -47,6 +47,10 @@
 
 六次的缓存写入均为零，实际账单未知。新版请求少发送一个工具定义和 458 字节。两轮只有一个最终版样本，完成率和累计费用的改善仍待验证。
 
+配置 `"deferOptionalTools": true` 可让新建的本地执行任务通过 Pi 的 `tool_search` 按需加载项目查询、记忆、图表、凭据和已授权的邮箱与日历工具。任务保存启动时的选项。普通聊天和任务准备继续直接提供各自可用的查询工具。在执行中加载的工具随原 Pi 会话恢复。 [Rakazo 工具目录](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/lazy-tool-catalog.ts#L36) · [Pi 工具发现](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/README.md#who-may-call-a-tool) · [加载和恢复回归](../../test/mcp-discovery.test.ts)
+
+同一脚本化日报分别使用 `--self-test --arm=kada` 和 `--self-test --arm=kada-lazy`。首轮工具从 20 个、15,005 字节减少到 12 个、8,081 字节，两次都用 5 次模型替身调用完成提问、重启、答复和交付。字节数来自 Pi 会话中的工具定义。新的硅基流动请求发出了 12 个、8,453 字节的工具定义，第一次请求即收到额度拒绝。实际生成耗时和用量收益待复测。 [对照脚本](../../scripts/compare-assistant-handoff.ts)
+
 ## P1 · 精简恢复时的任务状态
 
 已实现。常规状态显示完整用户要求和验收条目预览，`details: true` 取回完整确认说明与证据。脚本化回归强制 Pi 压缩到原委派回执退出活动上下文，再关闭并重开会话。主任务按原 ID 取回成功结果和失败原因，读取原产物，子任务执行次数保持原数。 [状态回归](../../test/convergence.test.ts) · [重启回归](../../test/delegation.test.ts)

@@ -142,6 +142,7 @@ export interface TaskMeta {
   initialImages?: InputImage[];
   mcpPins?: McpPin[];
   mcpDiscovery?: 'deferred';
+  optionalToolDiscovery?: true;
   routineOccurrenceId?: string;
   routineIssue?: GithubIssue;
   routinePullRequest?: GithubPullRequest;
@@ -152,6 +153,19 @@ export interface TaskMeta {
   maxReworks?: number;
   maxStalls?: number;
 }
+const optionalHostToolNames = new Set([
+  'user_remember', 'user_memory_search', 'project_tasks', 'history_search', 'history_read', 'save_chart',
+  'request_credential', 'credential_request', 'credentials_list',
+]);
+
+function optionalHostTool(name: string) {
+  return optionalHostToolNames.has(name) || name.startsWith('project_gmail_') || name.startsWith('project_calendar_');
+}
+
+function stagedOptionalTools(extensions: Extension[]) {
+  return extensions.flatMap(extension => extension.tools ?? []).filter(tool => optionalHostTool(tool.name));
+}
+
 function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, chatGmail: _chatGmail, gmailWrite: _gmailWrite, gmailFiles: _gmailFiles,
   routineGmail: _routineGmail, chatCalendar: _chatCalendar, calendarWrite: _calendarWrite, calendarAvailability: _calendarAvailability, ...meta }: TaskMeta) { return meta; }
 
@@ -681,6 +695,7 @@ export class LocalRuntime {
           instructions: role.instructions, tools: [...role.tools], model: { ...model }, ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}) } } : {}),
         mcpPins,
         ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
+        ...(this.config.deferOptionalTools && localChat && !role ? { optionalToolDiscovery:true as const } : {}),
         ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
         ...(options.remote ? {remotePolicy:'workspace' as const} : {}),
         ...(options.images?.length ? { initialImages: structuredClone(options.images) } : {}),
@@ -1310,7 +1325,7 @@ export class LocalRuntime {
       if (!remote && meta.gmailFiles) extra.push(projectGmailFiles(this.gmail,meta.workspace,meta.gmailFiles,meta.routineGmail?.messageIds));
       if (meta.mcpPins?.length) extra.push(defineExtension({name:'local_mcp',tools:await this.mcp.tools(meta.mcpPins, !remote && meta.schemaVersion === 3 ? requestApproval : undefined, meta.mcpDiscovery === 'deferred')}));
       if (!remote && meta.routineGmail) extra.push(projectGmailExtension(this.gmail, meta.workspace, meta.routineGmail.fingerprint, meta.routineGmail.messageIds));
-      if (!remote && meta.mcpDiscovery === 'deferred') extra.push(createToolSearchExtension());
+      if (!remote && (meta.mcpDiscovery === 'deferred' || meta.optionalToolDiscovery)) extra.push(createToolSearchExtension());
       if (!remote && meta.schemaVersion === 3 && this.options.computer) extra.push(this.options.computer.forTask(meta.id, meta.structuredQuestions === true));
       const coordinatorOnly = [goal, verification, ...posts, ...(snapshots ? [snapshots] : []), ...(questions ? [questions] : []), ...(credentialManagement ? [credentialManagement] : []), ...(credentialRequests ? [credentialRequests] : []), ...(history ? [history] : []), ...(projectTasks ? [projectTasks] : []), ...(approvals ? [approvals] : []), ...(calendarWrites ? [calendarWrites] : []), ...(gmailWrites ? [gmailWrites] : []), ...(memory ? [memory] : []), ...(memoryUse ? [memoryUse] : []),...(learning ? [learning] : []), ...extra.filter(e => e.name === "local_computer")];
       const childAdmission = new SerialQueue();
@@ -1345,7 +1360,12 @@ export class LocalRuntime {
           withControl: action => this.peerControl(this.active.get(meta.id)!)(action) });
         extensions.push(peers); coordinatorOnly.push(peers);
       }
-      for (const extension of meta.room ? [assistantRooms] : [...extensions, ...(meta.preparation ? preparationExtensions : []), ...(meta.entrypoint === "chat" ? chatExtensions : []), ...(meta.schemaVersion !== undefined ? [readonly, review] : [])]) registry.install(extension);
+      for (const extension of meta.room ? [assistantRooms] : [...extensions, ...(meta.preparation ? preparationExtensions : []), ...(meta.entrypoint === "chat" ? chatExtensions : []), ...(meta.schemaVersion !== undefined ? [readonly, review] : [])]) {
+        if (meta.optionalToolDiscovery && extension.tools?.some(tool => optionalHostTool(tool.name))) {
+          registry.install({ ...extension, tools:extension.tools.map(tool =>
+            optionalHostTool(tool.name) ? { ...tool,deferred:true as const } : tool) });
+        } else registry.install(extension);
+      }
       const storage = await openNodeSqliteStorage(join(this.directory(meta.id), "session.sqlite"));
       let harness: Harness|undefined;
       try {
@@ -1529,6 +1549,7 @@ export class LocalRuntime {
     if (active.meta.entrypoint === "chat" && !state) {
       await active.root.configure({ extensions: active.chatExtensions,
         ...(active.meta.assistant ? { tools: assistantTools(active.chatExtensions.flatMap(extension => extension.tools ?? []), active.meta.assistant) } : {}),
+        ...(active.meta.optionalToolDiscovery ? {modelTools:{add:stagedOptionalTools(active.chatExtensions)}} : {}),
         instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true, !active.meta.remotePolicy && !!active.meta.chatWorkItems) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
@@ -1543,16 +1564,23 @@ export class LocalRuntime {
       state = await this.updateGoal(active, goal => { goal.learning = { offers, loaded: [], rejected: [], ...(notice ? { notice } : {}) }; });
     }
     const hideScript = !preparing && active.meta.resourcePolicy === 'pi-skills' && !active.meta.remotePolicy && !state?.skills?.pins.length;
-    const deferredMcp = !preparing && active.meta.mcpDiscovery === 'deferred';
+    const discovery = !preparing && (active.meta.mcpDiscovery === 'deferred' || active.meta.optionalToolDiscovery);
     const executionTools = active.executionExtensions.flatMap(extension => extension.tools ?? []);
-    const ask = deferredMcp ? executionTools.find(tool => tool.name === 'delegation_ask') : undefined;
-    const offered = deferredMcp ? new Set((await active.root.agent(ctx)).tools.map(tool => tool.name)) : undefined;
-    const loaded = offered ? executionTools.filter(tool => tool.name.startsWith('mcp_') && tool.deferred && offered.has(tool.name)) : [];
+    const ask = discovery ? executionTools.find(tool => tool.name === 'delegation_ask') : undefined;
+    const offered = discovery ? new Set((await active.root.agent(ctx)).tools.map(tool => tool.name)) : undefined;
+    const loaded = offered ? executionTools.filter(tool => offered.has(tool.name) &&
+      (tool.name.startsWith('mcp_') && tool.deferred ||
+       active.meta.optionalToolDiscovery && offered.has('tool_search') && optionalHostTool(tool.name))) : [];
     const stageExtensions = preparing ? active.preparationExtensions : active.executionExtensions;
     const roleTools = active.meta.assistant ? assistantTools(stageExtensions.flatMap(extension => extension.tools ?? []), active.meta.assistant) : undefined;
+    const directDuringPreparation = active.meta.optionalToolDiscovery && preparing ? stagedOptionalTools(stageExtensions) : [];
+    const modelTools = roleTools ? roleTools.filter(tool => !hideScript || tool.name !== runSkillScript.name)
+      : discovery ? { ...(hideScript ? {remove:[runSkillScript]} : {}),add:loaded }
+      : directDuringPreparation.length ? {add:directDuringPreparation}
+      : hideScript ? {remove:[runSkillScript]} : null;
     await active.root.configure({ extensions: stageExtensions,
       ...(roleTools ? { tools: roleTools } : ask ? { tools: { remove: [ask] } } : {}),
-      modelTools: roleTools ? roleTools.filter(tool => !hideScript || tool.name !== runSkillScript.name) : deferredMcp ? { ...(hideScript ? { remove: [runSkillScript] } : {}), add: loaded } : hideScript ? { remove: [runSkillScript] } : null,
+      modelTools,
       instructions: this.instructions(active.meta, preparing) + (!active.meta.remotePolicy && active.meta.historyRecall ? '\n' + historyInstructions : '') + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
         (!preparing && active.meta.resourcePolicy === "pi-skills" ? skillInstructions(state?.skills, !!active.skills) : "") +
         (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);

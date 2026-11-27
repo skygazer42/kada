@@ -266,6 +266,8 @@ Gmail 回复保存原线程和具体 RFC Message-ID，转发保存原邮件 ID �
 
 日历候选查询使用当前项目许可下的 `list-calendars`，只传入所填账号。选择结果编辑原绑定表单，保存仍由来源配置校验。 [日历列表验收](../../../../docs/superpowers/plans/2026-11-27-project-calendar.md#浏览器项目绑定)
 
+新本机执行任务可固定 `deferOptionalTools`。工具登记沿 Pi 的 deferred 属性，聊天和准备显式展示原可用工具。转入执行时从新的工具列表开始，通过 `tool_search` 加载的项目工具在原会话恢复。 [对照与回归](../../../../docs/experiments/2026-11-24-assistant-optimization-directions.md#p1--缩小首轮工具集合和提示)
+
 看板的项目列、顺序和回执与工作项同次原子保存，以便跨列移动在同次写入更新状态和完成时间。首次写入看板元数据后，原数组升级为包含 `items` 和 `boards` 的对象。看板版本绑定列和可见卡片修订，浏览器每个卡片表单固定请求 ID。owner 发放的一次性链接兑换为该项目的看板会话，服务重启后重新领取。[源码对照与验证](../../../../docs/superpowers/plans/2026-11-26-project-workboard.md)
 
 与现有[任务进度记录](../feature/2026-11-23-task-progress.md)部分重叠：该记录负责步骤与活动工具显示，本记录负责新功能的持久身份、认证与原入口契约。审计现有笔记后无过时提案需要替换。
