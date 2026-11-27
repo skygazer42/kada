@@ -126,6 +126,7 @@ test('the owner opens, names, archives and restores an independent task through 
 
 test('the chat tool prepares one independent thread for its original Pi input', async t => {
   let prepared = 0;
+  let parentSawResults = false;
   const parentAnswer = Promise.withResolvers<void>();
   const input = { title: '阅读样本', message: '准备合成任务', report_back: true };
   const f = await scriptedFixture(async context => {
@@ -143,12 +144,15 @@ test('the chat tool prepares one independent thread for its original Pi input', 
     assert(hasTool(context, 'start_thread'));
     const results = context.messages.filter(message => message.role === 'toolResult' && message.toolName === 'start_thread');
     if (results.length < 2) return call('start_thread', input);
+    parentSawResults = true;
     await parentAnswer.promise;
     return fauxAssistantMessage('已打开该独立会话。');
   });
   t.after(async () => { parentAnswer.resolve(); await f.close(); });
   const parent = await f.runtime.create('请在新会话中阅读这份样本。', f.workspace, [], { chat: true });
-  const running = await until(() => f.runtime.status(parent.id), state => state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'start_thread').length === 2);
+  // The status view can synthesize a placeholder for an in-flight tool.
+  await until(async () => parentSawResults, Boolean);
+  const running = await f.runtime.status(parent.id);
   const toolResults = running.messages.flatMap(message => message.role === 'toolResult' && message.toolName === 'start_thread' ? [message] : []);
   assert.equal(toolResults.length, 2);
   assert(toolResults.every(message => !message.isError), JSON.stringify(toolResults.map(message => message.content)));
