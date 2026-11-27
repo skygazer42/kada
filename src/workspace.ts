@@ -42,7 +42,7 @@ export class Workspace {
     }
     return target;
   }
-  private async snapshot(input: string, cwd: string | undefined, text: boolean): Promise<{ file: FileSnapshot; text?: string }> {
+  private async snapshot(input: string, cwd: string | undefined, text: boolean, binaryLimit?: number): Promise<{ file: FileSnapshot; text?: string; data?: Buffer }> {
     const absolute = await this.path(input, cwd);
     // NONBLOCK lets us reject a FIFO/device rather than hanging while opening it.
     const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -50,13 +50,18 @@ export class Workspace {
       const before = await file.stat();
       if (!before.isFile()) throw new Error(`Not a regular workspace file: ${input}`);
       if (text && before.size > 1_048_576) throw new TextFileError("Text reads require a regular UTF-8 file of at most 1 MiB; file existence and artifact hashing have no text-size limit");
+      const limit = text ? 1_048_576 : binaryLimit;
+      if (binaryLimit !== undefined && before.size > binaryLimit) throw new Error(`Binary reads are limited to ${binaryLimit} bytes`);
       const hash = createHash("sha256"), chunks: Buffer[] = [];
       let bytes = 0;
       for await (const chunk of file.createReadStream({ autoClose: false })) {
         bytes += chunk.length;
-        if (text && bytes > 1_048_576) throw new TextFileError("Text reads are limited to 1 MiB");
+        if (limit !== undefined && bytes > limit) {
+          if (text) throw new TextFileError("Text reads are limited to 1 MiB");
+          throw new Error(`Binary reads are limited to ${limit} bytes`);
+        }
         hash.update(chunk);
-        if (text) chunks.push(chunk);
+        if (limit !== undefined) chunks.push(chunk);
       }
       const after = await file.stat();
       await this.path(input, cwd);
@@ -67,7 +72,7 @@ export class Workspace {
         throw new Error(`File changed while checking: ${input}. Inspect it and verify again.`);
       }
       const evidence = { path: absolute, bytes, sha256: hash.digest("hex") };
-      if (!text) return { file: evidence };
+      if (!text) return { file: evidence, ...(binaryLimit === undefined ? {} : { data: Buffer.concat(chunks) }) };
       const content = Buffer.concat(chunks);
       if (content.includes(0)) throw new TextFileError(`Text reads do not accept binary NUL bytes: ${input}`);
       try { return { file: evidence, text: new TextDecoder("utf-8", { fatal: true }).decode(content) }; }
@@ -76,6 +81,10 @@ export class Workspace {
   }
   async inspect(input: string, cwd?: string): Promise<FileSnapshot> {
     return (await this.snapshot(input, cwd, false)).file;
+  }
+  async readBinarySnapshot(input: string, maxBytes: number) {
+    const { file, data } = await this.snapshot(input, undefined, false, maxBytes);
+    return { file, data: data! };
   }
   /** A directory digest covers names, original file bytes and empty directories.
    * Links/special files are not followed. This observes a tree, not an OS transaction.

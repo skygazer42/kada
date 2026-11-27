@@ -65,7 +65,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','assistant-rooms','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','assistant-rooms','voice-notes','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -298,6 +298,29 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         return send(200,await runtime.captureSkill(capture[1]!,input.path));
       }
       if (url.pathname === "/v1/tasks" && req.method === "GET") return send(200, await runtime.list(url.searchParams.get('filter') ?? 'all'));
+      const voice = /^\/v1\/tasks\/([a-f0-9-]{36})\/voice-notes(?:\/([A-Za-z0-9_-]{1,120})(\/send)?)?$/.exec(url.pathname);
+      if (voice) {
+        const [, taskId, requestId, submit] = voice;
+        if (!requestId && req.method === 'POST') return send(200, await runtime.transcribeVoice(taskId!, await body(req)));
+        if (requestId && !submit && req.method === 'GET') return send(200, await runtime.voiceNote(taskId!, requestId));
+        if (requestId && submit && req.method === 'POST') return send(200, await runtime.sendVoiceNote(taskId!, requestId));
+        return send(405, { error: 'Method not allowed' });
+      }
+      const speech = /^\/v1\/tasks\/([a-f0-9-]{36})\/voice-speech(?:\/([A-Za-z0-9_-]{1,120})\/play)?$/.exec(url.pathname);
+      if (speech) {
+        const [, taskId, requestId] = speech;
+        if (!requestId && req.method === 'POST') {
+          const input = await body(req);
+          if (typeof input.requestId !== 'string') throw new Error('Provide a speech request ID.');
+          return send(200, await runtime.renderVoiceReply(taskId!, input.requestId));
+        }
+        if (requestId && req.method === 'POST') {
+          const file = await runtime.voiceReplyFile(taskId!, requestId);
+          await openLocalPath(file.path, 'file');
+          return send(200, { file });
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       if (url.pathname === '/v1/assistant-rooms') {
         if (req.method === 'GET') return send(200, await runtime.listRooms());
         if (req.method === 'POST') return send(201, await runtime.createRoom(await body(req)));

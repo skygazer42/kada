@@ -43,7 +43,7 @@ export async function artifactList(status: TaskStatus) {
 
 export function openLocalPath(path: string, kind: 'file' | 'directory', reveal = false) {
   // Executable formats are revealed in their folder; opening an artifact never runs its script.
-  const document = /\.(txt|md|json|csv|pdf|png|jpe?g|gif|webp|docx|xlsx|pptx)$/i.test(extname(path));
+  const document = /\.(txt|md|json|csv|pdf|png|jpe?g|gif|webp|docx|xlsx|pptx|wav)$/i.test(extname(path));
   const folder = reveal || kind === 'directory' || !document;
   const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
   const args = process.platform === 'win32' ? [folder && kind === 'file' ? '/select,' + path : path]

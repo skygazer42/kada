@@ -4,12 +4,13 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ModelRef } from "./config.js";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 
+export const siliconFlowBaseUrl = 'https://api.siliconflow.cn/v1';
 const siliconFlowModel: Model<"openai-completions"> = {
   id: "Qwen/Qwen2.5-7B-Instruct",
   name: "Qwen2.5 7B Instruct",
   api: "openai-completions",
   provider: "siliconflow",
-  baseUrl: "https://api.siliconflow.cn/v1",
+  baseUrl: siliconFlowBaseUrl,
   reasoning: false,
   input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

@@ -28,6 +28,20 @@
 
 `/title 标题` 修改当前会话的显示名称。结清工作后用 `/archive` 归档，`/tasks archived` 查看列表，`/attach 任务ID` 阅读历史，`/unarchive` 恢复显示和继续输入。来源、原对话、交付和已耗额度随原任务保存。[会话管理契约](superpowers/plans/2026-11-26-local-threads.md)
 
+## 本机语音
+
+本机 daemon 设置 `SILICONFLOW_API_KEY` 后，可转写原会话工作区内的 WAV。终端先显示转写结果，再用独立命令把已保存文本发给原会话。朗读从同一会话已保存的助手答复生成 WAV，可在本机打开原文件。
+
+```powershell
+npm run harness -- voice transcribe 会话ID recording.wav note-1
+npm run harness -- voice show 会话ID note-1
+npm run harness -- voice send 会话ID note-1
+npm run harness -- voice render 会话ID reply-1
+npm run harness -- voice play 会话ID reply-1
+```
+
+录音上限为 5 MiB，合成结果上限为 16 MiB。再次查询或用同一请求重试会读取保存的回执。 [源码与实际转写和合成验收](superpowers/plans/2026-11-26-voice-notes.md)
+
 ## 工作区快照
 
 保存快照后可预览工作区的文件差异，再提交显示的 `version`。恢复会保存一个撤销快照，回执给出 `undoSnapshotId`，用同一预览与恢复入口可撤销这次操作。重叠任务还在执行或工作区在预览后发生编辑时，恢复返回当前冲突。[实现与验收](superpowers/plans/2026-11-26-workspace-snapshots.md)

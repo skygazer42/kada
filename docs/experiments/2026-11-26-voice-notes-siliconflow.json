@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "provider": "siliconflow",
+  "asrModel": "FunAudioLLM/SenseVoiceSmall",
+  "speechModel": "FunAudioLLM/CosyVoice2-0.5B",
+  "spokenFixture": "Kada voice note. The reference code is forty two.",
+  "transcript": "Ca a voice note the reference code is 42.",
+  "sourceWavBytes": 212972,
+  "renderedWavBytes": 249774,
+  "originalInputCount": 1,
+  "usedOriginalAnswerEntry": true,
+  "replayedSavedSpeech": true,
+  "playedOnPhysicalDevice": false,
+  "money": null
+}

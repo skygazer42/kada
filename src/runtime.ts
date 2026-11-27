@@ -56,6 +56,8 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
 import { RoomError, assistantRooms, pendingRoomTurn, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
+import { VoiceNoteError, VoiceNotes, readVoiceClip, saveVoiceReply, siliconFlowVoiceSynthesizer, siliconFlowVoiceTranscriber,
+  transcriptionText, verifyVoiceReply, voiceNoteKey, type VoiceSynthesizer, type VoiceTranscriber } from './voice-notes.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
   type ReceivedThreadReport, type TaskThread, type ThreadInvocation, type ThreadOrigin, type ThreadReport } from './task-threads.js';
 import { ThreadPosts, postInformation, threadPostExtension, threadPostWakeId, threadPostWakePrefix,
@@ -189,7 +191,7 @@ interface Active {
   /** Disposable cache derived from Pi entries; rebuilt from storage after reopening. */
   compactionCounts: Map<Conversation["id"], { last?: EntryId; count: number }>;
 }
-export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 
 /** Each top-level task owns a Pi session. The host, rather than the model, decides completion. */
 export class LocalRuntime {
@@ -2162,6 +2164,95 @@ export class LocalRuntime {
   }
   async followUp(id: string, message: string, requestId: string = randomUUID(), images?: InputImage[], answerVersion?: string, question?: { id: string; workspace?: string }): Promise<void> {
     return this.changes.run(() => this.followUpTask(id, message, requestId, images, answerVersion, question));
+  }
+  private async openVoiceConversation(id: string) {
+    const meta = await this.metadata(id);
+    if (meta.entrypoint !== 'chat' || meta.remotePolicy || meta.room) throw new VoiceNoteError(404, 'Local voice notes require an ordinary local chat.');
+    return this.open(meta, false);
+  }
+
+  async transcribeVoice(id: string, { file: source, requestId }: Record<string, unknown>) {
+    const key = voiceNoteKey(requestId), noteId = key.slice('voice:'.length);
+    const active = await this.changes.run(() => this.openVoiceConversation(id));
+    const { file, data } = await readVoiceClip(active.workspace, source);
+    const claim = await this.changes.run(async () => {
+      const chat = await this.openVoiceConversation(id);
+      return chat.harness.commit(async tx => {
+        const state = await tx.doc(VoiceNotes), previous = state.requests[key];
+        if (previous) {
+          if (previous.file.path !== file.path || previous.file.sha256 !== file.sha256) {
+            throw new VoiceNoteError(409, 'This voice request ID already refers to a different source.');
+          }
+          if (!previous.receipt) throw new VoiceNoteError(409, 'The original voice request has no saved transcript. Use a new request ID to retry.');
+          return { receipt: { ...previous.receipt, file: { ...previous.receipt.file } } };
+        }
+        const transcribe = this.options.voiceTranscriber ?? siliconFlowVoiceTranscriber();
+        state.requests[key] = { file };
+        return { transcribe };
+      }, ctx);
+    });
+    if (claim.receipt) return claim.receipt;
+    const text = transcriptionText(await claim.transcribe(data));
+    const receipt = { id: noteId, file, text };
+    await this.changes.run(async () => {
+      const chat = await this.openVoiceConversation(id);
+      await chat.harness.commit(async tx => { (await tx.doc(VoiceNotes)).requests[key]!.receipt = receipt; }, ctx);
+    });
+    return receipt;
+  }
+
+  async voiceNote(id: string, requestId: string) {
+    const key = voiceNoteKey(requestId);
+    return this.changes.run(async () => {
+      const chat = await this.openVoiceConversation(id);
+      const saved = (await chat.harness.snapshot(VoiceNotes, ctx))?.requests[key]?.receipt;
+      if (!saved) throw new VoiceNoteError(404, 'No saved transcript for this voice request.');
+      return saved;
+    });
+  }
+
+  async sendVoiceNote(id: string, requestId: string) {
+    const saved = await this.voiceNote(id, requestId);
+    await this.followUp(id, saved.text, 'voice-note:' + requestId);
+    return saved;
+  }
+
+  async renderVoiceReply(id: string, requestId: string) {
+    const key = voiceNoteKey(requestId), directory = join(this.directory(id), 'voice');
+    const claim = await this.changes.run(async () => {
+      const chat = await this.openVoiceConversation(id);
+      const previous = (await chat.harness.snapshot(VoiceNotes, ctx))?.speech[key];
+      if (previous) {
+        if (!previous.file) throw new VoiceNoteError(409, 'This speech request has no saved audio. Use a new request ID to retry.');
+        return { receipt: { id: requestId, answerEntryId: previous.answerEntryId, file: previous.file } };
+      }
+      const last = await this.latestInput(chat);
+      if (last?.status !== 'done') throw new VoiceNoteError(409, 'Wait for the original assistant reply before rendering speech.');
+      const entry = await chat.harness.commit(tx => tx.entry(AssistantEntry, last.answer), ctx);
+      const text = entry?.model?.flatMap(message => conversationAnswer(message) ?? []).join('\n').trim();
+      if (!text || text.length > 32000) throw new VoiceNoteError(409, 'The original reply must contain between 1 and 32000 characters for speech.');
+      const synthesize = this.options.voiceSynthesizer ?? siliconFlowVoiceSynthesizer();
+      const answerEntryId = last.answer;
+      await chat.harness.commit(async tx => { (await tx.doc(VoiceNotes)).speech[key] = { answerEntryId }; }, ctx);
+      return { synthesize, answerEntryId, text };
+    });
+    if (claim.receipt) return claim.receipt;
+    const file = await saveVoiceReply(directory, requestId, await claim.synthesize(claim.text));
+    await this.changes.run(async () => {
+      const chat = await this.openVoiceConversation(id);
+      await chat.harness.commit(async tx => { (await tx.doc(VoiceNotes)).speech[key]!.file = file; }, ctx);
+    });
+    return { id: requestId, answerEntryId: claim.answerEntryId, file };
+  }
+
+  async voiceReplyFile(id: string, requestId: string) {
+    const key = voiceNoteKey(requestId);
+    const file = await this.changes.run(async () => {
+      const chat = await this.openVoiceConversation(id);
+      return (await chat.harness.snapshot(VoiceNotes, ctx))?.speech[key]?.file;
+    });
+    if (!file) throw new VoiceNoteError(404, 'No saved audio for this speech request.');
+    return verifyVoiceReply(await Workspace.open(join(this.directory(id), 'voice'), { create: false }), file);
   }
   async provideCredential(id: string, questionId: string, value: string | undefined): Promise<void> {
     if (!/^\d{1,20}$/.test(questionId) || value !== undefined && typeof value !== 'string') throw new CredentialError(400, 'Provide a credential request and protected value, or decline.');
