@@ -90,5 +90,43 @@
     }
   ],
   "note": "Single synthetic task per selected arm. Broader performance needs repeated tasks and counterbalanced order. SiliconFlow pricing is unavailable in the installed catalog.",
-  "codeBase": "8294fa0 with pending assistant-room queue changes"
+  "codeBase": "8294fa0 with pending assistant-room queue changes",
+  "piTaskTimings": {
+    "pi": {
+      "generationTaskMs": [
+        6367,
+        4291,
+        8910,
+        7451,
+        6479,
+        9053,
+        5235,
+        21949
+      ],
+      "toolTaskMs": [
+        17,
+        6,
+        8,
+        9,
+        7,
+        5
+      ],
+      "unfinishedGenerationTasks": 0
+    },
+    "kada": {
+      "generationTaskMs": [
+        43476,
+        38709,
+        39377,
+        50413
+      ],
+      "toolTaskMs": [
+        6,
+        8,
+        10,
+        9
+      ],
+      "unfinishedGenerationTasks": 1
+    }
+  }
 }

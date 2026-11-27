@@ -55,5 +55,27 @@
     }
   ],
   "note": "Single synthetic task per selected arm. Broader performance needs repeated tasks and counterbalanced order. SiliconFlow pricing is unavailable in the installed catalog.",
-  "codeBase": "11381da with role-scoped comparison option"
+  "codeBase": "11381da with role-scoped comparison option",
+  "piTaskTimings": {
+    "kada-role": {
+      "generationTaskMs": [
+        26361,
+        27514,
+        21550,
+        24243,
+        39574,
+        33077,
+        6846
+      ],
+      "toolTaskMs": [
+        16,
+        20,
+        8,
+        11,
+        4,
+        4
+      ],
+      "unfinishedGenerationTasks": 0
+    }
+  }
 }
