@@ -10,6 +10,10 @@ function notificationTarget(data) {
     typeof pairing === "string" && /^[a-f0-9]{64}$/.test(pairing) ? { conversationId: id, pairingId: pairing } : null;
 }
 
+self.addEventListener("activate", event => {
+  event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener("push", event => {
   let target;
   try { target = notificationTarget(event.data?.json()); }
@@ -28,12 +32,20 @@ self.addEventListener("notificationclick", event => {
   if (!target) return;
   event.waitUntil((async () => {
     const hash = "#conversation=" + target.conversationId + "&pairing=" + target.pairingId;
-    for (const client of await self.clients.matchAll({ type: "window", includeUncontrolled: true })) {
+    for (const client of await self.clients.matchAll({ type: "window" })) {
       const url = new URL(client.url);
       if (url.origin !== self.location.origin || !["/remote", "/remote/"].includes(url.pathname)) continue;
       url.hash = hash;
-      const current = url.href === client.url ? client : await client.navigate(url.href);
-      if (current) { await current.focus(); return; }
+      let current;
+      try {
+        current = url.href === client.url ? client : await client.navigate(url.href);
+      } catch {
+        // A tab can close or change workers between enumeration and navigation.
+        continue;
+      }
+      if (!current) continue;
+      try { await current.focus(); } catch { /* The target already navigated. */ }
+      return;
     }
     await self.clients.openWindow("/remote/" + hash);
   })());
