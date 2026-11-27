@@ -7,6 +7,7 @@ import { remoteScript } from "../src/remote-page.js";
 type Handler = (event: { preventDefault(): void }) => Promise<void> | void;
 class Element {
   tagName = '';
+  href = "";
   children: Element[] = [];
   parentNode: Element | null = null;
   dataset: Record<string, string> = {};
@@ -74,13 +75,23 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     expireAuthorization: () => { authorizationExpired = true; },
     failList: () => { listUnavailable = true; },
     failDraftWrite: () => { failComposerWrite = true; },
+    holdDraftWrites() {
+      const release = Promise.withResolvers<void>();
+      locks.set("kada:composer:" + session.get("kada-composer-pairing"), release.promise);
+      return release.resolve;
+    },
     async open(hash = "", push?: {
       serviceWorker: object;
       permission: () => Promise<string>;
       request: (init: RequestInit) => Response;
-    }, voice?: VoiceFixture) {
+    }, voice?: VoiceFixture, computers?: { name: string; origin: string }[]) {
+      let draftWhenNavigated: string | undefined;
       const location = Object.assign(new URL("http://localhost/remote" + hash), {
         reload() { reloaded = true; },
+        assign(path: string) {
+          draftWhenNavigated = local.get("kada:composer:" + session.get("kada-composer-pairing"));
+          location.href = path;
+        },
       });
       let reloaded = false;
       const nodes = new Map<string, Element>();
@@ -142,6 +153,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
             const pairingId = createHash("sha256").update("fixture:" + deviceToken).digest("hex");
             return Response.json({
               channel: "web", accountId, deviceId, pairingId,
+              ...(computers ? { computers } : {}),
               ...(approvals ? { actionApprovals: true } : {}), ...(workItems ? { workItems: true } : {}),
               ...(threads ? { sharedThreads: true } : {}),
               ...(rooms ? { sharedRooms: true } : {}),
@@ -177,6 +189,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
         field,
         location,
         reloaded: () => reloaded,
+        draftWhenNavigated: () => draftWhenNavigated,
         async navigate(hash: string) {
           location.hash = hash;
           windowHandlers.get("hashchange")?.();
@@ -198,6 +211,48 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     },
   };
 }
+
+test("switching computers keeps the current draft and never transfers the pairing token", async () => {
+  const app = harness();
+  const target = "https://office.example.test/remote";
+  const opened = await app.open("", undefined, undefined, [{ name: "Office", origin: "https://office.example.test" }]);
+  const links = opened.field("computer-links");
+  const link = links.children[0]?.children[0];
+  assert.equal(opened.field("computers").hidden, false);
+  assert.equal(link?.textContent, "Office");
+  assert.equal(link?.href, target);
+  opened.field("files").files = [new File(["local"], "local.txt")];
+  await link.trigger("click");
+  assert.equal(opened.location.origin, "http://localhost");
+  assert.match(opened.field("status").textContent, /files/i);
+  opened.field("files").files = [];
+  app.failDraftWrite();
+  await opened.type("Type before switching");
+  await link.trigger("click");
+  assert.equal(opened.location.origin, "http://localhost");
+  await opened.type("Saved on this computer");
+  await link.trigger("click");
+  assert.equal(opened.location.href, target);
+  const composer = [...app.local].find(([key]) => key.startsWith("kada:composer:"));
+  assert.match(composer?.[1] ?? "", /Saved on this computer/);
+  assert.equal(app.session.get("kada-device-token"), "phone");
+  assert(app.requests.every(url => url.startsWith("/remote/")));
+});
+
+test("switching computers waits for edits queued while the first save is in progress", async () => {
+  const app = harness();
+  const target = "https://office.example.test";
+  const opened = await app.open("", undefined, undefined, [{ name: "Office", origin: target }]);
+  const link = opened.field("computer-links").children[0]!.children[0]!;
+  const release = app.holdDraftWrites();
+  const first = opened.type("Earlier draft");
+  const switchComputer = link.trigger("click");
+  const last = opened.type("Latest draft");
+  release();
+  await Promise.all([first, switchComputer, last]);
+  assert.equal(opened.location.origin, target);
+  assert.match(opened.draftWhenNavigated() ?? "", /Latest draft/);
+});
 
 test("phone dictation inserts an editable draft and leaves sending to the user", async () => {
   const app = harness();

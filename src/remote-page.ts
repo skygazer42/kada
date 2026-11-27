@@ -35,6 +35,9 @@ export const remotePage = String.raw`<!doctype html>
     #pair { max-width: 31rem; margin: 4vh auto 0; }
     #pair button { margin-top: .7rem; }
     #signout { padding-inline: .7rem; }
+    #computers summary { cursor: pointer; overflow-wrap: anywhere; }
+    #computer-links { display: flex; flex-wrap: wrap; gap: .5rem 1rem; list-style: none; padding: 0; margin: .5rem 0 0; }
+    #computer-links a { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); overflow-wrap: anywhere; }
     #messages { display: grid; gap: .6rem; }
     .message { margin: 0; padding: .75rem 1rem; border-radius: 12px; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.5; }
     .message-user { background: #ede6fb; margin-left: min(8vw, 3rem); }
@@ -97,6 +100,10 @@ export const remotePage = String.raw`<!doctype html>
       </form>
     </section>
     <div id="assistant" hidden>
+      <details class="panel" id="computers" hidden>
+        <summary id="current-computer"></summary>
+        <ul id="computer-links"></ul>
+      </details>
       <div class="controls">
         <label id="conversation-field" for="conversation">Conversation<select id="conversation"></select></label>
         <button type="button" id="refresh-conversations" aria-label="Refresh conversations">Refresh</button>
@@ -1987,6 +1994,40 @@ async function refresh() {
   }
 }
 
+function showComputers(device) {
+  const computers = device.computers ?? [];
+  const peers = computers.filter(computer => computer.origin !== location.origin);
+  const links = field("computer-links");
+  links.replaceChildren();
+  field("computers").hidden = !peers.length;
+  if (!peers.length) return;
+  const current = computers.find(computer => computer.origin === location.origin);
+  field("current-computer").textContent = "Computer · " + (current?.name ?? location.host);
+  for (const computer of peers) {
+    const link = element("a", computer.name, element("li", undefined, links));
+    link.href = computer.origin + "/remote";
+    link.rel = "noreferrer";
+    link.addEventListener("click", async event => {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      const draft = editor;
+      let saving;
+      do {
+        saving = draft.saving;
+        await saving;
+      } while (saving !== draft.saving);
+      if (identity !== device || editor !== draft || draft.error) return;
+      if (busy) {
+        status.textContent = "Wait for this message to finish sending before switching computers.";
+      } else if (fileInput.files.length) {
+        status.textContent = "Send or remove the selected files before switching computers.";
+      } else {
+        location.assign(link.href);
+      }
+    });
+  }
+}
+
 async function connect(value) {
   const attempt = ++connectionAttempt;
   let candidate;
@@ -2025,6 +2066,7 @@ async function connect(value) {
   resetConversationView();
   restoreComposer();
   if (pending) displayReceipt({ state: "unknown" });
+  showComputers(identity);
   field("connection").textContent = identity.deviceId;
   field("connection").hidden = false;
   pair.hidden = true;

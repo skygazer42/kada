@@ -13,7 +13,8 @@ import { createRegistry, defineExtension, defineTool, Harness, UserEntry } from 
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { memoryProject } from "../src/memory-sources.js";
-import { createRemoteCredential, createRemoteHandler, quarantineLegacyRemoteTasks, type RemoteDevice } from "../src/remote.js";
+import { loadConfig } from "../src/config.js";
+import { createRemoteCredential, createRemoteHandler, quarantineLegacyRemoteTasks, type RemoteDevice, type RemoteOptions } from "../src/remote.js";
 import { LocalRuntime } from "../src/runtime.js";
 import { hasTool, pngFixture, scriptedFixture, until } from "./helpers.js";
 
@@ -30,7 +31,8 @@ const taskControl = (action: string, version: string) => ({
   body: JSON.stringify({ action, version }),
 });
 
-async function portal(t: TestContext, runtime: LocalRuntime, directory: string, devices: readonly RemoteDevice[], pushSender?: PushSender) {
+async function portal(t: TestContext, runtime: LocalRuntime, directory: string, devices: readonly RemoteDevice[], pushSender?: PushSender,
+  computers?: RemoteOptions["computers"]) {
   let handle: ReturnType<typeof createRemoteHandler>;
   const server = createServer((request, response) => {
     void handle(request, response).then((handled) => {
@@ -44,7 +46,7 @@ async function portal(t: TestContext, runtime: LocalRuntime, directory: string, 
   const address = server.address();
   assert(address && typeof address !== "string");
   const origin = `http://127.0.0.1:${address.port}`;
-  handle = createRemoteHandler(runtime, { directory, origin, devices, push: Boolean(pushSender), pushSender });
+  handle = createRemoteHandler(runtime, { directory, origin, devices, push: Boolean(pushSender), pushSender, computers });
   const call = (token: string, path: string, init?: RequestInit) => fetch(origin + "/remote/api" + path, {
     ...init, headers: { Authorization: `Bearer ${token}`, ...init?.headers },
   });
@@ -55,6 +57,43 @@ function pairing(accountId = "owner", deviceId = "phone") {
   const { token, tokenHash } = createRemoteCredential();
   return { token, device: { accountId, deviceId, tokenHash } };
 }
+
+test("a paired portal lists the configured computers and accepts only cross-site document navigation", async t => {
+  const fixture = await scriptedFixture(() => assert.fail("Opening the portal must not start a task"));
+  t.after(() => fixture.close());
+  const path = join(fixture.directory, "computers.json");
+  const first = { name: "Studio", origin: "https://studio.example.test" };
+  const second = { name: "Office", origin: "https://office.example.test" };
+  const credentialed = new URL(first.origin);
+  credentialed.username = "synthetic-user";
+  credentialed.password = "synthetic-password";
+  const config = async (remoteComputers: unknown) => {
+    await writeFile(path, JSON.stringify({ remoteComputers }));
+    return loadConfig(path);
+  };
+  for (const invalid of ["https://host.test", [{ ...first, origin: "http://studio.example.test" }],
+    [{ ...first, origin: credentialed.href }], [{ ...first, origin: first.origin + "/remote" }],
+    [{ ...first, origin: first.origin + "?token=value" }], [{ ...first, origin: first.origin + "#" }],
+    [first, { ...second, origin: first.origin + "/" }], [{ ...first, name: " " }]]) {
+    await assert.rejects(config(invalid), /remoteComputers/);
+  }
+  const loaded = await config([first, { ...second, origin: "https://OFFICE.example.test:443/" }]);
+  assert.deepEqual(loaded.remoteComputers, [first, second]);
+  const phone = pairing();
+  const remote = await portal(t, fixture.runtime, join(fixture.directory, "remote"), [phone.device], undefined, loaded.remoteComputers);
+  const navigation = { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" };
+  const request = (pathname: string, headers: Record<string, string>) => new Promise<number>((resolve, reject) => {
+    const req = httpRequest(remote.origin + pathname, { headers }, res => { res.resume(); resolve(res.statusCode!); });
+    req.on("error", reject).end();
+  });
+  assert.equal(await request("/remote", navigation), 200);
+  assert.equal(await request("/remote", { ...navigation, "Sec-Fetch-Dest": "iframe" }), 403);
+  assert.equal(await request("/remote/app.js", navigation), 403);
+  assert.equal(await request("/remote/api/session", { ...navigation, Authorization: "Bearer " + phone.token }), 403);
+  assert.equal((await remote.call("not-paired", "/session")).status, 401);
+  const session = await (await remote.call(phone.token, "/session")).json();
+  assert.deepEqual(session.computers, [first, second]);
+});
 
 const voiceClip = Buffer.from('524946462800000057415645666d74201000000001000100803e0000007d00000200100064617461040000000000ff7f', 'hex');
 

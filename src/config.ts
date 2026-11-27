@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export interface ModelRef { provider: string; modelId: string }
+export interface RemoteComputer { name: string; origin: string }
 export type GithubWebhookConfig = { routineId: string; secretEnv: string };
 export interface ComputerConfig {
   command: string;
@@ -36,6 +37,7 @@ export interface Config {
   browserProfiles?: Record<string, ComputerConfig>;
   /** Canonical origin of an already configured HTTPS reverse proxy. */
   remoteOrigin?: string;
+  remoteComputers?: RemoteComputer[];
   remotePush?: boolean;
   githubIssuePolling?: string[];
   githubIssueTokenEnv?: string;
@@ -122,6 +124,21 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     const origin = new URL(raw.remoteOrigin);
     if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('remoteOrigin must be an HTTPS origin.');
   }
+  let remoteComputers: RemoteComputer[] | undefined;
+  if (raw.remoteComputers !== undefined) {
+    if (!Array.isArray(raw.remoteComputers)) throw new Error("remoteComputers must be an array.");
+    remoteComputers = raw.remoteComputers.map(entry => {
+      const origin = typeof entry?.origin === "string" ? URL.parse(entry.origin) : null;
+      if (typeof entry?.name !== "string" || !entry.name.trim() ||
+        origin?.protocol !== "https:" || origin.href !== origin.origin + "/") {
+        throw new Error("remoteComputers entries need a name and an HTTPS origin.");
+      }
+      return { name: entry.name.trim(), origin: origin.origin };
+    });
+    if (new Set(remoteComputers.map(computer => computer.origin)).size !== remoteComputers.length) {
+      throw new Error("remoteComputers must contain unique origins.");
+    }
+  }
   const maxEstimatedCostUsd = raw.maxEstimatedCostUsd ?? 1;
   if (typeof maxEstimatedCostUsd !== "number" || !Number.isFinite(maxEstimatedCostUsd) || maxEstimatedCostUsd <= 0) throw new Error("maxEstimatedCostUsd must be a positive number");
   return {
@@ -140,6 +157,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     learning: optionalBoolean(raw.learning, "learning", false),
     discovery: optionalBoolean(raw.discovery, "discovery", true),
     ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),
+    ...(remoteComputers?.length ? { remoteComputers } : {}),
     ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
     ...(githubIssueTokenEnv ? { githubIssueTokenEnv } : {}),
     ...(githubWebhooks ? { githubWebhooks: githubWebhooks.map(({ routineId, secretEnv }) => ({ routineId, secretEnv })) } : {}),

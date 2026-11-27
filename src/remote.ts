@@ -6,6 +6,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { DelegationInputError } from "./delegation.js";
 import { ApprovalError } from "./approvals.js";
+import type { RemoteComputer } from "./config.js";
 import type { RemoteDevices, SharedApproval } from "./remote-devices.js";
 import { TaskConflictError, type LocalRuntime } from "./runtime.js";
 import { remotePage, remoteScript } from "./remote-page.js";
@@ -40,6 +41,7 @@ export interface RemoteOptions {
   directory: string;
   workspace?: string;
   origin: string;
+  computers?: readonly RemoteComputer[];
   devices: readonly RemoteDevice[] | (() => readonly RemoteDevice[] | Promise<readonly RemoteDevice[]>);
   push?: boolean;
   pushSender?: PushSender;
@@ -709,12 +711,15 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     response.setHeader("Content-Security-Policy",
       "default-src 'none'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; media-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
     try {
+      const method = request.method;
+      const portalDocument = method === "GET" && (route === "/remote" || route === "/remote/");
+      const topLevelNavigation = portalDocument && request.headers["sec-fetch-mode"] === "navigate" &&
+        request.headers["sec-fetch-dest"] === "document";
       if (url.origin !== origin.origin || request.headers.host?.toLowerCase() !== origin.host ||
-        request.headers["sec-fetch-site"] === "cross-site" ||
+        (request.headers["sec-fetch-site"] === "cross-site" && !topLevelNavigation) ||
         (request.headers.origin !== undefined && request.headers.origin !== origin.origin)) {
         throw new HttpError(403, "This portal must be accessed from its configured origin.");
       }
-      const method = request.method;
       if (method === "GET" && route === "/remote/sw.js") {
         response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
         response.end(remoteWorker);
@@ -725,7 +730,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         response.end(JSON.stringify(remoteManifest));
         return true;
       }
-      if (method === "GET" && (route === "/remote" || route === "/remote/" || route === "/remote/app.js")) {
+      if (portalDocument || method === "GET" && route === "/remote/app.js") {
         const script = route.endsWith(".js");
         response.writeHead(200, { "Content-Type": script ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
         response.end(script ? remoteScript : remotePage);
@@ -739,6 +744,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       if (method === "GET" && route === "/remote/api/session") {
         send(response, 200, { ...scope, pairingId, ...(runtime.voiceInputAvailable ? { voiceInput: true } : {}),
           ...(runtime.voiceOutputAvailable ? { voiceOutput: true } : {}),
+          ...(options.computers?.length ? { computers: options.computers } : {}),
           ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true, sharedRooms: true } : {}) });
       } else if (method === "POST" && route === "/remote/api/transcriptions") {
         if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "audio/wav") {

@@ -562,6 +562,20 @@ daemon 配置 `SILICONFLOW_API_KEY` 后，支持录音的配对浏览器会显�
 
 服务监听本机 `127.0.0.1`。真实手机访问时，将用户已有 HTTPS 代理的 canonical origin 写入 `remoteOrigin`，并让代理只转发 `/remote` 与 `/remote/*`。保持原始 Host；不要向手机暴露 `/v1` 管理 API。页面令牌存于 sessionStorage，恢复同一设备会话后继续原任务。
 
+有多台 Kada 电脑时，可在每台电脑配置同一份 `remoteComputers` 清单。每台电脑的 `remoteOrigin` 使用自己的 HTTPS 地址。
+
+```json
+{
+  "remoteOrigin": "https://studio.example.net",
+  "remoteComputers": [
+    { "name": "Studio", "origin": "https://studio.example.net" },
+    { "name": "Office", "origin": "https://office.example.net" }
+  ]
+}
+```
+
+配对后展开页面上的 **Computer**，选择目标电脑。首次到达时使用目标电脑签发的配对令牌。在该电脑新开的任务由该电脑执行。选回原电脑可以接回原任务和保存在同一浏览器里的草稿。 [电脑选择实现和验收](superpowers/plans/2026-11-27-remote-computer-selection.md)
+
 要在网页关闭后接收任务待答、子任务待答、确认或完成提醒，在同一份配置设置 `"remotePush": true` 并重启 daemon。手机配对后点击 **Enable task notifications**，再允许浏览器通知。iOS 需先把手机入口添加到主屏幕。通知仅展示通用提醒，点击后进入原设备会话。若浏览器未保留配对令牌，页面会先要求配对。可以在页面点击 **Disable task notifications**，本机也可撤销设备配对。
 
 浏览器清除订阅后，回到门户可重新点击 **Enable task notifications**。如果 daemon 所在网络要求通过 HTTP 代理访问 FCM，可在启动 Node 前配置 `HTTPS_PROXY` 和 `NODE_USE_ENV_PROXY=1`，用 `NO_PROXY` 保留本机直连。 [传输与恢复验收](specs/2026-11-24-assistant-capability-parity.md#已定位的能力差距)
