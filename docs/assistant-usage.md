@@ -310,6 +310,8 @@ npm run harness -- work-items calendar-clear --workspace E:/project
 
 创建周期日程可附带 RFC 5545 重复规则。修改时，审批会显示选中的系列 ID、变更范围和对应的起始时间。 [周期日程](superpowers/plans/2026-11-27-project-calendar.md#聊天查询及审批写入)
 
+创建日程时可请求 Google Meet 链接。为 `respond-to-event` 开启逐次审批后，助手可用绑定日历账号回复原邀请，审批会显示回复状态、备注和是否通知其他来宾。
+
 打开看板的截止日历即可浏览本月外部日程。工作项日期沿其保存时区显示，外部日程沿日历来源所选时区显示。 [工具契约与验收](superpowers/plans/2026-11-27-project-calendar.md)
 
 ### Gmail

@@ -18,6 +18,8 @@ Rakazo 为获得授权的账号读取即将发生的日程。Google Calendar MCP
 
 普通日程更新只使用事件 ID 和修改字段。创建周期日程可提交 RFC 5545 规则。读取周期实例时保留原系列 ID 和原开始时间，编辑可选单次、从指定实例起的后续日程或整个系列。审批保存所选范围及该范围要求的时间。合成服务按上游规则拒绝缺少原开始时间的单次范围及缺少分界的后续范围。 [Calendar MCP 规则](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/tools/registry.ts#L622) · [更新分派](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/handlers/core/UpdateEventHandler.ts#L125) · [回归](../../../test/project-calendar.test.ts)
 
+创建审批可包含 Google Meet 请求，会议请求使用原工具调用的稳定事件 ID。日程列表可返回 Google Meet 链接。邀请回复沿用所选账号和原日程，审批保存回复状态、备注、周期范围和通知选项。合成回归核对 Meet 请求及原账号回复邀请的准确参数。 [会议创建](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/handlers/core/CreateEventHandler.ts#L142) · [邀请回复实现](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/handlers/core/RespondToEventHandler.ts#L22) · [回归](../../../test/project-calendar.test.ts)
+
 ## 浏览器项目绑定
 
 项目 MCP 设置页显示当前 Gmail 与 Google 日历绑定。候选连接按项目已启用的只读工具及其修订计算。页面持原项目授权，保存与解除复用终端的来源配置，储存失败时保留表单输入。真实 Chromium 在合成连接上验证两种绑定、无效时区恢复、刷新后读回配置及单独解除 Gmail。 [Rakazo 的已连接应用列表](https://github.com/elie222/rakazo/blob/e64d73292179/apps/mobile/components/integrations/connected-apps.tsx#L58) · [项目范围 API 回归](../../../test/mcp-tools.test.ts)

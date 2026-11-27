@@ -23,7 +23,7 @@ const calendarServer = `
       'tools/list': { tools: [
         { name: 'list-events', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
         { name: 'get-freebusy', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
-        ...['create-event','update-event','delete-event'].map(name => ({
+        ...['create-event','update-event','delete-event','respond-to-event'].map(name => ({
           name, inputSchema: { type: 'object' }, annotations: { readOnlyHint: false },
         })),
       ] },
@@ -47,10 +47,11 @@ const calendarServer = `
         payload.events.push({
           ...event('series-instance', 'Weekly review', {dateTime:'2026-11-09T15:00:00Z'}, {dateTime:'2026-11-09T16:00:00Z'}),
           recurringEventId:'series',originalStartTime:{dateTime:'2026-11-09T10:00:00-05:00'},
+          hangoutLink:'https://meet.google.com/abc-defg-hij',
         });
         results['tools/call'].content[0].text = JSON.stringify(payload);
       }
-      if (['create-event','update-event','delete-event'].includes(request.params.name)) {
+      if (['create-event','update-event','delete-event','respond-to-event'].includes(request.params.name)) {
         const validScope = request.params.name !== 'update-event' ||
           ((!args.modificationScope || args.eventId === 'series') &&
            (args.modificationScope !== 'thisEventOnly' || !!args.originalStartTime) &&
@@ -137,7 +138,8 @@ test('project calendar mutations dispatch the approved target once and reject a 
       }),{stopReason:'toolUse'});
     }
     const recurringEdit = initial.includes('Edit future');
-    const operation = initial.includes('Edit original') || recurringEdit ? 'update' : initial.includes('Cancel original') ? 'delete' : 'create';
+    const operation = initial.includes('Edit original') || recurringEdit ? 'update'
+      : initial.includes('Cancel original') ? 'delete' : initial.includes('RSVP') ? 'respond' : 'create';
     const tool = 'project_calendar_' + operation;
     const requested = context.messages.some(message => message.role === 'toolResult' && message.toolName === tool);
     if (!hasTool(context, tool)) return fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Calendar unavailable.', artifacts:[] }),{ stopReason:'toolUse' });
@@ -145,7 +147,9 @@ test('project calendar mutations dispatch the approved target once and reject a 
       ? recurringEdit ? {eventId:'series',summary:'Updated future review',modificationScope:'thisAndFollowing',futureStartDate:start}
         : {eventId:'timed',summary:'Revised review'}
       : operation === 'delete' ? {eventId:'timed',notifyGuests:true}
+      : operation === 'respond' ? {eventId:'timed',response:'tentative',comment:'I may be late.',notifyGuests:true}
       : {summary:'Budget review',start,end,attendees:['guest@example.invalid'],
+        ...(initial.includes('Meet link') ? {googleMeet:true} : {}),
         ...(initial.includes('recurring review') ? {recurrence:recurring} : {})};
     return requested ? fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Reviewed the action outcome.', artifacts:[],
       ...(viaChat ? {criteria:[{id:1,status:'passed',evidence:'The approved Calendar call returned a confirmed event ID.'}]} : {}),
@@ -159,7 +163,7 @@ test('project calendar mutations dispatch the approved target once and reject a 
   await writeFile(log,'');
   await mcp.configure({ id:'calendar', transport:'stdio', command:process.execPath, args:['-e',calendarServer,log] });
   const { revision } = await mcp.test('calendar');
-  const mutations = ['create-event','update-event','delete-event'];
+  const mutations = ['create-event','update-event','delete-event','respond-to-event'];
   await mcp.enable('calendar',['list-events',...mutations],revision);
   await mcp.setApproval('calendar',mutations,revision);
   const source = { id:'calendar', revision, account:'work', calendarId:'primary', timeZone:'America/New_York', allowAssistant:true };
@@ -176,12 +180,14 @@ test('project calendar mutations dispatch the approved target once and reject a 
     assert.equal(status.status,'waiting_user');
     return { run, approval:status.approvals[0]! };
   };
-  const {run,approval} = await request('Schedule the budget review from this chat and invite the specified guest.',true);
+  const {run,approval} = await request('Schedule the budget review from this chat with a Meet link and invite the specified guest.',true);
   assert.equal(approval.tool,'create-event');
+  const eventId = (approval.arguments as {eventId:string}).eventId;
   assert.deepEqual(approval.arguments,{
     account:'work', calendarId:'primary', timeZone:'America/New_York',
-    eventId:(approval.arguments as {eventId:string}).eventId, summary:'Budget review', start,end,
+    eventId,summary:'Budget review',start,end,
     attendees:[{email:'guest@example.invalid'}], sendUpdates:'all',
+    conferenceData:{createRequest:{requestId:eventId,conferenceSolutionKey:{type:'hangoutsMeet'}}},
   });
   assert.match((approval.arguments as {eventId:string}).eventId,/^[0-9a-f]{64}$/);
   assert.deepEqual(await writes(),[]);
@@ -221,12 +227,20 @@ test('project calendar mutations dispatch the approved target once and reject a 
   await until(() => runtime.status(editSeries.run.id), row => row.approvals[0]?.status === 'completed');
   assert.deepEqual((await writes()).slice(3),[{name:'create-event',args:series.approval.arguments},
     {name:'update-event',args:editSeries.approval.arguments}]);
+  const response = await request('RSVP to the original event.');
+  assert.equal(response.approval.tool,'respond-to-event');
+  assert.deepEqual(response.approval.arguments,{account:'work',calendarId:'primary',eventId:'timed',response:'tentative',
+    comment:'I may be late.',sendUpdates:'all'});
+  assert.equal((await writes()).length,5);
+  await runtime.decideApproval(response.run.id,response.approval.id,'allow',response.approval.digest);
+  await until(() => runtime.status(response.run.id),row => row.approvals[0]?.status==='completed');
+  assert.deepEqual((await writes()).at(-1),{name:'respond-to-event',args:response.approval.arguments});
 
   const stale = await request();
   await runtime.calendars.setSource(f.workspace,{ ...source, calendarId:'different' });
   await runtime.decideApproval(stale.run.id,stale.approval.id,'allow',stale.approval.digest);
   await until(() => runtime.status(stale.run.id), row => row.approvals[0]?.status === 'stale');
-  assert.equal((await writes()).length,5);
+  assert.equal((await writes()).length,6);
 });
 
 test('an opted-in local chat reads the requested days of its project calendar and honors a later revocation', async t => {
@@ -270,6 +284,7 @@ test('an opted-in local chat reads the requested days of its project calendar an
   const series = JSON.parse(listText.text).events.find((event: {id:string}) => event.id === 'series-instance');
   assert.equal(series.seriesId,'series');
   assert.equal(series.originalStartTime,'2026-11-09T10:00:00-05:00');
+  assert.equal(series.meetUrl,'https://meet.google.com/abc-defg-hij');
   assert.doesNotMatch(JSON.stringify(schedule.messages),/All-day event|Other account|private event notes/);
   const slots = schedule.messages.find(message => message.role === 'toolResult' && message.toolName === availability);
   assert(slots && slots.role === 'toolResult' && !slots.isError);
