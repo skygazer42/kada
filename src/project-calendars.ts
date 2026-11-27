@@ -10,7 +10,8 @@ import { atomicJson, errorText, readJson, redactCredentials, SerialQueue } from 
 import { localCalendarDay } from './work-items.js';
 
 type CalendarSource = { id: string; revision: string; account: string; calendarId: string; timeZone: string; allowAssistant?: boolean };
-type CalendarEvent = { id: string; title: string; day: string; start: string; end: string; allDay: boolean };
+type CalendarEvent = { id: string; title: string; day: string; start: string; end: string; allDay: boolean;
+  seriesId?: string; originalStartTime?: string };
 export const calendarMutations = ['create-event','update-event','delete-event'] as const;
 export type CalendarMutation = typeof calendarMutations[number];
 export const calendarFreeBusyTool = 'get-freebusy';
@@ -78,10 +79,14 @@ function projectEvent(value: unknown, timeZone: string, from: string, to: string
   const start = record(event?.start), end = record(event?.end);
   if (!event || typeof event.id !== 'string' || !event.id || !start || !end) throw new Error('Invalid calendar event.');
   const id = event.id, title = typeof event.summary === 'string' && event.summary.trim() ? redactCredentials(event.summary.slice(0, 500)) : '未命名日程';
+  const original = record(event.originalStartTime);
+  const originalStartTime = original?.dateTime ?? original?.date;
+  const recurring = typeof event.recurringEventId === 'string' ? {seriesId:event.recurringEventId,
+    ...(typeof originalStartTime === 'string' ? {originalStartTime} : {})} : {};
   if (dateOnly(start.date) && dateOnly(end.date)) {
     if (start.date >= end.date) throw new Error('Invalid all-day event.');
     if (start.date >= to || end.date <= from) return;
-    return { id, title, start: start.date, end: end.date, day: start.date < from ? from : start.date, allDay: true };
+    return { id, title, start: start.date, end: end.date, day: start.date < from ? from : start.date, allDay: true, ...recurring };
   }
   if (typeof start.dateTime !== 'string' || typeof end.dateTime !== 'string') throw new Error('Invalid calendar event time.');
   const startAt = explicitInstant(start.dateTime, 'Calendar start'), endAt = explicitInstant(end.dateTime, 'Calendar end');
@@ -89,7 +94,7 @@ function projectEvent(value: unknown, timeZone: string, from: string, to: string
   const day = localCalendarDay(startAt, timeZone);
   const lastDay = localCalendarDay(Math.max(startAt, endAt - 1), timeZone);
   if (day >= to || lastDay < from) return;
-  return { id, title, day: day < from ? from : day, start: new Date(startAt).toISOString(), end: new Date(endAt).toISOString(), allDay: false };
+  return { id, title, day: day < from ? from : day, start: new Date(startAt).toISOString(), end: new Date(endAt).toISOString(), allDay: false, ...recurring };
 }
 
 export class ProjectCalendars {
@@ -213,7 +218,7 @@ export class ProjectCalendars {
     const startDate = from, endDate = to;
     const payload = await this.readTool(project,source,'list-events',{
       account, calendarId, timeZone, timeMin: from + 'T00:00:00', timeMax: to + 'T00:00:00',
-      fields: ['id', 'summary', 'start', 'end', 'status'],
+      fields: ['id', 'summary', 'start', 'end', 'status', 'recurringEventId', 'originalStartTime'],
     },expected?.signal);
     try {
       if (!Array.isArray(payload.events) || Array.isArray(payload.partialFailures) && payload.partialFailures.length) throw new Error('Unexpected calendar response.');
@@ -309,6 +314,8 @@ export function projectCalendarWrites(calendars: ProjectCalendars, scope: Applic
   const time = Type.String({ minLength:1,maxLength:40 });
   const description = Type.Optional(Type.String({ maxLength:4000 }));
   const location = Type.Optional(Type.String({ maxLength:500 }));
+  const recurrence = Type.Optional(Type.Array(Type.String({pattern:'^(?:RRULE|RDATE|EXDATE)[:;][^\\r\\n]+$',maxLength:1024}),
+    {maxItems:20}));
   const eventId = Type.String({ pattern:'^[A-Za-z0-9_-]{1,1024}$' });
   const guests = Type.Optional(Type.Array(Type.String({ pattern:'^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$',maxLength:320 }),{ maxItems:50,uniqueItems:true }));
   const stage = async (tool: CalendarMutation, input: Record<string,unknown>, api: ToolExecutionApi, context: Context) => {
@@ -320,19 +327,20 @@ export function projectCalendarWrites(calendars: ProjectCalendars, scope: Applic
   };
   const create = defineTool({
     name:'project_calendar_create',
-    description:'Propose creating one event on the authorized project calendar. Supply dates for an all-day event or timestamps with explicit UTC offsets. Listed attendees receive invitations after approval. Call this tool alone.',
+    description:'Propose creating one event on the authorized project calendar. Supply dates for an all-day event or timestamps with explicit UTC offsets. Optional recurrence uses RFC 5545 rules. Listed attendees receive invitations after approval. Call this tool alone.',
     parameters:Type.Object({
-      summary, start:time, end:time, description, location, attendees:guests,
+      summary, start:time, end:time, description, location, recurrence, attendees:guests,
     },{ additionalProperties:false }),
     replay:'safe',
     executionMode:'sequential',
-    execute:async ({ summary, start, end, description, location, attendees }, api, context) => {
+    execute:async ({ summary, start, end, description, location, recurrence, attendees }, api, context) => {
       if (!summary.trim()) throw new CalendarError(400, 'Provide a title.');
       validateEventTime(start,end);
       const eventId = createHash('sha256').update(JSON.stringify([taskId,String(api.taskId),scope.fingerprint])).digest('hex');
       return stage('create-event',{
         eventId,summary:summary.trim(),start,end,
         ...(description ? { description } : {}), ...(location ? { location } : {}),
+        ...(recurrence ? {recurrence} : {}),
         ...(attendees?.length ? { attendees:attendees.map(email => ({email})) } : {}),
         sendUpdates:attendees?.length ? 'all' : 'none',
       },api,context);
@@ -340,18 +348,28 @@ export function projectCalendarWrites(calendars: ProjectCalendars, scope: Applic
   });
   const update = defineTool({
     name:'project_calendar_update',
-    description:'Propose editing a single original event on the project calendar. Use its ID from the calendar list. Supply both times to reschedule. Set notifyGuests when the user requests update notifications. Call this tool alone.',
+    description:'Propose editing the original calendar event. For a series update use its seriesId from the calendar list. Select thisEventOnly with originalStartTime, thisAndFollowing with futureStartDate, or all. Supply both times to reschedule. Call this tool alone.',
     parameters:Type.Object({
       eventId, summary:Type.Optional(summary), start:Type.Optional(time), end:Type.Optional(time),
-      description, location, attendees:guests, notifyGuests:Type.Optional(Type.Boolean()),
+      description, location, recurrence, attendees:guests, notifyGuests:Type.Optional(Type.Boolean()),
+      modificationScope:Type.Optional(Type.Union([Type.Literal('thisEventOnly'),Type.Literal('thisAndFollowing'),Type.Literal('all')])),
+      originalStartTime:Type.Optional(time),futureStartDate:Type.Optional(time),
     },{ additionalProperties:false }),
     replay:'safe', executionMode:'sequential',
-    execute:async ({ eventId, attendees, notifyGuests, ...changes },api,context) => {
+    execute:async ({ eventId, attendees, notifyGuests, modificationScope, originalStartTime, futureStartDate, ...changes },api,context) => {
       if (!Object.keys(changes).length && attendees === undefined) throw new CalendarError(400, 'Provide at least one event change.');
       if (changes.summary !== undefined && !changes.summary.trim()) throw new CalendarError(400, 'Provide a title.');
       validateEventTime(changes.start,changes.end);
+      if ((modificationScope === 'thisEventOnly') !== (originalStartTime !== undefined) ||
+        (modificationScope === 'thisAndFollowing') !== (futureStartDate !== undefined)) {
+        throw new CalendarError(400,'Provide the original occurrence time for a single change or the starting time for future changes.');
+      }
+      const occurrenceTime = originalStartTime ?? futureStartDate;
+      if (occurrenceTime && !dateOnly(occurrenceTime)) explicitInstant(occurrenceTime,'Recurring occurrence time');
       return stage('update-event',{
-        eventId,...changes,modificationScope:'thisEventOnly',sendUpdates:notifyGuests ? 'all' : 'none',
+        eventId,...changes,sendUpdates:notifyGuests ? 'all' : 'none',
+        ...(modificationScope ? {modificationScope} : {}),
+        ...(originalStartTime ? {originalStartTime} : {}),...(futureStartDate ? {futureStartDate} : {}),
         ...(attendees === undefined ? {} : {attendees:attendees.map(email => ({email}))}),
       },api,context);
     },

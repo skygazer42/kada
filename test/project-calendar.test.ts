@@ -42,9 +42,23 @@ const calendarServer = `
           args.timeZone !== 'America/New_York') {
         results['tools/call'] = { isError: true, content: [{ type: 'text', text: 'Incorrect calendar query' }] };
       }
+      if (request.params.name === 'list-events' && args.timeMin === '2026-11-09T00:00:00' && !results['tools/call'].isError) {
+        const payload = JSON.parse(results['tools/call'].content[0].text);
+        payload.events.push({
+          ...event('series-instance', 'Weekly review', {dateTime:'2026-11-09T15:00:00Z'}, {dateTime:'2026-11-09T16:00:00Z'}),
+          recurringEventId:'series',originalStartTime:{dateTime:'2026-11-09T10:00:00-05:00'},
+        });
+        results['tools/call'].content[0].text = JSON.stringify(payload);
+      }
       if (['create-event','update-event','delete-event'].includes(request.params.name)) {
-        fs.appendFileSync(process.argv[1], JSON.stringify({ name:request.params.name,args }) + '\\n');
-        results['tools/call'] = { content: [{ type:'text', text:'Confirmed action for ' + args.eventId }] };
+        const validScope = request.params.name !== 'update-event' ||
+          ((!args.modificationScope || args.eventId === 'series') &&
+           (args.modificationScope !== 'thisEventOnly' || !!args.originalStartTime) &&
+           (args.modificationScope !== 'thisAndFollowing' || !!args.futureStartDate));
+        if (validScope) fs.appendFileSync(process.argv[1], JSON.stringify({ name:request.params.name,args }) + '\\n');
+        results['tools/call'] = { isError:!validScope,content:[{
+          type:'text',text:validScope ? 'Confirmed action for ' + args.eventId : 'Provider rejected the recurring scope.',
+        }] };
       }
       if (request.params.name === 'get-freebusy' && args.account === 'work' && args.calendars?.length === 1 &&
           args.calendars[0].id === 'primary' && args.timeZone === 'America/New_York') {
@@ -111,6 +125,7 @@ test('the workboard reads one bound calendar in the selected month and honors cu
 
 test('project calendar mutations dispatch the approved target once and reject a later rebind', async t => {
   const start = '2026-11-09T10:00:00-05:00', end = '2026-11-09T11:00:00-05:00';
+  const recurring = ['RRULE:FREQ=WEEKLY;COUNT=5'];
   const f = await scriptedFixture(context => {
     const initial = JSON.stringify(context.messages.find(message => message.role === 'user')?.content);
     const viaChat = initial.includes('from this chat');
@@ -121,12 +136,17 @@ test('project calendar mutations dispatch the approved target once and reject a 
         criteria:[{text:'The requested calendar event is created',method:'inspect'}],assumptions:[],questions:[],
       }),{stopReason:'toolUse'});
     }
-    const operation = initial.includes('Edit original') ? 'update' : initial.includes('Cancel original') ? 'delete' : 'create';
+    const recurringEdit = initial.includes('Edit future');
+    const operation = initial.includes('Edit original') || recurringEdit ? 'update' : initial.includes('Cancel original') ? 'delete' : 'create';
     const tool = 'project_calendar_' + operation;
     const requested = context.messages.some(message => message.role === 'toolResult' && message.toolName === tool);
     if (!hasTool(context, tool)) return fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Calendar unavailable.', artifacts:[] }),{ stopReason:'toolUse' });
-    const args = operation === 'update' ? {eventId:'timed',summary:'Revised review'} : operation === 'delete'
-      ? {eventId:'timed',notifyGuests:true} : { summary:'Budget review', start,end, attendees:['guest@example.invalid'] };
+    const args = operation === 'update'
+      ? recurringEdit ? {eventId:'series',summary:'Updated future review',modificationScope:'thisAndFollowing',futureStartDate:start}
+        : {eventId:'timed',summary:'Revised review'}
+      : operation === 'delete' ? {eventId:'timed',notifyGuests:true}
+      : {summary:'Budget review',start,end,attendees:['guest@example.invalid'],
+        ...(initial.includes('recurring review') ? {recurrence:recurring} : {})};
     return requested ? fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Reviewed the action outcome.', artifacts:[],
       ...(viaChat ? {criteria:[{id:1,status:'passed',evidence:'The approved Calendar call returned a confirmed event ID.'}]} : {}),
     }),{ stopReason:'toolUse' })
@@ -177,7 +197,7 @@ test('project calendar mutations dispatch the approved target once and reject a 
   const edit = await request('Edit original appointment.');
   assert.equal(edit.approval.tool,'update-event');
   assert.deepEqual(edit.approval.arguments,{account:'work',calendarId:'primary',timeZone:'America/New_York',
-    eventId:'timed',summary:'Revised review',modificationScope:'thisEventOnly',sendUpdates:'none'});
+    eventId:'timed',summary:'Revised review',sendUpdates:'none'});
   await runtime.decideApproval(edit.run.id,edit.approval.id,'allow',edit.approval.digest);
   await until(() => runtime.status(edit.run.id), row => row.approvals[0]?.status === 'completed');
 
@@ -190,11 +210,23 @@ test('project calendar mutations dispatch the approved target once and reject a 
   assert.deepEqual((await writes()).slice(1),[{name:'update-event',args:edit.approval.arguments},
     {name:'delete-event',args:cancellation.approval.arguments}]);
 
+  const series = await request('Create a recurring review.');
+  assert.deepEqual((series.approval.arguments as {recurrence:string[]}).recurrence,recurring);
+  await runtime.decideApproval(series.run.id,series.approval.id,'allow',series.approval.digest);
+  await until(() => runtime.status(series.run.id), row => row.approvals[0]?.status === 'completed');
+  const editSeries = await request('Edit future review occurrences.');
+  assert.deepEqual(editSeries.approval.arguments,{account:'work',calendarId:'primary',timeZone:'America/New_York',
+    eventId:'series',summary:'Updated future review',modificationScope:'thisAndFollowing',futureStartDate:start,sendUpdates:'none'});
+  await runtime.decideApproval(editSeries.run.id,editSeries.approval.id,'allow',editSeries.approval.digest);
+  await until(() => runtime.status(editSeries.run.id), row => row.approvals[0]?.status === 'completed');
+  assert.deepEqual((await writes()).slice(3),[{name:'create-event',args:series.approval.arguments},
+    {name:'update-event',args:editSeries.approval.arguments}]);
+
   const stale = await request();
   await runtime.calendars.setSource(f.workspace,{ ...source, calendarId:'different' });
   await runtime.decideApproval(stale.run.id,stale.approval.id,'allow',stale.approval.digest);
   await until(() => runtime.status(stale.run.id), row => row.approvals[0]?.status === 'stale');
-  assert.equal((await writes()).length,3);
+  assert.equal((await writes()).length,5);
 });
 
 test('an opted-in local chat reads the requested days of its project calendar and honors a later revocation', async t => {
@@ -231,6 +263,13 @@ test('an opted-in local chat reads the requested days of its project calendar an
   const schedule = await wait(task.id);
   assert.equal(schedule.goal,undefined);
   assert.match(JSON.stringify(schedule.messages),/Afternoon review/);
+  const eventList = schedule.messages.find(message => message.role === 'toolResult' && message.toolName === tool);
+  assert(eventList && eventList.role === 'toolResult');
+  const listText = eventList.content.find(part => part.type === 'text');
+  assert(listText?.type === 'text');
+  const series = JSON.parse(listText.text).events.find((event: {id:string}) => event.id === 'series-instance');
+  assert.equal(series.seriesId,'series');
+  assert.equal(series.originalStartTime,'2026-11-09T10:00:00-05:00');
   assert.doesNotMatch(JSON.stringify(schedule.messages),/All-day event|Other account|private event notes/);
   const slots = schedule.messages.find(message => message.role === 'toolResult' && message.toolName === availability);
   assert(slots && slots.role === 'toolResult' && !slots.isError);

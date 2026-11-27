@@ -308,6 +308,8 @@ npm run harness -- work-items calendar-clear --workspace E:/project
 
 要让助手创建、修改或取消日程，在这条连接上启用所需的 `create-event`、`update-event` 或 `delete-event`，并用 `mcp approval` 为相应工具开启逐次审批。在项目执行任务中，用 `/approvals` 查看原日历、事件 ID、变更字段和邀请设置，再用 `/allow` 或 `/deny` 处理。派发前会复核项目当前的日历绑定和工具许可。 [日历工具及验收](superpowers/plans/2026-11-27-project-calendar.md)
 
+创建周期日程可附带 RFC 5545 重复规则。修改时，审批会显示选中的系列 ID、变更范围和对应的起始时间。 [周期日程](superpowers/plans/2026-11-27-project-calendar.md#聊天查询及审批写入)
+
 打开看板的截止日历即可浏览本月外部日程。工作项日期沿其保存时区显示，外部日程沿日历来源所选时区显示。 [工具契约与验收](superpowers/plans/2026-11-27-project-calendar.md)
 
 ### Gmail
