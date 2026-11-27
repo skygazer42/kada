@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 export interface ModelRef { provider: string; modelId: string }
 export interface RemoteComputer { name: string; origin: string }
 export type GithubWebhookConfig = { routineId: string; secretEnv: string };
+export interface TelegramConfig { userId: number; botTokenEnv: string; pairingTokenEnv: string }
 export interface ComputerConfig {
   command: string;
   args?: string[];
@@ -39,6 +40,7 @@ export interface Config {
   remoteOrigin?: string;
   remoteComputers?: RemoteComputer[];
   remotePush?: boolean;
+  telegram?: TelegramConfig;
   githubIssuePolling?: string[];
   githubIssueTokenEnv?: string;
   githubWebhooks?: GithubWebhookConfig[];
@@ -139,6 +141,19 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
       throw new Error("remoteComputers must contain unique origins.");
     }
   }
+  let telegram: TelegramConfig | undefined;
+  if (raw.telegram !== undefined) {
+    const input = raw.telegram as Partial<TelegramConfig> | null;
+    const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+      Object.keys(input).some(key => !["userId", "botTokenEnv", "pairingTokenEnv"].includes(key)) ||
+      typeof input.userId !== "number" || !Number.isSafeInteger(input.userId) || input.userId < 1 ||
+      typeof input.botTokenEnv !== "string" || !envName.test(input.botTokenEnv) ||
+      typeof input.pairingTokenEnv !== "string" || !envName.test(input.pairingTokenEnv)) {
+      throw new Error("telegram requires a private userId and botTokenEnv and pairingTokenEnv variable names.");
+    }
+    telegram = { userId: input.userId, botTokenEnv: input.botTokenEnv, pairingTokenEnv: input.pairingTokenEnv };
+  }
   const maxEstimatedCostUsd = raw.maxEstimatedCostUsd ?? 1;
   if (typeof maxEstimatedCostUsd !== "number" || !Number.isFinite(maxEstimatedCostUsd) || maxEstimatedCostUsd <= 0) throw new Error("maxEstimatedCostUsd must be a positive number");
   return {
@@ -158,6 +173,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     discovery: optionalBoolean(raw.discovery, "discovery", true),
     ...(optionalBoolean(raw.remotePush, "remotePush", false) ? { remotePush: true } : {}),
     ...(remoteComputers?.length ? { remoteComputers } : {}),
+    ...(telegram ? { telegram } : {}),
     ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
     ...(githubIssueTokenEnv ? { githubIssueTokenEnv } : {}),
     ...(githubWebhooks ? { githubWebhooks: githubWebhooks.map(({ routineId, secretEnv }) => ({ routineId, secretEnv })) } : {}),

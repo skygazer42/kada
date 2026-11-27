@@ -580,6 +580,34 @@ daemon 配置 `SILICONFLOW_API_KEY` 后，支持录音的配对浏览器会显�
 
 浏览器清除订阅后，回到门户可重新点击 **Enable task notifications**。如果 daemon 所在网络要求通过 HTTP 代理访问 FCM，可在启动 Node 前配置 `HTTPS_PROXY` 和 `NODE_USE_ENV_PROXY=1`，用 `NO_PROXY` 保留本机直连。 [传输与恢复验收](specs/2026-11-24-assistant-capability-parity.md#已定位的能力差距)
 
+## Telegram 私聊入口
+
+在运行 Kada daemon 的电脑上，为 Telegram 配一个专用的 Kada 设备。
+
+```powershell
+npm run harness -- remote pair telegram bot
+```
+
+在 daemon 使用的配置文件中添加 `telegram`。将 Telegram Bot 令牌和上面签发的 Kada 配对令牌放入对应的环境变量。把示例 `userId` 换成你的 Telegram 数字用户 ID。
+
+```json
+{
+  "telegram": {
+    "userId": 123456789,
+    "botTokenEnv": "KADA_TELEGRAM_BOT_TOKEN",
+    "pairingTokenEnv": "KADA_TELEGRAM_PAIRING_TOKEN"
+  }
+}
+```
+
+```powershell
+npm run harness -- telegram
+```
+
+保持这条命令运行以收发 Telegram 私聊。直接发送文字，或在发送 5 MiB 以内的文档时附上任务说明。按 **Confirm this brief** 确认显示的任务说明。主任务或子任务提问时，回复那条 Bot 消息即可。产物作为 Telegram 文档返回。
+
+`/new` 开新聊天。回复原 Bot 消息可继续那条聊天。`/status` 查看原任务和未取得回执的发送，同时重新显示当前待确认或待答内容。`/delivery` 明确请求再发当前任务的核验产物。停止连接器期间，daemon 中已受理的任务可以继续执行。重新运行连接器会接回原会话和回执。 [实现与测试](superpowers/plans/2026-11-27-telegram.md)
+
 ## 电脑接管与分工
 
 ```powershell

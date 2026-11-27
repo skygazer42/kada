@@ -58,12 +58,12 @@ export function createRemoteCredential() {
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const shaPattern = /^[0-9a-f]{64}$/;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
-const attachmentLimit = 5 * 1024 * 1024;
+export const attachmentLimit = 5 * 1024 * 1024;
 const originalArchiveLimit = 50 * 1024 * 1024;
 const downloadLimit = 25 * 1024 * 1024;
 const uploadLifetime = 60 * 60_000;
 const maxAttachments = 4;
-const supportedTypes = new Set([
+export const supportedTypes: ReadonlySet<string> = new Set([
   "application/octet-stream", "application/json", "application/pdf",
   "image/png", "image/jpeg", "image/gif", "image/webp",
   "text/plain", "text/csv", "text/markdown", "text/tab-separated-values",
