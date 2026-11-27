@@ -530,6 +530,14 @@ npm run harness -- remote unshare-thread-controls 会话ID 账户ID 设备ID
 npm run harness -- remote unshare-thread 会话ID 账户ID 设备ID
 ```
 
+要让同一账户的配对设备访问共享会话，使用 `remote grant-thread-account`。将角色设为 `participant` 可回复原问题。可分别加 `files` 授予已验收产物的下载权限，或加 `controls` 授予确认方案和控制原任务的权限。降级或撤回时，之后的请求按当前授权检查。 [共享任务账户授权](superpowers/plans/2026-11-26-shared-thread-controls.md#共享任务账户授权)
+
+```powershell
+npm run harness -- remote grant-thread-account 会话ID research participant files controls
+npm run harness -- remote thread-accounts 会话ID
+npm run harness -- remote revoke-thread-account 会话ID research
+```
+
 从 **Pending work** 直接打开本设备待处理的原会话。会话下拉列表也将待处理会话排在前面，并显示待答问题、等待原因和交付状态。连接、回到页面或点击 **Refresh** 都会更新列表。展开 **Task history** 可查看原会话中的请求补充、确认和交付阶段。
 
 手机发起的任务经确认后可以在同一会话工作区内分派后台子任务。子任务提问时，可在原会话的问题卡中填写 **Answer** 并提交。页面轮询会保留当前输入。若回复回执丢失，可用 **Retry answer** 按原请求 ID 重试。答复进入提出问题的 Pi 子会话。

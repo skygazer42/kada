@@ -824,6 +824,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             throw error;
           });
           if (meta.remotePolicy || meta.room) throw new HttpError(404, 'Shared thread not found.');
+          if (action?.startsWith('artifacts/') && !grant.files) throw new HttpError(403, 'The host has not shared artifact downloads for this thread.');
           if (input && (action === 'confirm' || action === 'control')) {
             if (!grant.controls) throw new HttpError(403, 'The host has not shared control access to this thread.');
             if (action === 'confirm') {
@@ -876,9 +877,9 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             brief, briefDigest: brief ? status.briefDigest : null, controls: grant.controls ? status.remoteControls : [],
             controlVersion: grant.controls ? status.remoteControlVersion : null,
             summary: status.status === 'completed' ? redactCredentials(status.goal?.candidate?.summary ?? '') : null,
-            artifacts: verifiedArtifacts(status, basePath).map(({ snapshot: _snapshot, ...artifact }) => artifact),
+            artifacts: grant.files ? verifiedArtifacts(status, basePath).map(({ snapshot: _snapshot, ...artifact }) => artifact) : [],
           };
-        });
+        }, 'shared-threads');
         if (!result) throw new HttpError(401, 'Enter this device’s pairing token.');
         if (result !== true) send(response, 200, result);
       } else if (options.sharedDevices && workItem) {

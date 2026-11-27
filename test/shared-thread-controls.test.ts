@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { createClient } from '../src/client.js';
 import { serve } from '../src/server.js';
@@ -109,4 +113,77 @@ test('a paired device confirms and controls the same shared task under its indep
   const cancel = (version: string) => fetch(originalChatUrl + '/control', { method: 'POST', headers, body: JSON.stringify({ action: 'cancel', version }) });
   assert.equal((await cancel(stale.controlVersion)).status, 409);
   assert.equal((await cancel(fresh.controlVersion)).status, 200);
+});
+
+test('a thread account grants replies, verified downloads, and task control independently across pairings', async t => {
+  const fixture = await scriptedFixture(context => {
+    if (!hasTool(context, 'task_submit')) return fauxAssistantMessage(fauxToolCall('task_prepare', {
+      outcome: 'Prepare evidence', deliverables: ['Evidence'], inputs: [], scope: ['Local test workspace'], assumptions: [], questions: [],
+      criteria: [{ text: 'Verify the original evidence', method: 'inspect' }],
+      budget: { maxEstimatedCostUsd: 1, maxDurationMs: 60_000, maxTotalTokens: 64_000 },
+    }), { stopReason: 'toolUse' });
+    if (!context.messages.some(message => message.role === 'user' && message.content === 'Use the original evidence')) {
+      return fauxAssistantMessage(fauxToolCall('ask_user', { question: 'Which evidence?', options: ['Use the original evidence', 'Stop'] }), { stopReason: 'toolUse' });
+    }
+    return fauxAssistantMessage(fauxToolCall('task_submit', { summary: 'Original evidence verified.', artifacts: ['evidence.txt'],
+      criteria: [{ id: 1, status: 'passed', evidence: 'The original evidence is present in the selected workspace.' }],
+    }), { stopReason: 'toolUse' });
+  });
+  await writeFile(join(fixture.workspace, 'evidence.txt'), 'Verified account evidence.');
+  await fixture.runtime.close();
+  const listener = createServer();
+  await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const port = (listener.address() as { port: number }).port;
+  await new Promise<void>(resolve => listener.close(() => resolve()));
+  const config = { ...fixture.settings, port };
+  let host = await serve(config, { models: fixture.models });
+  t.after(async () => { await host.close(); await fixture.close(); });
+  const client = createClient(config);
+  const task = await host.runtime.create('Verify the account evidence.', fixture.workspace, [], { prepare: true });
+  await until(() => host.runtime.status(task.id), value => value.status === 'awaiting_confirmation');
+  const ownerPath = '/v1/tasks/' + task.id;
+  const grantPath = ownerPath + '/accounts/research';
+  const pair = (accountId: string, deviceId: string) => client.request<{ token: string }>('/v1/remote/devices', 'POST', { accountId, deviceId });
+  const first = await pair('research', 'first'), outsider = await pair('outside', 'first');
+  const origin = 'http://127.0.0.1:' + port;
+  const path = '/remote/api/shared-threads/' + task.id;
+  const remote = (token: string, url = path, body?: unknown) => fetch(origin + url, {
+    method: body === undefined ? 'GET' : 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const configPath = join(fixture.directory, 'thread-accounts-config.json');
+  await writeFile(configPath, JSON.stringify(config));
+  const { stdout } = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'remote', 'grant-thread-account',
+    task.id, 'research', 'viewer', '--config', configPath]);
+  assert.equal(JSON.parse(stdout).role, 'viewer');
+  assert.equal((await remote(outsider.token)).status, 404);
+  const readOnly = await (await remote(first.token)).json();
+  assert.equal(readOnly.brief, null);
+  assert.equal((await remote(first.token, path + '/confirm', { revision: 1, digest: '0'.repeat(64) })).status, 403);
+  await client.request(grantPath, 'PUT', { role: 'participant', controls: true });
+  await host.close();
+  host = await serve(config, { models: fixture.models });
+  const later = await pair('research', 'later');
+  const ready = await (await remote(later.token)).json();
+  assert.equal(ready.id, task.id);
+  assert.equal((await remote(later.token, path + '/confirm', { revision: ready.brief.revision, digest: ready.briefDigest })).status, 200);
+  const waiting = await until(() => host.runtime.status(task.id), value => value.status === 'waiting_user' && value.submission?.status === 'done');
+  assert(waiting.budget.totalTokens < waiting.goal!.tokenLimit!, JSON.stringify(waiting.budget));
+  const answered = await remote(later.token, path + '/answers', { questionId: waiting.userQuestion!.id, requestId: 'account-answer',
+    answer: 'Use the original evidence' });
+  assert.equal(answered.status, 200, await answered.text());
+  const completed = await until(() => host.runtime.status(task.id), value => value.status === 'completed');
+  assert.equal(completed.goal?.tokenLimit, waiting.goal?.tokenLimit);
+  assert.deepEqual((await (await remote(first.token)).json()).artifacts, []);
+  await client.request(grantPath, 'PUT', { role: 'viewer', files: true });
+  const readyFiles = await (await remote(first.token)).json();
+  const artifact = readyFiles.artifacts[0]!;
+  assert.equal(await (await remote(later.token, artifact.href)).text(), 'Verified account evidence.');
+  assert.equal((await remote(first.token, path + '/control', { action: 'cancel', version: '0'.repeat(64) })).status, 403);
+  await client.request(grantPath, 'PUT', { role: 'viewer' });
+  assert.equal((await remote(later.token, artifact.href)).status, 403);
+  await client.request(ownerPath + '/share-thread', 'POST', { accountId: 'research', deviceId: 'first' });
+  await client.request(grantPath, 'DELETE');
+  assert.equal((await remote(later.token)).status, 404);
+  assert.equal(await (await remote(first.token, artifact.href)).text(), 'Verified account evidence.');
 });

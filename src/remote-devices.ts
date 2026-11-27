@@ -3,19 +3,25 @@ import { createRemoteCredential, type RemoteDevice } from './remote.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
 export type SharedApproval = { taskId: string; approvalId: string; digest: string };
-type RoomAccountRole = 'viewer' | 'participant';
-type RoomAccountGrant = { roomId: string; accountId: string; role: RoomAccountRole; files: boolean };
+type AccountScope = 'shared-rooms' | 'shared-threads';
+type AccountRole = 'viewer' | 'participant';
+type AccountGrant = { accountId: string; role: AccountRole; files: boolean } &
+  ({ roomId: string } | { taskId: string; controls: boolean });
 const pairingId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
-const isRoomAccountRole = (value: unknown): value is RoomAccountRole => value === 'viewer' || value === 'participant';
+const isAccountRole = (value: unknown): value is AccountRole => value === 'viewer' || value === 'participant';
+const accountTarget = (grant: AccountGrant) => 'roomId' in grant ? grant.roomId : grant.taskId;
 
 /** Pairing and approval sharing are available only behind the owner's daemon authentication. */
 export class RemoteDevices {
   private changes = new SerialQueue();
   private path:string;
-  private roomAccountsPath: string;
+  private accountPaths: Record<AccountScope, string>;
   constructor(dataDir:string) {
     this.path = join(dataDir,'remote','devices.json');
-    this.roomAccountsPath = join(dataDir,'remote','room-accounts.json');
+    this.accountPaths = {
+      'shared-rooms': join(dataDir, 'remote', 'room-accounts.json'),
+      'shared-threads': join(dataDir, 'remote', 'thread-accounts.json'),
+    };
   }
   async credentials():Promise<RemoteDevice[]> {
     try { return await readJson<RemoteDevice[]>(this.path); }
@@ -60,36 +66,45 @@ export class RemoteDevices {
     });
   }
 
-  private async readRoomAccounts(): Promise<RoomAccountGrant[]> {
-    const grants = await readJson<RoomAccountGrant[]>(this.roomAccountsPath).catch(error => {
+  private async readAccountGrants(scope: AccountScope): Promise<AccountGrant[]> {
+    const grants = await readJson<AccountGrant[]>(this.accountPaths[scope]).catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     });
-    if (!Array.isArray(grants) || grants.some(grant => !grant || typeof grant.accountId !== 'string' || !pairingId.test(grant.accountId) ||
-        typeof grant.roomId !== 'string' || !/^[a-f0-9-]{36}$/.test(grant.roomId) || !isRoomAccountRole(grant.role) || typeof grant.files !== 'boolean')) {
-      throw new Error('Invalid saved room account access.');
+    if (!Array.isArray(grants) || grants.some(grant => {
+      if (!grant || typeof grant !== 'object' || typeof grant.accountId !== 'string' || !pairingId.test(grant.accountId) ||
+          !isAccountRole(grant.role) || typeof grant.files !== 'boolean') return true;
+      const target = accountTarget(grant);
+      if (typeof target !== 'string' || !/^[a-f0-9-]{36}$/.test(target)) return true;
+      return scope === 'shared-rooms' ? !('roomId' in grant) || 'taskId' in grant || 'controls' in grant
+        : 'roomId' in grant || !('taskId' in grant) || typeof grant.controls !== 'boolean';
+    })) {
+      throw new Error('Invalid saved account access.');
     }
     return grants;
   }
 
-  roomAccounts(roomId: string) {
-    return this.changes.run(async () => (await this.readRoomAccounts()).filter(grant => grant.roomId === roomId));
+  accountGrants(scope: AccountScope, id: string) {
+    return this.changes.run(async () => (await this.readAccountGrants(scope)).filter(grant => accountTarget(grant) === id));
   }
 
-  setRoomAccount(roomId: string, accountId: string, input: Record<string, unknown> | null) {
+  setAccountGrant(scope: AccountScope, id: string, accountId: string, input: Record<string, unknown> | null) {
     if (!pairingId.test(accountId)) throw Object.assign(new Error('Provide a valid paired account ID.'), { status: 400 });
-    if (input && (!isRoomAccountRole(input.role) || input.files !== undefined && typeof input.files !== 'boolean' ||
-        Object.keys(input).some(key => key !== 'role' && key !== 'files'))) {
-      throw Object.assign(new Error('Choose the viewer or participant role and an optional boolean files permission.'), { status: 400 });
+    const allowed = scope === 'shared-threads' ? ['role', 'files', 'controls'] : ['role', 'files'];
+    if (input && (!isAccountRole(input.role) || Object.keys(input).some(key => !allowed.includes(key) ||
+        key !== 'role' && typeof input[key] !== 'boolean'))) {
+      throw Object.assign(new Error('Choose a viewer or participant role and boolean values for supported permissions.'), { status: 400 });
     }
     return this.changes.run(async () => {
-      const grants = (await this.readRoomAccounts()).filter(grant => grant.roomId !== roomId || grant.accountId !== accountId);
+      const path = this.accountPaths[scope];
+      const grants = (await this.readAccountGrants(scope)).filter(grant => accountTarget(grant) !== id || grant.accountId !== accountId);
       if (!input) {
-        await atomicJson(this.roomAccountsPath, grants);
+        await atomicJson(path, grants);
         return { revoked: true };
       }
-      const grant = { roomId, accountId, role: input.role as RoomAccountRole, files: input.files === true };
-      await atomicJson(this.roomAccountsPath, [...grants, grant]);
+      const access = { accountId, role: input.role as AccountRole, files: input.files === true };
+      const grant = scope === 'shared-rooms' ? { ...access, roomId: id } : { ...access, taskId: id, controls: input.controls === true };
+      await atomicJson(path, [...grants, grant]);
       return grant;
     });
   }
@@ -118,18 +133,20 @@ export class RemoteDevices {
     });
   }
 
-  async withPairedDevice<T>(tokenHash: string, action: (device: RemoteDevice) => Promise<T>, scope?: 'shared-rooms') {
+  async withPairedDevice<T>(tokenHash: string, action: (device: RemoteDevice) => Promise<T>, scope?: AccountScope) {
     return this.changes.run(async () => {
       const device = (await this.credentials()).find(item => item.tokenHash === tokenHash);
       if (!device) return;
-      if (scope !== 'shared-rooms') return action(device);
-      const grants = new Map(device.sharedThreads?.map(grant => [grant.taskId, grant]));
-      for (const account of await this.readRoomAccounts()) {
+      if (!scope) return action(device);
+      // Original device shares have always included verified thread downloads.
+      const grants = new Map(device.sharedThreads?.map(grant => [grant.taskId, scope === 'shared-threads' ? { ...grant, files: true as const } : grant]));
+      for (const account of await this.readAccountGrants(scope)) {
         if (account.accountId !== device.accountId) continue;
-        const grant = { ...grants.get(account.roomId), taskId: account.roomId };
+        const taskId = accountTarget(account), grant = { ...grants.get(taskId), taskId };
         if (account.role === 'participant') grant.replies = true;
         if (account.files) grant.files = true;
-        grants.set(account.roomId, grant);
+        if ('controls' in account && account.controls) grant.controls = true;
+        grants.set(taskId, grant);
       }
       return action({ ...device, sharedThreads: [...grants.values()] });
     });

@@ -14,6 +14,12 @@ Codync 从原任务详情读取执行状态，手机停止按钮把请求发给�
 - [x] 手机详情呈现可授权的原方案和当前可用控制，覆盖轮询、迟到响应和聊天草稿。 [页面回归](../../../test/remote-pending-page.test.ts)
 - [x] Chromium 窄屏验证原任务控制，硅基流动验证手机确认推动原 Pi 任务执行。
 
+## 共享任务账户授权
+
+本机 owner 按配对账户为原任务授予查看或结构化回复。已验收文件下载和原任务控制各有单独的权限。请求绑定原配对，再按同一账户的当前角色检查，重启后新配对设备沿原账户读取角色。设备直接获授的权限也参与访问判断。 [OpenMausBot 账户角色更新和会话撤回](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/cloud-team-roster.ts#L87) · [Codync 原任务操作](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/WorkThreadView.kt#L143)
+
+回归通过终端授予查看，原任务的准备说明在重启后由新设备确认。该设备答复原问题，任务沿同一已确认预算交付。另验收独立授予和撤回产物下载、旧设备授权以及非本账户的访问拒绝。 [账户回归](../../../test/shared-thread-controls.test.ts)
+
 ## 验收结果
 
 - 相关回归 76 项通过。追加的普通聊天暂停和本机恢复用例确认旧控制版本会失效。共享方案的确认和继续分别复用原 Pi 提交与原预算。

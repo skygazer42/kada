@@ -402,16 +402,19 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'POST') return send(201, await runtime.createRoom(await body(req)));
         return send(405, { error: 'Method not allowed' });
       }
-      const roomAccount = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})\/accounts(?:\/([A-Za-z0-9][A-Za-z0-9_-]{0,79}))?$/.exec(url.pathname);
-      if (roomAccount) {
-        const [, id, accountId] = roomAccount;
+      const accountShare = /^\/v1\/(assistant-rooms|tasks)\/([a-f0-9-]{36})\/accounts(?:\/([A-Za-z0-9][A-Za-z0-9_-]{0,79}))?$/.exec(url.pathname);
+      if (accountShare) {
+        const [, resource, id, accountId] = accountShare;
+        const scope = resource === 'assistant-rooms' ? 'shared-rooms' : 'shared-threads';
         const meta = await runtime.metadata(id!).catch(error => {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         });
-        if (!meta?.room) return send(404, { error: 'Assistant room not found.' });
-        if (!accountId && req.method === 'GET') return send(200, await devices.roomAccounts(id!));
+        if (scope === 'shared-rooms' ? !meta?.room : !meta || meta.room || meta.remotePolicy) {
+          return send(404, { error: 'The requested local room or thread was not found.' });
+        }
+        if (!accountId && req.method === 'GET') return send(200, await devices.accountGrants(scope, id!));
         if (accountId && (req.method === 'PUT' || req.method === 'DELETE')) {
-          return send(200, await devices.setRoomAccount(id!, accountId, req.method === 'PUT' ? await body(req) : null));
+          return send(200, await devices.setAccountGrant(scope, id!, accountId, req.method === 'PUT' ? await body(req) : null));
         }
         return send(405, { error: 'Method not allowed' });
       }
