@@ -122,7 +122,7 @@ test('the terminal and authenticated API use the original room, outside its ordi
   assert.deepEqual(duplicate, { ...send, status: 'answered', answerEntryId: view.messages[1]?.id });
 });
 
-for (const mode of ['direct', 'handoff']) {
+for (const mode of ['direct', 'handoff', 'chain', 'legacy'] as const) {
   test(`SIGKILL during a ${mode} room reply preserves its native submission and one answer`, { timeout: recoveryTestTimeoutMs }, async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), 'kada-assistant-room-')));
     const fixture = new URL('./fixtures/assistant-room-recovery-worker.ts', import.meta.url);
@@ -137,7 +137,7 @@ for (const mode of ['direct', 'handoff']) {
       assert.equal(recovered.receipt.status, 'answered');
       assert.equal(recovered.receipt.answerEntryId, recovered.messages.at(-1).id);
       assert.deepEqual(recovered.messages.map((message: { role: string }) => message.role),
-        mode === 'handoff' ? ['user', 'handoff', 'assistant'] : ['user', 'assistant']);
+        ['user', ...Array.from({ length: { direct: 0, handoff: 1, chain: 2, legacy: 1 }[mode] }, () => 'handoff'), 'assistant']);
       assert.equal(recovered.messages.at(-1).text, 'Original room answer after restart');
       assert.equal(recovered.requests, 1);
     } finally { await worker.stop(); await rm(directory, { recursive: true, force: true, maxRetries: 5 }); }

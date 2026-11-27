@@ -12,10 +12,11 @@ export class RoomError extends Error {
 }
 
 type Outcome = 'answered' | 'unanswered' | 'interrupted';
-type Speaker = { target: ConversationId; memberId: string; revision: number; name: string };
+type Speaker = { target: ConversationId; memberId: string; revision: number; name: string; canForward?: true };
 type Handoff = { receiver: Speaker; message: string };
+type Forwarded = Handoff & { stage?: number; from?: string; handoffMembers?: { id: string; name: string }[] };
 type Turn = { current: Speaker; memberId: string; candidates: Speaker[]; messageEntryId: EntryId; fingerprint: string; deadlineAt: number;
-  taskId: TaskId; handoff?: Handoff; outcome?: Outcome; answerEntryId?: EntryId };
+  taskId: TaskId; stage?: number; handoff?: Handoff; outcome?: Outcome; answerEntryId?: EntryId };
 type Limits = { tokenLimit: number | null; costLimit: number };
 
 const RoomState = defineDoc<{ seats: Record<string, ConversationId>; turns: Record<string, Turn>; active?: string }>({
@@ -34,11 +35,16 @@ type Delivery = { speaker: Speaker; key: string; requestId: string; deadlineAt: 
   content: { room: string; recent: { role: 'user' | 'assistant' | 'handoff'; member: string; text: string }[];
     message: string; handoffMembers: { id: string; name: string }[] } };
 
-function handoffRequest(key: string) { return key + ':handoff'; }
+function stageRequest(key: string, stage: number) {
+  if (stage === 0) return key;
+  return stage === 1 ? key + ':handoff' : key + ':handoff:' + stage;
+}
 
-async function settle(tx: Tx, delivery: Delivery, receiver: Speaker | undefined, root: ConversationId, now: number, interrupted: boolean) {
-  const speaker = receiver ?? delivery.speaker;
-  const submission = await tx.submissionByRequest(speaker.target, receiver ? handoffRequest(delivery.key) : delivery.key);
+function stageOf(forwarded?: Forwarded) { return forwarded ? forwarded.stage ?? 1 : 0; }
+
+async function settle(tx: Tx, delivery: Delivery, forwarded: Forwarded | undefined, root: ConversationId, now: number, interrupted: boolean) {
+  const speaker = forwarded?.receiver ?? delivery.speaker;
+  const submission = await tx.submissionByRequest(speaker.target, stageRequest(delivery.key, stageOf(forwarded)));
   const answerId = submission?.status === 'done' ? submission.answer : undefined;
   const answer = answerId === undefined ? undefined : await tx.entry(AssistantEntry, answerId);
   const text = answer?.conversationId === speaker.target
@@ -65,39 +71,49 @@ async function canContinue(tx: Tx, speakers: Iterable<ConversationId>, limits: L
   return (limits.tokenLimit === null || tokens < limits.tokenLimit) && cost < limits.costLimit;
 }
 
-const Deliver = defineTask<Delivery, { phase: 'deliver'; forwarded?: Handoff }, null>({
+const Deliver = defineTask<Delivery, { phase: 'deliver'; forwarded?: Forwarded }, null>({
   name: 'local.assistant_room.deliver', version: 1, initial: () => ({ phase: 'deliver' }),
   phases: { deliver: async (task, runtime, context) => {
     const { input } = task;
     const forwarded = task.state.checkpoint.forwarded, speaker = forwarded?.receiver ?? input.speaker;
+    const stage = stageOf(forwarded);
     const peer = await runtime.conversation(speaker.target, context);
     if (!peer) throw new Error('The room member conversation is missing.');
     const expired = runtime.now() >= input.deadlineAt;
     if (!expired) {
-      const content = forwarded ? { ...input.content, handoffMembers: [], message: forwarded.message,
-        originalMessage: input.content.message, from: input.speaker.name } : input.content;
+      const content = forwarded ? { ...input.content, handoffMembers: forwarded.handoffMembers ?? [], message: forwarded.message,
+        originalMessage: input.content.message, from: forwarded.from ?? input.speaker.name } : input.content;
       const submission = await peer.submit({ type: 'input', content: JSON.stringify(content),
-        requestId: forwarded ? handoffRequest(input.key) : input.key, whenBusy: 'reject' }, context);
+        requestId: stageRequest(input.key, stage), whenBusy: 'reject' }, context);
       await submission.wait(context);
     }
     await runtime.commit(async tx => {
       const state = await tx.doc(RoomState), turn = state.turns[input.key]!;
-      if (!forwarded && turn.handoff && runtime.now() < input.deadlineAt && await canContinue(tx, Object.values(state.seats), input.limits)) {
-        const next = { receiver: { ...turn.handoff.receiver }, message: turn.handoff.message };
-        await configure(tx, next.receiver.target, { tools: [] });
+      const accepted = turn.handoff;
+      // Earlier versions kept a finished handoff on the record after dispatch.
+      const handoff = accepted && turn.candidates.some(member => member.target === accepted.receiver.target) ? accepted : undefined;
+      if (handoff && runtime.now() < input.deadlineAt && await canContinue(tx, Object.values(state.seats), input.limits)) {
+        const receiver = { ...handoff.receiver };
+        const remaining = receiver.canForward
+          ? turn.candidates.filter(member => member.memberId !== receiver.memberId).map(member => ({ ...member })) : [];
+        const next: Forwarded = { receiver, message: handoff.message, stage: stage + 1, from: speaker.name,
+          handoffMembers: remaining.map(member => ({ id: member.memberId, name: member.name })) };
+        await configure(tx, receiver.target, { tools: remaining.length ? [RoomHandoff] : [] });
         await tx.appendEntry(RoomMessage, runtime.conversationId, { data: { role: 'handoff', text: next.message, requestId: input.requestId,
           memberId: speaker.memberId, revision: speaker.revision, name: speaker.name, at: runtime.now(),
           toMemberId: next.receiver.memberId, toName: next.receiver.name } });
-        turn.current = next.receiver;
-        turn.candidates = [];
+        turn.current = receiver;
+        turn.stage = stage + 1;
+        turn.candidates = remaining;
+        delete turn.handoff;
         return { status: 'running', checkpoint: { phase: 'deliver', forwarded: next } };
       }
-      await settle(tx, input, forwarded?.receiver, runtime.conversationId, runtime.now(), expired || (!forwarded && !!turn.handoff));
+      await settle(tx, input, forwarded, runtime.conversationId, runtime.now(), expired || !!handoff);
       return { status: 'terminal', outcome: { status: 'completed', result: null } };
     }, context);
   } },
   abort: (task, runtime, context) => runtime.commit(async tx => {
-    await settle(tx, task.input, task.state.checkpoint.forwarded?.receiver, runtime.conversationId, runtime.now(), true);
+    await settle(tx, task.input, task.state.checkpoint.forwarded, runtime.conversationId, runtime.now(), true);
     return { status: 'terminal', outcome: { status: 'aborted' } };
   }, context),
 });
@@ -112,7 +128,7 @@ const RoomHandoff = defineTool({
       const state = await tx.doc(RoomState), key = state.active;
       const turn = key ? state.turns[key] : undefined;
       if (!key || !turn || turn.current.target !== api.conversationId || api.now() >= turn.deadlineAt) throw new Error('The original room stage is no longer active.');
-      const input = await tx.submissionByRequest(api.conversationId, key), live = await tx.doc(LiveDoc, api.conversationId);
+      const input = await tx.submissionByRequest(api.conversationId, stageRequest(key, turn.stage ?? 0)), live = await tx.doc(LiveDoc, api.conversationId);
       if (input?.status !== 'placed' || !live.run?.inputs.includes(input.id)) throw new Error('Only the active original room reply can hand off.');
       const target = turn.candidates.find(member => member.memberId === args.member_id);
       const message = args.message.trim();
@@ -197,7 +213,8 @@ export function sendRoomMessage(root: Conversation, members: AssistantPin[], tit
           `${pin.instructions}\n\nYou are ${pin.name} in a local assistant room. Answer the owner message as yourself. The recent room messages are context.` });
         state.seats[seat] = target;
       }
-      return { target, memberId: pin.id, revision: pin.revision, name: pin.name };
+      return { target, memberId: pin.id, revision: pin.revision, name: pin.name,
+        ...(pin.tools.includes(RoomHandoff.name) ? { canForward: true as const } : {}) };
     };
     const speaker = await seatFor(member), candidates: Speaker[] = [];
     if (member.tools.includes(RoomHandoff.name)) {

@@ -68,3 +68,41 @@ test('an original speaker cannot use a handoff to receive a fresh token budget',
   assert.equal(calls, 1);
   await assert.rejects(f.runtime.sendRoomMessage(room.id, { ...input, requestId: 'new-budget' }), /token budget/i);
 });
+
+test('three authorized members hand off in order without offering a visited member again', async t => {
+  let ids: string[] = [];
+  const seen: string[] = [];
+  const f = await scriptedFixture(context => {
+    const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
+    seen.push(input.message);
+    if (input.message === 'Start original review') {
+      assert.deepEqual(input.handoffMembers.map((member: { id: string }) => member.id), ids.slice(1));
+      return fauxAssistantMessage(fauxToolCall('room_handoff', { member_id: ids[1], message: 'Check the source' }), { stopReason: 'toolUse' });
+    }
+    if (input.message === 'Check the source') {
+      assert.equal(input.from, 'Lead');
+      assert.equal(input.originalMessage, 'Start original review');
+      assert(hasTool(context, 'room_handoff'));
+      assert.deepEqual(input.handoffMembers.map((member: { id: string }) => member.id), [ids[2]]);
+      return fauxAssistantMessage(fauxToolCall('room_handoff', { member_id: ids[2], message: 'Report the original result' }), { stopReason: 'toolUse' });
+    }
+    assert.equal(input.from, 'Reader');
+    assert.equal(input.originalMessage, 'Start original review');
+    assert(!hasTool(context, 'room_handoff'));
+    return fauxAssistantMessage('The final room result.');
+  });
+  t.after(() => f.close());
+  const members = await Promise.all(['Lead', 'Reader', 'Reviewer'].map(name => f.runtime.assistants.create({
+    workspace: f.workspace, name, instructions: 'Only handle this room stage.', tools: ['room_handoff'],
+  })));
+  ids = members.map(member => member.id);
+  const room = await f.runtime.createRoom({ workspace: f.workspace, title: 'Three member room', members: members.map(({ id, revision }) => ({ id, revision })) });
+  const input = { memberId: ids[0], message: 'Start original review', requestId: 'original-chain' };
+  await f.runtime.sendRoomMessage(room.id, input);
+  const view = await until(() => f.runtime.roomDetails(room.id), state => state.active === null);
+  assert.deepEqual(seen, ['Start original review', 'Check the source', 'Report the original result']);
+  assert.deepEqual(view.messages.map(event => event.role), ['user', 'handoff', 'handoff', 'assistant']);
+  assert.deepEqual(view.messages.filter(event => event.role === 'handoff').map(event => event.toMemberId), ids.slice(1));
+  assert.equal(view.messages[3]?.memberId, ids[2]);
+  assert.equal((await f.runtime.sendRoomMessage(room.id, input)).answerEntryId, view.messages[3]?.id);
+});

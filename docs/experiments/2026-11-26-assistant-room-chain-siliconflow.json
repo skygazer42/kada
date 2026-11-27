@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "provider": "siliconflow",
+  "models": ["deepseek-ai/DeepSeek-V3.2", "deepseek-ai/DeepSeek-V3.2", "Qwen/Qwen2.5-7B-Instruct"],
+  "speakers": ["Lead", "Reviewer", "Reporter"],
+  "originalHandoffs": 2,
+  "replayUsedAdditionalTokens": false,
+  "finalText": "CORAL-208",
+  "totalTokens": 1395,
+  "money": null
+}

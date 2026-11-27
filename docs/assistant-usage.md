@@ -167,7 +167,7 @@ npm run harness -- rooms send 群组ID 助手一ID "核对一下上一条发布�
 npm run harness -- rooms show 群组ID
 ```
 
-使用 `rooms edit 群组ID 修改.json` 改标题或成员。编辑文件带 `revision`，可附 `title` 或完整的 `members` 数组，每项为 `{ "id": "助手ID", "revision": 1 }`。旧修订请先重新读取。助手工具名单可选 `room_handoff`，让被点名的成员把本轮交给另一成员一次，原群组显示交棒和最终答复。
+使用 `rooms edit 群组ID 修改.json` 改标题或成员。编辑文件带 `revision`，可附 `title` 或完整的 `members` 数组，每项为 `{ "id": "助手ID", "revision": 1 }`。旧修订请先重新读取。助手工具名单可选 `room_handoff`，让成员把本轮依次交给尚未参与的成员。原群组显示交棒过程与最终答复。
 
 本机通过 `rooms share 群组ID 账户ID 设备ID` 分享查看，通过 `rooms share-replies 群组ID 账户ID 设备ID` 授予发送权限。手机 Web 的 **Shared rooms** 打开同一群组。用 `rooms unshare-replies` 撤回发送权限，或用 `rooms unshare` 一并撤回查看和发送。 [源码与验收](superpowers/plans/2026-11-26-assistant-rooms.md)
 
@@ -185,6 +185,8 @@ npm run harness -- credentials remove reports 1 --workspace E:/project
 列表只返回元数据，删除须使用显示的当前修订。替换由新凭据请求完成，重复提交原请求只确认原结果，不覆盖后来的轮换或删除。值保存于 dataDir 的 `application-credentials/items.json`；这是受限本地明文文件，Git 忽略并由提交检查阻止暂存，适用平台使用 0600/0700。Windows 沿用户目录权限，尚未接系统密钥库，也不隔离本机任意文件工具。网页登录、验证码和远程遮罩输入仍未提供。[参考及验收计划](superpowers/plans/2026-11-26-application-credentials.md)
 
 ## 模型与方法
+
+从当前工作区导入自写或已核对的原生 Skill，用 `skills import 目录 --workspace 路径`。更新既有包时在目录后提供展示的当前版本。用 `skills export 名称 版本 目标目录 --workspace 路径` 导出指定版本。导入进入现有本机 managed 目录，项目 Skill 的同名优先级保留。 [实现与验收](superpowers/plans/2026-11-26-skill-authoring.md)
 
 在本机普通聊天中，可以请助手为当前项目建议一个默认模型。用 `/model-proposals` 核对原值、所提型号及理由，再输入 `/apply-model 建议ID` 检查连通性并应用，或用 `/decline-model 建议ID` 拒绝。应用后的项目默认值供新任务选择，已接回的对话沿自己的模型继续。[设置契约与测试](superpowers/plans/2026-11-26-chat-model-proposals.md)
 
