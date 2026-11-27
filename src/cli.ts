@@ -49,6 +49,7 @@ try {
     console.log('  rooms share|unshare 群组ID 账户ID 设备ID\n  rooms share-replies|unshare-replies 群组ID 账户ID 设备ID');
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
+    console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -219,7 +220,9 @@ try {
         result = await request('/v1/settings/skills','PATCH',{workspace,name:rest[0],enabled:action === 'enable'});
       } else if (action === 'rollback') result = await request('/v1/settings/skills/rollback','POST',{name:rest[0],version:rest[1]});
       else if (action === 'capture') result = await request('/v1/tasks/'+segment(rest[0])+'/skills/capture','POST',{path:rest[1]});
-      else throw new Error('Use skills list, enable, disable, capture or rollback.');
+      else if (action === 'import' && rest[0] && rest.length <= 2) result = await request('/v1/settings/skills/import', 'POST', { workspace, path: rest[0], version: rest[1] });
+      else if (action === 'export' && rest.length === 3) result = await request('/v1/settings/skills/export', 'POST', { workspace, name: rest[0], version: rest[1], path: rest[2] });
+      else throw new Error('Use skills list, enable, disable, capture, rollback, import or export.');
     } else if (command === 'mcp') {
       if (action === 'list') result = await request('/v1/settings/mcp');
       else if (action === 'add') result = await request('/v1/settings/mcp','POST',await json(rest[0]));

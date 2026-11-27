@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSkills, formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
@@ -89,9 +89,27 @@ async function tree(workspace: Workspace, path: string) {
 async function copy(workspace: Workspace, path: string, destination: string, version: string) {
   const original = await tree(workspace, path), target = await Workspace.open(destination);
   if (original.root.sha256 !== version) throw new Error("Skill version changed");
-  for (const file of original.files) await target.write(relative(original.root.path, file.path), await workspace.read(file.path));
+  for (const directory of original.directories) {
+    await mkdir(await target.path(relative(original.root.path, directory)), { recursive: true });
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  for (const file of original.files) {
+    const { data } = await workspace.readBinarySnapshot(file.path, 32768);
+    if (data.includes(0)) throw new Error("Skill files must contain UTF-8 text");
+    await target.write(relative(original.root.path, file.path), decoder.decode(data));
+  }
   if ((await tree(workspace, path)).root.sha256 !== version || (await tree(target, ".")).root.sha256 !== version) throw new Error("Skill changed while pinning");
   return target;
+}
+
+function nativeSkill(workspace: Workspace, directory: string) {
+  const parsed = load(workspace.root, [directory]);
+  const skill = parsed.skills[0];
+  if (parsed.skills.length !== 1 || !skill || parsed.diagnostics.length || skill.filePath !== join(directory, "SKILL.md") ||
+    !validName.test(skill.name) || skill.name.length > 64 || skill.description.length > 1024 || skill.disableModelInvocation) {
+    throw new Error("Use one valid native Pi SKILL.md with name and description");
+  }
+  return skill;
 }
 
 /** Only version heads/provenance are custom. No keyword index, memory service or model call. */
@@ -192,6 +210,59 @@ export class SkillStore {
     }
     return paths;
   }
+  private async recordVersion(heads: Record<string, Head>, ref: { name: string; version: string }, source: unknown) {
+    const old = Object.hasOwn(heads, ref.name) ? heads[ref.name] : undefined;
+    if (old?.published.includes(ref.version)) return;
+    if ((!old && Object.keys(heads).length >= 32) || (old?.published.length ?? 0) >= 32) throw new Error("Local Skill catalogue/revision limit reached");
+    await this.files.write(`${ref.name}/${ref.version}.source.json`, JSON.stringify(source));
+    heads[ref.name] = { version: ref.version, published: [...(old?.published ?? []), ref.version], ...(old && !old.disabled ? { previous: old.version } : {}) };
+    await this.files.write("heads.json", JSON.stringify(heads));
+  }
+
+  async importVersion(workspace: Workspace, path: string, expectedVersion?: string, discovered: LocalSkill[] = []) {
+    const candidate = await tree(workspace, path);
+    const skill = nativeSkill(workspace, candidate.root.path);
+    const ref = { name: skill.name, version: candidate.root.sha256 };
+    const authored = load(workspace.root, [...projectSources(workspace.root), ...discovered.map(item => item.path), bundled]);
+    if (authored.skills.some(item => item.name === ref.name)) throw new Error("Managed Skills cannot replace authored Skills");
+    return this.changes.run(async () => {
+      const heads = await this.heads();
+      const old = Object.hasOwn(heads, ref.name) ? heads[ref.name] : undefined;
+      if (old?.published.includes(ref.version)) return ref;
+      if (old?.version !== expectedVersion) throw new Error("The Skill changed. Provide its current version before importing.");
+      await copy(workspace, candidate.root.path, join(this.files.root, ref.name, ref.version), ref.version);
+      await this.recordVersion(heads, ref, { status: "owner import", workspace: workspace.root, path: candidate.root.path });
+      return ref;
+    });
+  }
+
+  async exportVersion(workspace: Workspace, ref: { name: string; version: string }, path: string, discovered: LocalSkill[] = []) {
+    return this.changes.run(async () => {
+      const candidate = (await this.candidates(workspace, discovered)).find(({ entry }) => entry.name === ref.name);
+      const skill = candidate?.versions.get(ref.version);
+      if (!skill) throw new Error("Choose an available Skill version from the current catalogue");
+      const target = await workspace.path(path);
+      let existing;
+      try { existing = await lstat(target); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const result = { ...ref, path: target };
+      if (existing) {
+        const current = existing.isDirectory() ? await workspace.inspectTree(target) : null;
+        if (current?.root.sha256 === ref.version) return result;
+        throw new Error("The export destination already exists with different content");
+      }
+      await mkdir(dirname(target), { recursive: true });
+      const stage = await workspace.path(await mkdtemp(target + '.export-'));
+      try {
+        const source = await Workspace.open(skill.baseDir, { create: false });
+        await copy(source, ".", stage, ref.version);
+        await workspace.path(target);
+        await rename(stage, target);
+      } finally { await rm(stage, { recursive: true, force: true }); }
+      return result;
+    });
+  }
+
   async capture(workspace: Workspace, goal: GoalState, taskId: string, path: string) {
     if (goal.phase !== "completed") throw new Error("Skills are saved only after successful delivery");
     const candidate = await tree(workspace, path);
@@ -202,23 +273,15 @@ export class SkillStore {
       if (proof.outputs.some(p => "kind" in p && p.kind === "directory" && contains(p.path, candidate.root.path))) { proofId = id; break; }
     } catch { /* Other receipts may describe unrelated or stale work. */ }
     if (!proofId) throw new Error("Skill directory must belong to a fresh, frozen verified output");
-    const parsed = load(workspace.root, [candidate.root.path]);
-    const skill = parsed.skills[0];
-    if (parsed.skills.length !== 1 || !skill || parsed.diagnostics.length || skill.filePath !== join(candidate.root.path, "SKILL.md") ||
-      !validName.test(skill.name) || skill.name.length > 64 || skill.description.length > 1024 || skill.disableModelInvocation) throw new Error("Use one valid native Pi SKILL.md with name and description");
+    const skill = nativeSkill(workspace, candidate.root.path);
     const ref = { name: skill.name, version: candidate.root.sha256 };
     const authored = load(workspace.root, [...projectSources(workspace.root), bundled]);
     if (authored.skills.some(s => s.name === ref.name)) throw new Error("Managed Skills cannot replace authored Skills");
     await copy(workspace, candidate.root.path, join(this.files.root, ref.name, ref.version), ref.version);
     await confirmedProof(goal, workspace, proofId);
     await this.changes.run(async () => {
-      const heads = await this.heads(), old = heads[ref.name];
-      if (old?.published.includes(ref.version)) return; // Reopening cannot undo a later rollback.
-      if ((!old && Object.keys(heads).length >= 32) || (old?.published.length ?? 0) >= 32) throw new Error("Local trial catalogue/revision limit reached");
-      await this.files.write(`${ref.name}/${ref.version}.source.json`, JSON.stringify({ taskId, proofId, inputHashes: goal.proofs![proofId]!.inputs,
-        status: "local trial; passing the source check is not proof of future quality or savings" }));
-      heads[ref.name] = { version: ref.version, published: [...(old?.published ?? []), ref.version], ...(old && !old.disabled ? { previous: old.version } : {}) };
-      await this.files.write("heads.json", JSON.stringify(heads));
+      await this.recordVersion(await this.heads(), ref, { taskId, proofId, inputHashes: goal.proofs![proofId]!.inputs,
+        status: "local trial; passing the source check is not proof of future quality or savings" });
     });
     return ref;
   }

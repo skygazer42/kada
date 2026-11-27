@@ -89,11 +89,11 @@ export class Workspace {
   /** A directory digest covers names, original file bytes and empty directories.
    * Links/special files are not followed. This observes a tree, not an OS transaction.
    */
-  async inspectTree(input: string, cwd?: string): Promise<{ root: PathSnapshot; files: FileSnapshot[] }> {
+  async inspectTree(input: string, cwd?: string): Promise<{ root: PathSnapshot; files: FileSnapshot[]; directories: string[] }> {
     const absolute = await this.path(input, cwd);
     if (!(await lstat(absolute)).isDirectory()) {
       const file = await this.inspect(absolute);
-      return { root: file, files: [file] };
+      return { root: file, files: [file], directories: [] };
     }
     const scan = async () => {
       const nodes: { path: string; name: string; directory: boolean; stamp: string }[] = [];
@@ -119,7 +119,8 @@ export class Workspace {
     }
     if (JSON.stringify(before) !== JSON.stringify(await scan())) throw new Error(`Directory changed while checking: ${input}. Inspect it and verify again.`);
     return { root: { path: absolute, kind: "directory", entries: before.length - 1,
-      bytes: files.reduce((total, file) => total + file.bytes, 0), sha256: createHash("sha256").update(JSON.stringify(members)).digest("hex") }, files };
+      bytes: files.reduce((total, file) => total + file.bytes, 0), sha256: createHash("sha256").update(JSON.stringify(members)).digest("hex") },
+      files, directories: before.filter(node => node.directory && node.path !== absolute).map(node => node.path) };
   }
   async inspectPath(input: string, cwd?: string): Promise<PathSnapshot> {
     return (await this.inspectTree(input, cwd)).root;

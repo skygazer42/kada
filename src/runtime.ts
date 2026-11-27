@@ -489,6 +489,14 @@ export class LocalRuntime {
     await (await (this.skillStore ??= SkillStore.open(this.config.dataDir))).rollback(ref);
     return {ok:true};
   }
+  async importSkill(workspace: string, path: string, version?: string) {
+    const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
+    return store.importVersion(await Workspace.open(workspace, { create: false }), path, version, await this.discoveredSkills(workspace));
+  }
+  async exportSkill(workspace: string, ref: { name: string; version: string }, path: string) {
+    const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
+    return store.exportVersion(await Workspace.open(workspace, { create: false }), ref, path, await this.discoveredSkills(workspace));
+  }
   async captureSkill(id:string,path:string) {
     const status = await this.status(id);
     if (!status.goal) throw new Error('Only a verified task can save a Skill.');

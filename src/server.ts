@@ -154,6 +154,21 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (typeof input.name !== 'string' || typeof input.version !== 'string') throw new Error('Provide name and version.');
         return send(200,await runtime.rollbackSkill({name:input.name,version:input.version}));
       }
+      if (url.pathname === '/v1/settings/skills/import' && req.method === 'POST') {
+        const { workspace, path, version } = await body(req);
+        if (typeof workspace !== 'string' || typeof path !== 'string' ||
+          version !== undefined && (typeof version !== 'string' || !/^[a-f0-9]{64}$/.test(version))) {
+          throw new Error('Provide a workspace, a Skill directory and the current version for an update.');
+        }
+        return send(200, await runtime.importSkill(workspace, path, version));
+      }
+      if (url.pathname === '/v1/settings/skills/export' && req.method === 'POST') {
+        const { workspace, path, name, version } = await body(req);
+        if (typeof workspace !== 'string' || typeof path !== 'string' || typeof name !== 'string' || typeof version !== 'string') {
+          throw new Error('Provide workspace, destination, Skill name and version.');
+        }
+        return send(200, await runtime.exportSkill(workspace, { name, version }, path));
+      }
       if (url.pathname === '/v1/settings/mcp') {
         if (req.method === 'GET') return send(200,await runtime.mcp.list());
         if (req.method === 'POST') return send(201,await runtime.mcp.configure(await body(req) as McpDefinition));
