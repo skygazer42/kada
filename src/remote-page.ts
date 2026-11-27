@@ -29,7 +29,7 @@ export const remotePage = String.raw`<!doctype html>
     #conversation-field { flex: 1; min-width: 0; }
     label { display: block; font-size: .92rem; font-weight: 650; }
     select, input:not([type=file]), textarea { display: block; margin-top: .3rem; width: 100%; min-height: 44px; padding: .66rem .75rem; background: #fff; color: inherit; }
-    #status, #connection { color: var(--muted); font-size: .9rem; }
+    #status, #connection, #voice-status { color: var(--muted); font-size: .9rem; }
     #status { min-height: 1.4rem; margin: .25rem 0 .5rem; overflow-wrap: anywhere; }
     #connection { text-align: right; overflow-wrap: anywhere; }
     #pair { max-width: 31rem; margin: 4vh auto 0; }
@@ -68,6 +68,7 @@ export const remotePage = String.raw`<!doctype html>
     #composer { margin-bottom: 1.5rem; }
     textarea { min-height: 6rem; line-height: 1.4; resize: vertical; }
     .compose-actions { display: flex; align-items: center; gap: .5rem; margin-top: .7rem; flex-wrap: wrap; }
+    #voice-status:not(:empty) { margin-top: .5rem; }
     #file-label { display: flex; align-items: center; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: .7rem .8rem; cursor: pointer; }
     .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     #file-label:focus-within { outline: 3px solid #8865ce; outline-offset: 2px; }
@@ -150,8 +151,11 @@ export const remotePage = String.raw`<!doctype html>
         <div class="compose-actions">
           <label id="file-label" for="files">Attach files<input class="visually-hidden" id="files" type="file" multiple aria-describedby="file-names"></label>
           <span id="file-names">Up to 4 files, 5 MB each</span>
+          <button type="button" id="record-voice" aria-describedby="voice-status" hidden>Record voice</button>
+          <button type="button" id="cancel-voice" hidden>Cancel recording</button>
           <button class="primary" id="send">Send</button>
         </div>
+        <p id="voice-status" role="status"></p>
       </form>
     </div>
   </main>
@@ -199,6 +203,11 @@ const uncertain = field("uncertain");
 const prompt = field("prompt");
 const fileInput = field("files");
 const send = field("send");
+const recordVoice = field("record-voice");
+const cancelVoice = field("cancel-voice");
+const voiceStatus = field("voice-status");
+const voiceSeconds = 30;
+const voiceSampleRate = 16_000;
 
 let token = sessionStorage.getItem("kada-device-token") || "";
 let identity = null;
@@ -206,6 +215,7 @@ let connectionAttempt = 0;
 let conversationId = "";
 let pending;
 let editor = { draft: undefined, saving: Promise.resolve() };
+let voiceCapture;
 let busy = false;
 let canSend = true;
 let refreshVersion = 0;
@@ -268,6 +278,7 @@ async function changeComposer(change, key = bookKey()) {
 }
 
 function restoreComposer() {
+  discardVoice();
   const record = composerRecords().get(conversationId);
   pending = record?.state === "pending" ? record : undefined;
   editor = { draft: record?.state === "draft" ? record : undefined, saving: Promise.resolve() };
@@ -1301,7 +1312,123 @@ function updateComposer() {
   send.disabled = !canSend || busy || Boolean(pending);
   fileInput.disabled = send.disabled;
   prompt.readOnly = send.disabled;
+  updateVoiceControls();
 }
+
+function updateVoiceControls() {
+  recordVoice.hidden = !identity?.voiceInput || !navigator.mediaDevices?.getUserMedia ||
+    typeof MediaRecorder === "undefined" || typeof OfflineAudioContext === "undefined";
+  recordVoice.disabled = voiceCapture ? !voiceCapture.finish : send.disabled;
+  recordVoice.textContent = voiceCapture?.finish ? "Stop and transcribe" : "Record voice";
+  cancelVoice.hidden = !voiceCapture;
+  cancelVoice.textContent = voiceCapture?.uploading ? "Discard transcript" : "Cancel recording";
+}
+
+function discardVoice() {
+  voiceCapture?.controller.abort();
+  voiceCapture = undefined;
+  voiceStatus.textContent = "";
+  updateVoiceControls();
+}
+
+function recordClip(stream, capture) {
+  const recorder = new MediaRecorder(stream);
+  const chunks = [];
+  let timer;
+  const signal = capture.controller.signal;
+  const finish = capture.finish = () => {
+    if (recorder.state === "recording") recorder.stop();
+  };
+  return new Promise((resolve, reject) => {
+    recorder.addEventListener("dataavailable", event => chunks.push(event.data));
+    recorder.addEventListener("stop", () => resolve(new Blob(chunks)), { once: true });
+    recorder.addEventListener("error", event => reject(event.error), { once: true });
+    signal.addEventListener("abort", finish, { once: true });
+    recorder.start();
+    timer = setTimeout(finish, voiceSeconds * 1000);
+    voiceStatus.textContent = "Recording for up to 30 seconds. SiliconFlow will transcribe the audio.";
+    updateVoiceControls();
+  }).finally(() => {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", finish);
+    capture.finish = undefined;
+  });
+}
+
+async function encodeVoiceClip(recording) {
+  if (!recording.size) throw new RequestError(400, "No audio was recorded. Try a longer recording.");
+  const decoder = new OfflineAudioContext(1, 1, voiceSampleRate);
+  const decoded = await decoder.decodeAudioData(await recording.arrayBuffer());
+  const samples = decoded.getChannelData(0).subarray(0, voiceSampleRate * voiceSeconds);
+  const dataSize = samples.length * 2;
+  const wave = new DataView(new ArrayBuffer(44 + dataSize));
+  wave.setUint32(0, 0x52494646); // RIFF
+  wave.setUint32(4, 36 + dataSize, true);
+  wave.setUint32(8, 0x57415645); // WAVE
+  wave.setUint32(12, 0x666d7420); // fmt
+  wave.setUint32(16, 16, true);
+  wave.setUint16(20, 1, true);
+  wave.setUint16(22, 1, true);
+  wave.setUint32(24, voiceSampleRate, true);
+  wave.setUint32(28, voiceSampleRate * 2, true);
+  wave.setUint16(32, 2, true);
+  wave.setUint16(34, 16, true);
+  wave.setUint32(36, 0x64617461); // data
+  wave.setUint32(40, dataSize, true);
+  samples.forEach((sample, index) => {
+    const amplitude = Math.max(-1, Math.min(1, sample));
+    wave.setInt16(44 + index * 2, amplitude * (amplitude < 0 ? 32768 : 32767), true);
+  });
+  return new Blob([wave.buffer], { type: "audio/wav" });
+}
+
+recordVoice.addEventListener("click", async () => {
+  if (voiceCapture?.finish) { voiceCapture.finish(); return; }
+  if (recordVoice.hidden || recordVoice.disabled || voiceCapture) return;
+  const capture = voiceCapture = { controller: new AbortController(), text: prompt.value };
+  const { signal } = capture.controller;
+  voiceStatus.textContent = "Waiting for microphone access…";
+  updateVoiceControls();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+    let recording;
+    try {
+      if (signal.aborted) return;
+      recording = await recordClip(stream, capture);
+    } finally { stream.getTracks().forEach(track => track.stop()); }
+    if (signal.aborted) return;
+    capture.uploading = true;
+    voiceStatus.textContent = "Transcribing with SiliconFlow…";
+    updateVoiceControls();
+    const wave = await encodeVoiceClip(recording);
+    if (signal.aborted) return;
+    const response = await request("/transcriptions", {
+      method: "POST", headers: { "Content-Type": wave.type }, body: wave, signal,
+    });
+    const { text } = await response.json();
+    if (signal.aborted) return;
+    if (prompt.value !== capture.text || send.disabled) {
+      throw new RequestError(409, "The draft changed during recording. Record again to add a transcript.");
+    }
+    const next = capture.text + (capture.text && !/\s$/.test(capture.text) ? " " : "") + text;
+    if (next.length > 12_000) throw new RequestError(400, "The transcript will not fit in this draft.");
+    prompt.value = next;
+    await saveDraft();
+    if (voiceCapture === capture && !editor.error) voiceStatus.textContent = "Transcript added to your draft.";
+  } catch (error) {
+    if (!signal.aborted) voiceStatus.textContent = error instanceof RequestError ? error.message :
+      error?.name === "NotAllowedError" ? "Allow microphone access to record a message." :
+      "Could not record or transcribe the audio. Try again.";
+  } finally {
+    if (voiceCapture === capture) {
+      voiceCapture = undefined;
+      updateVoiceControls();
+    }
+  }
+});
+
+cancelVoice.addEventListener("click", discardVoice);
+window.addEventListener("pagehide", discardVoice);
 
 function displayReceipt(receipt, checked = false) {
   const id = conversationId;
@@ -1927,6 +2054,7 @@ signout.addEventListener("click", async () => {
   signout.disabled = true;
   sessionStorage.removeItem("kada-device-token");
   identity = null;
+  discardVoice();
   clearApprovals();
   clearWorkItems();
   clearSharedThreads();
@@ -1960,7 +2088,7 @@ window.addEventListener("hashchange", () => {
 });
 fileInput.addEventListener("change", selectFiles);
 
-prompt.addEventListener("input", () => {
+function saveDraft() {
   if (!identity || !conversationId) return;
   const text = prompt.value;
   const id = conversationId;
@@ -1986,7 +2114,9 @@ prompt.addEventListener("input", () => {
     selected.error = status.textContent;
   });
   return selected.saving;
-});
+}
+
+prompt.addEventListener("input", saveDraft);
 
 async function whileSending(run) {
   busy = true;
@@ -2039,6 +2169,7 @@ field("composer").addEventListener("submit", async (event) => {
     status.textContent = "Choose up to four files, each 5 MB or smaller.";
     return;
   }
+  discardVoice();
   const id = conversationId;
   await whileSending(async () => {
     await editor.saving;

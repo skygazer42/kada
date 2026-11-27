@@ -61,7 +61,7 @@ import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, ty
 import { RoomError, advanceRoomQueue, assistantRooms, interruptRoomQueue, pendingRoomTurn, readRoomAttachment,
   roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
 import { VoiceNoteError, VoiceNotes, readVoiceClip, saveVoiceReply, siliconFlowVoiceSynthesizer, siliconFlowVoiceTranscriber,
-  transcriptionText, verifyVoiceReply, voiceNoteKey, type VoiceSynthesizer, type VoiceTranscriber } from './voice-notes.js';
+  transcriptionText, validateVoiceClip, verifyVoiceReply, voiceNoteKey, type VoiceSynthesizer, type VoiceTranscriber } from './voice-notes.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
   type ReceivedThreadReport, type TaskThread, type ThreadInvocation, type ThreadOrigin, type ThreadReport } from './task-threads.js';
 import { ThreadPosts, postInformation, threadPostExtension, threadPostWakeId, threadPostWakePrefix,
@@ -2458,6 +2458,19 @@ export class LocalRuntime {
     return this.open(meta, false);
   }
 
+  get voiceInputAvailable() {
+    return Boolean(this.options.voiceTranscriber || process.env.SILICONFLOW_API_KEY?.trim());
+  }
+
+  private voiceTranscriber() {
+    return this.options.voiceTranscriber ?? siliconFlowVoiceTranscriber();
+  }
+
+  async transcribeRecording(data: Buffer) {
+    validateVoiceClip(data);
+    return transcriptionText(await this.voiceTranscriber()(data));
+  }
+
   async transcribeVoice(id: string, { file: source, requestId }: Record<string, unknown>) {
     const key = voiceNoteKey(requestId), noteId = key.slice('voice:'.length);
     const active = await this.changes.run(() => this.openVoiceConversation(id));
@@ -2473,7 +2486,7 @@ export class LocalRuntime {
           if (!previous.receipt) throw new VoiceNoteError(409, 'The original voice request has no saved transcript. Use a new request ID to retry.');
           return { receipt: { ...previous.receipt, file: { ...previous.receipt.file } } };
         }
-        const transcribe = this.options.voiceTranscriber ?? siliconFlowVoiceTranscriber();
+        const transcribe = this.voiceTranscriber();
         state.requests[key] = { file };
         return { transcribe };
       }, ctx);

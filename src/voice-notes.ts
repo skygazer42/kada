@@ -12,6 +12,7 @@ export class VoiceNoteError extends Error {
 type Receipt = { id: string; file: FileSnapshot; text: string };
 export type VoiceTranscriber = (audio: Uint8Array) => Promise<string>;
 export type VoiceSynthesizer = (text: string) => Promise<Uint8Array>;
+export const voiceClipLimit = 5 * 1024 * 1024;
 const speechLimit = 16 * 1024 * 1024;
 
 export const VoiceNotes = defineDoc<{ requests: Record<string, { file: FileSnapshot; receipt?: Receipt }>;
@@ -26,11 +27,15 @@ export function voiceNoteKey(value: unknown): string {
 
 export async function readVoiceClip(workspace: Workspace, path: unknown) {
   if (typeof path !== 'string' || !/\.wav$/i.test(path) || path.includes('\0')) throw new VoiceNoteError(400, 'Choose a WAV file in this conversation’s workspace.');
-  const { file, data } = await workspace.readBinarySnapshot(path, 5 * 1024 * 1024);
+  const { file, data } = await workspace.readBinarySnapshot(path, voiceClipLimit);
+  validateVoiceClip(data);
+  return { file, data };
+}
+
+export function validateVoiceClip(data: Buffer) {
   if (!isWave(data)) {
     throw new VoiceNoteError(400, 'The source must be a valid RIFF WAV recording.');
   }
-  return { file, data };
 }
 
 function isWave(data: Buffer) {

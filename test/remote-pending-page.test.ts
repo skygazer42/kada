@@ -49,6 +49,7 @@ function storage(values: Map<string, string>, beforeSet?: (key: string) => void)
 type Message = { messageId: string; text: string; attachmentIds: string[] };
 type ApprovalFixture = (init: RequestInit, url: string) => Response | Promise<Response>;
 type WorkItemsFixture = (url: string, bearer: string, init: RequestInit) => Response | Promise<Response>;
+type VoiceFixture = { transcribe(wav: Blob): Response | Promise<Response>; released(): void };
 const draft = "Keep this exact draft after reconnect\nwith the attachment.";
 const conversationId = "draft-conversation";
 const receiptUrl = "/remote/api/conversations/" + conversationId + "?messageId=";
@@ -77,7 +78,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
       serviceWorker: object;
       permission: () => Promise<string>;
       request: (init: RequestInit) => Response;
-    }) {
+    }, voice?: VoiceFixture) {
       const location = Object.assign(new URL("http://localhost/remote" + hash), {
         reload() { reloaded = true; },
       });
@@ -85,6 +86,20 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
       const nodes = new Map<string, Element>();
       const windowHandlers = new Map<string, () => void>();
       let poll: () => Promise<void>;
+      class MediaRecorderFixture extends EventTarget {
+        state = "inactive";
+        start() { this.state = "recording"; }
+        stop() {
+          this.state = "inactive";
+          this.dispatchEvent(Object.assign(new Event("dataavailable"), { data: new Blob(["synthetic recording"]) }));
+          this.dispatchEvent(new Event("stop"));
+        }
+      }
+      class OfflineAudioContextFixture {
+        async decodeAudioData() {
+          return { getChannelData: () => Float32Array.of(0.5, -0.5) };
+        }
+      }
       const field = (id: string) => {
         if (!nodes.has(id)) nodes.set(id, new Element());
         return nodes.get(id)!;
@@ -97,12 +112,15 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
           location.href = new URL(path, location).href;
         } }, URLSearchParams,
         AbortSignal,
+        ...(voice ? { MediaRecorder: MediaRecorderFixture, OfflineAudioContext: OfflineAudioContextFixture, Blob, AbortController, setTimeout, clearTimeout } : {}),
         localStorage: storage(local, (key) => {
           if (!failComposerWrite || !key.startsWith("kada:composer:")) return;
           failComposerWrite = false;
           throw new DOMException("Storage quota reached", "QuotaExceededError");
         }), sessionStorage: storage(session), crypto: webcrypto,
-        navigator: { serviceWorker: push?.serviceWorker, locks: { request(name: string, fn: () => unknown) {
+        navigator: { serviceWorker: push?.serviceWorker,
+          ...(voice ? { mediaDevices: { async getUserMedia() { return { getTracks: () => [{ stop: voice.released }] }; } } } : {}),
+          locks: { request(name: string, fn: () => unknown) {
           const result = (locks.get(name) ?? Promise.resolve()).then(fn);
           locks.set(name, result.catch(() => {}));
           return result;
@@ -117,6 +135,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
           if (url.startsWith("/remote/api/work-items") && workItems) return workItems(url, deviceToken, init);
           if (url.startsWith("/remote/api/shared-threads") && threads) return threads(url, deviceToken, init);
           if (url.startsWith("/remote/api/shared-rooms") && rooms) return rooms(url, deviceToken, init);
+          if (url === "/remote/api/transcriptions" && voice) return voice.transcribe(init.body as Blob);
           if (url === "/remote/api/session") {
             await sessionWait?.(deviceToken);
             const [deviceId, accountId = "account"] = deviceToken.split("/");
@@ -126,6 +145,7 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
               ...(approvals ? { actionApprovals: true } : {}), ...(workItems ? { workItems: true } : {}),
               ...(threads ? { sharedThreads: true } : {}),
               ...(rooms ? { sharedRooms: true } : {}),
+              ...(voice ? { voiceInput: true } : {}),
             });
           }
           if (url === "/remote/api/conversations") {
@@ -178,6 +198,72 @@ function harness(history?: (url: URL, init: RequestInit) => Response | Promise<R
     },
   };
 }
+
+test("phone dictation inserts an editable draft and leaves sending to the user", async () => {
+  const app = harness();
+  let released = 0;
+  const clips: Buffer[] = [];
+  const voice = {
+    released() { released++; },
+    async transcribe(wav: Blob) {
+      assert.equal(wav.type, "audio/wav");
+      clips.push(Buffer.from(await wav.arrayBuffer()));
+      return Response.json({ text: "Forty-two records." });
+    },
+  };
+  const page = await app.open("", undefined, voice);
+  const record = page.field("record-voice");
+  assert.equal(record.hidden, false);
+  await page.type("Review");
+  const recording = record.trigger("click");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await record.trigger("click");
+  await recording;
+  assert.equal(released, 1);
+  assert.equal(clips[0]?.toString("ascii", 0, 12), "RIFF(\0\0\0WAVE");
+  assert.equal(clips[0]?.readUInt32LE(24), 16_000);
+  assert.equal(page.field("prompt").value, "Review Forty-two records.");
+  assert.equal(app.messages.length, 0);
+
+  const reopened = await app.open("", undefined, voice);
+  assert.equal(reopened.field("prompt").value, "Review Forty-two records.");
+  await reopened.type("Review 42 records.");
+  app.confirm();
+  app.failNext(undefined);
+  await reopened.field("composer").trigger("submit");
+  assert.deepEqual(app.messages.map(message => message.text), ["Review 42 records."]);
+});
+
+test("changing the selected conversation clears the microphone and ignores a late transcript", async () => {
+  const app = harness();
+  let released = 0, uploads = 0;
+  let reply!: (response: Response) => void;
+  const voice = {
+    released() { released++; },
+    transcribe() { uploads++; return new Promise<Response>(resolve => { reply = resolve; }); },
+  };
+  const page = await app.open("", undefined, voice);
+  await page.type("Original draft.");
+  const record = page.field("record-voice");
+  const first = record.trigger("click");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await page.field("new").trigger("click");
+  await first;
+  assert.equal(released, 1);
+  assert.equal(uploads, 0);
+
+  const second = record.trigger("click");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await record.trigger("click");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(uploads, 1);
+  await page.field("new").trigger("click");
+  await page.type("New draft.");
+  reply(Response.json({ text: "Late words." }));
+  await second;
+  assert.equal(page.field("prompt").value, "New draft.");
+  assert.equal(app.messages.length, 0);
+});
 
 test("a task link waits for pairing and only selects a conversation listed for that device", async () => {
   const linked = "shared-report";

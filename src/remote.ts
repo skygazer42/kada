@@ -17,6 +17,7 @@ import { readJson, redactCredentials, SerialQueue } from "./util.js";
 import { RoomError } from './assistant-rooms.js';
 import { Workspace } from "./workspace.js";
 import { WorkItemError, workItemOverdue, type WorkItem } from './work-items.js';
+import { VoiceNoteError, voiceClipLimit } from './voice-notes.js';
 
 function sharedWorkItem(item: WorkItem) {
   const { id, title, revision, updatedAt, status, archived, completedAt, priority, dueDate, dueAt, timeZone } = item;
@@ -326,6 +327,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
   const base = options.workspace ?? join(options.directory, "workspaces");
   const queues = new Map<string, { queue: SerialQueue; references: number }>();
   const dispatching = new Set<string>();
+  const transcribing = new Set<string>();
 
   const accountPath = (scope: Scope) => join(options.directory, "conversations", digest(scope.accountId));
   const recordPath = (scope: Scope, id: string) => join(accountPath(scope), digest(id) + ".json");
@@ -735,7 +737,18 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const sharedThread = /^\/remote\/api\/shared-threads(?:\/([a-f0-9-]{36})(?:\/(answers|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?)?$/.exec(route);
       const sharedRoom = /^\/remote\/api\/shared-rooms(?:\/([a-f0-9-]{36})(?:\/(messages)|\/attachments\/(\d+)\/(\d+))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
-        send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true, sharedRooms: true } : {}) });
+        send(response, 200, { ...scope, pairingId, ...(runtime.voiceInputAvailable ? { voiceInput: true } : {}),
+          ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true, sharedRooms: true } : {}) });
+      } else if (method === "POST" && route === "/remote/api/transcriptions") {
+        if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "audio/wav") {
+          request.resume();
+          throw new HttpError(415, "Expected audio/wav.");
+        }
+        const clip = await body(request, voiceClipLimit);
+        if (transcribing.has(pairingId)) throw new HttpError(409, "This device is already transcribing a recording.");
+        transcribing.add(pairingId);
+        try { send(response, 200, { text: await runtime.transcribeRecording(clip) }); }
+        finally { transcribing.delete(pairingId); }
       } else if (options.sharedDevices && sharedRoom) {
         const [, id, messages, entryId, attachmentId] = sharedRoom;
         if (method !== (messages ? 'POST' : 'GET')) throw new HttpError(405, 'This method is unavailable for shared rooms.');
@@ -1086,7 +1099,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError || error instanceof RoomError || error instanceof WorkItemError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError || error instanceof RoomError || error instanceof WorkItemError || error instanceof VoiceNoteError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;

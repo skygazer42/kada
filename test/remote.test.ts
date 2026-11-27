@@ -56,6 +56,44 @@ function pairing(accountId = "owner", deviceId = "phone") {
   return { token, device: { accountId, deviceId, tokenHash } };
 }
 
+test('a paired portal transcribes bounded WAV input without starting a conversation', async t => {
+  const clip = Buffer.from('524946462800000057415645666d74201000000001000100803e0000007d00000200100064617461040000000000ff7f', 'hex');
+  const received: Buffer[] = [];
+  let release!: () => void;
+  const transcribing = new Promise<void>(resolve => { release = resolve; });
+  const fixture = await scriptedFixture(() => assert.fail('transcription must not start a chat'), {}, undefined, {
+    async voiceTranscriber(bytes) {
+      received.push(Buffer.from(bytes));
+      await transcribing;
+      return '  Review forty-two records.  ';
+    },
+  });
+  t.after(() => fixture.close());
+  const owner = pairing();
+  const { call } = await portal(t, fixture.runtime, join(fixture.directory, 'remote'), [owner.device]);
+  const post = (bytes: Buffer, type = 'audio/wav'): RequestInit => ({
+    method: 'POST', headers: { 'Content-Type': type }, body: new Uint8Array(bytes),
+  });
+  assert.equal((await (await call(owner.token, '/session')).json()).voiceInput, true);
+  assert.equal((await call('unpaired', '/transcriptions', post(clip))).status, 401);
+  assert.equal((await call(owner.token, '/transcriptions', {
+    ...post(clip), headers: { 'Content-Type': 'audio/wav', Origin: 'https://other.example' },
+  })).status, 403);
+  assert.equal((await call(owner.token, '/transcriptions', post(clip, 'text/plain'))).status, 415);
+  assert.equal((await call(owner.token, '/transcriptions', post(Buffer.from('invalid WAV')))).status, 400);
+  assert.equal((await call(owner.token, '/transcriptions', post(Buffer.alloc(5 * 1024 * 1024 + 1)))).status, 413);
+  const pending = call(owner.token, '/transcriptions', post(clip));
+  try {
+    await until(async () => received.length, count => count === 1);
+    assert.equal((await call(owner.token, '/transcriptions', post(clip))).status, 409);
+  } finally { release(); }
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { text: 'Review forty-two records.' });
+  assert.deepEqual(received, [clip]);
+  assert.deepEqual(await (await call(owner.token, '/conversations')).json(), []);
+});
+
 test('a paired remote chat answers only its original structured question and replays the answer', async t => {
   const fixture = await scriptedFixture(context => context.messages.some(message => message.role === 'user' && message.content === 'CSV')
     ? fauxAssistantMessage('Selected CSV.') : fauxAssistantMessage(fauxToolCall('ask_user', { question: 'Which format?', options: ['CSV', 'XLSX'], detail: 'Choose a format.' }), { stopReason: 'toolUse' }));
