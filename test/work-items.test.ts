@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { promisify } from "node:util";
 import { WorkItems, type WorkItemLink, type WorkItemRun } from "../src/work-items.js";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { serve } from "../src/server.js";
@@ -63,6 +65,27 @@ test("a paired editor updates one original work item with its revision and a dur
     assert.equal((await request(path, phone.token, 'PATCH', edit)).status, 404);
     assert.equal((await grant('share')).status, 200);
     assert.equal((await request(path, phone.token, 'PATCH', edit)).status, 403);
+
+    const accounts = '/v1/work-items/' + card.id + '/accounts';
+    const granted = await request(accounts + '/owner', ownerToken, 'PUT', { role: 'viewer', edits: true });
+    assert.equal(granted.status, 200, await granted.text());
+    const laptop = await (await request('/v1/remote/devices', ownerToken, 'POST', { accountId: 'owner', deviceId: 'laptop' })).json();
+    const foreign = await (await request('/v1/remote/devices', ownerToken, 'POST', { accountId: 'foreign', deviceId: 'laptop' })).json();
+    assert.equal((await request(path, foreign.token)).status, 404);
+    const current = await (await request(path, laptop.token)).json();
+    assert.equal(current.canEdit, true);
+    const accountEdit = { requestId: 'account-edit', revision: current.revision, title: 'Edited by the account' };
+    const response = await request(path, laptop.token, 'PATCH', accountEdit);
+    assert.equal(response.status, 200);
+    const expected = await response.json();
+    assert.equal(expected.title, accountEdit.title);
+    assert.equal((await request(accounts + '/owner', ownerToken, 'PUT', { role: 'viewer' })).status, 200);
+    assert.equal((await request(path, laptop.token, 'PATCH', accountEdit)).status, 403);
+    assert.equal((await request(accounts + '/owner', ownerToken, 'DELETE')).status, 200);
+    assert.equal((await request(path, laptop.token)).status, 404);
+    const remaining = await (await request(path, phone.token)).json();
+    assert.equal(remaining.title, accountEdit.title);
+    assert.equal(remaining.canEdit, undefined);
   } finally { await server.close(); }
 });
 
@@ -292,7 +315,8 @@ test("shared run controls preserve Pi state and budget while child answers targe
   await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
   const port = (socket.address() as { port: number }).port;
   await new Promise<void>(resolve => socket.close(() => resolve()));
-  const open = () => serve({ ...fixture.settings, port, dataDir: directory }, { models: fixture.models });
+  const config = { ...fixture.settings, port, dataDir: directory };
+  const open = () => serve(config, { models: fixture.models });
   let server = await open();
   try {
     const admin = (await readFile(join(directory, "token"), "utf8")).trim();
@@ -350,13 +374,29 @@ test("shared run controls preserve Pi state and budget while child answers targe
     assert.equal((await request(phone, path + "/child-answers", "POST", { ...reply, questionId: "999999" })).status, 404);
     await owner(permissions + "/unshare-replies", recipient);
     assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 403);
-    await owner(permissions + "/share-replies", recipient);
-    clearInterval(server.runtime["timer"]);
-    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 200);
+    const accountPath = permissions + "/accounts/owner";
+    assert.equal((await request(phone, accountPath, "PUT", { role: "participant" })).status, 401);
+    const configPath = join(directory, "account-config.json");
+    await writeFile(configPath, JSON.stringify(config));
+    const cli = async (action: string, ...args: string[]) => {
+      const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "src/cli.ts", "work-items",
+        action, item.id, ...args, "--config", configPath]);
+      return JSON.parse(stdout);
+    };
+    const grant = { workItemId: item.id, accountId: "owner", role: "participant", controls: true, edits: false };
+    assert.deepEqual(await cli("grant-account", "owner", "participant", "controls"), grant);
+    assert.deepEqual(await cli("accounts"), [grant]);
     await server.close();
     server = await open();
-    assert.equal((await request(phone, path + "/child-answers", "POST", reply)).status, 200);
-    assert.equal((await request(phone, path + "/child-answers", "POST", { ...reply, answer: "Use EUR." })).status, 409);
+    const later = await pair("later");
+    assert.equal((await (await request(later, path)).json()).childQuestions[0].questionId, reply.questionId);
+    await owner(permissions + "/share-replies", recipient);
+    clearInterval(server.runtime["timer"]);
+    assert.equal((await request(later, path + "/child-answers", "POST", reply)).status, 200);
+    await server.close();
+    server = await open();
+    assert.equal((await request(later, path + "/child-answers", "POST", reply)).status, 200);
+    assert.equal((await request(later, path + "/child-answers", "POST", { ...reply, answer: "Use EUR." })).status, 409);
     const final = await until(() => server.runtime.status(run.id), status => status.status === "completed");
     assert.equal(answers, 1);
     assert.equal(final.delegations[0]?.answer, "Currency is USD.");
@@ -364,11 +404,15 @@ test("shared run controls preserve Pi state and budget while child answers targe
     const next = await server.runtime.workItems.run(item.id, { revision: item.revision, requestId: "cancel-currency", confirmed: true });
     await until(() => server.runtime.status(next.id), status => Boolean(status.delegations[0]?.question));
     const nextPath = path.replace(run.id, next.id);
-    const nextView = await (await request(phone, nextPath)).json();
-    assert.equal((await request(phone, nextPath + "/control", "POST", { action: "cancel", version: nextView.controlVersion })).status, 200);
+    assert.equal((await request(admin, accountPath, "PUT", { role: "viewer", controls: true })).status, 200);
+    assert.equal((await request(later, nextPath + "/child-answers", "POST", reply)).status, 403);
+    const nextView = await (await request(later, nextPath)).json();
+    assert.equal((await request(later, nextPath + "/control", "POST", { action: "cancel", version: nextView.controlVersion })).status, 200);
     const cancelled = await server.runtime.status(next.id);
     assert.equal(cancelled.status, "cancelled");
     assert.equal(cancelled.activeWorkerCount, 0);
+    assert.deepEqual(await cli("revoke-account", "owner"), { revoked: true });
+    assert.equal((await request(later, nextPath)).status, 404);
     assert.equal((await request(phone, nextPath + "/control", "POST", { action: "continue", version: nextView.controlVersion })).status, 409);
     await server.runtime.pause(run.id);
     assert.deepEqual((await view()).controls, []);

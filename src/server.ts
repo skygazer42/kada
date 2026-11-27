@@ -402,15 +402,18 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'POST') return send(201, await runtime.createRoom(await body(req)));
         return send(405, { error: 'Method not allowed' });
       }
-      const accountShare = /^\/v1\/(assistant-rooms|tasks)\/([a-f0-9-]{36})\/accounts(?:\/([A-Za-z0-9][A-Za-z0-9_-]{0,79}))?$/.exec(url.pathname);
+      const accountShare = /^\/v1\/(assistant-rooms|tasks|work-items)\/([a-f0-9-]{36})\/accounts(?:\/([A-Za-z0-9][A-Za-z0-9_-]{0,79}))?$/.exec(url.pathname);
       if (accountShare) {
         const [, resource, id, accountId] = accountShare;
-        const scope = resource === 'assistant-rooms' ? 'shared-rooms' : 'shared-threads';
-        const meta = await runtime.metadata(id!).catch(error => {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        });
-        if (scope === 'shared-rooms' ? !meta?.room : !meta || meta.room || meta.remotePolicy) {
-          return send(404, { error: 'The requested local room or thread was not found.' });
+        const scope = resource === 'work-items' ? 'shared-work-items' : resource === 'assistant-rooms' ? 'shared-rooms' : 'shared-threads';
+        if (scope === 'shared-work-items') await runtime.workItems.get(id!);
+        else {
+          const meta = await runtime.metadata(id!).catch(error => {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          });
+          if (scope === 'shared-rooms' ? !meta?.room : !meta || meta.room || meta.remotePolicy) {
+            return send(404, { error: 'The requested local room or thread was not found.' });
+          }
         }
         if (!accountId && req.method === 'GET') return send(200, await devices.accountGrants(scope, id!));
         if (accountId && (req.method === 'PUT' || req.method === 'DELETE')) {

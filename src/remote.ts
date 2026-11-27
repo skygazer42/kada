@@ -970,7 +970,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
           runs.sort((a, b) => Number(b.pending) - Number(a.pending) || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
           return { ...sharedWorkItem(item), objective: item.objective, ...(canEdit ? { canEdit: true } : {}),
             runs: runs.map(({ pending, createdAt, ...run }) => run) };
-        });
+        }, 'shared-work-items');
         if (!result) throw new HttpError(401, "Enter this device’s pairing token.");
         send(response, 200, result);
       } else if (options.sharedDevices && method === "GET" && route === "/remote/api/action-approvals") {

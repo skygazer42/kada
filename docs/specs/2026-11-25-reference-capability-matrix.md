@@ -6,9 +6,9 @@
 
 相对首期计划基线 `092cc43`，Kada 已增加记忆编辑/遗忘与使用追踪、任务交接与通知、项目模型与 Skills/MCP 配置、例行任务、手机 Web 派活和附件交付、浏览器接管回交、可追溯后台子任务。后续又补充单次动作审批、共享工作项与原运行、OAuth、变更预检、事件入口、项目活动门槛、账户拒绝降频、原对话检索、大型 MCP 按需加载和聊天提醒。逐项实现与证据见[首期 Spec](2026-11-23-personal-assistant.md)、[增量 Spec](2026-11-24-assistant-capability-parity.md)。这些入口已有不代表下表能力全部达到参考项目水平。
 
-## 剩余能力与验收
+## 实现状态与验收
 
-“部分”表示已有对应原语或入口；“缺少”表示未找到完整产品路径；“待实测”表示实现存在但指定环境没有验收。以下均是待办，不是本轮交付承诺。
+以实际用户入口、源码和验收记录核对。表内的实测结论按列出的环境和场景生效。
 
 | 优先级 | 能力、当前状态 | 下一步与通过条件 | 固定源码参考 |
 | --- | --- | --- | --- |
@@ -25,6 +25,7 @@
 | P1 | 群组会话、跨项目交棒、文件回交与排队 | 本机可编组、按修订编辑并定向发言。跨项目成员可在指定目录工作、发布固定二进制附件和保存收到的原文件。配对手机按授权读取同一公开群组与附件，保留独立的本机文件权限。多用户组织与跨主机执行待对齐。 [群组实现与验收](../superpowers/plans/2026-11-26-assistant-rooms.md) · [排队验收](../superpowers/plans/2026-11-26-assistant-room-queue.md) | [OpenMausBot 群组上下文](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/room-transcript.ts#L34) · [目标目录](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/handoff-files.ts#L269) · [Rakazo 运行登记](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/bots/group-handoff.ts#L179) |
 | P1 | 按配对账户授予群组角色 | owner 为当前及以后配对的账户设备授予查看或发言角色，并可单独授予下载。回归覆盖独立设备、权限降级、撤回及重启。跨主机管理的组织目录和机器策略待接入。 [账户授权与验收](../superpowers/plans/2026-11-26-assistant-rooms.md#群组账户授权) | [OpenMausBot 成员权限更新和会话撤回](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/cloud-team-roster.ts#L87) |
 | P1 | 共享任务按配对账户授权 | 同一账户设备可获得查看或回复，确认和执行控制、产物下载分别授权。验证了重启后新设备确认原方案并按原总预算交付，以及降级和撤回。 [任务账户验收](../superpowers/plans/2026-11-26-shared-thread-controls.md#共享任务账户授权) | [OpenMausBot 账户角色更新](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/cloud-team-roster.ts#L87) · [Codync 原任务入口](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/WorkThreadView.kt#L143) |
+| P1 | 共享工作项按配对账户授权 | 同一账户可查看或答复原运行，编辑卡片与控制运行分别授予。回归覆盖重启后新设备答复、角色降级和账户撤回。 [工作项账户验收](../superpowers/plans/2026-11-26-work-item-assignees.md#工作项账户授权) | [OpenMausBot 账户角色更新](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/cloud-team-roster.ts#L87) · [Suparagent 工作项与原运行](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L31) |
 | P1 | 本机浏览器支持项目模型、MCP、Gmail 与日历绑定 | 可保存和恢复项目模型，并编辑项目工具范围。连接页可登记、测试、启用、停用并设置逐次审批。项目设置可保存或解除邮箱、日历绑定及助手访问。OAuth 回调和退出已通过本机合成账号验证。聊天可经原会话确认模型和 MCP 提案。 [模型设置](../superpowers/plans/2026-11-26-project-model-page.md) · [项目工具](../superpowers/plans/2026-11-26-project-mcp-page.md) · [应用绑定](../superpowers/plans/2026-11-27-project-calendar.md#浏览器项目绑定) | [OpenMausBot 模型确认](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/model-requests.ts#L271) · [Rakazo 连接设置](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-server-tool.ts#L129) |
 | P1 | 公开 GitHub 触发及项目 Gmail 读取和审批写入已接入 | 终端和授权聊天可搜索及阅读原正文。终端与任务可下载并核验原附件。执行任务经逐次批准可保存草稿、发送、回复、转发或调整标签。附件随审批核验，真实邮箱的写入和投递待验收。 [公开事件](../experiments/2026-11-26-github-public-feed.json) · [项目 Gmail](../superpowers/plans/2026-11-27-project-gmail.md) | [Rakazo Webhook](https://github.com/elie222/rakazo/blob/e64d73292179/apps/api/src/webhooks/github-webhook.ts#L15) · [Rakazo 应用工具路由](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/providers/integration/pipedream/pipedream-connector.ts#L264) · [Suparagent 写入审批](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/composio_actions.py#L136) · [Google Workspace MCP 原附件](https://github.com/taylorwilsdon/google_workspace_mcp/blob/6df4ad5a9fd1209f1e946c12cdffa64226b5f694/gmail/gmail_tools.py#L2324) |
 | P1 | Gmail 新匹配可触发本机通知或任务 | Pi 循环规则按绑定邮箱搜索，首次登记基线，后续按原消息 ID 去重。通知写入后重启保留原发生项和单条通知。任务只用授权连接读取本次原邮件。真实 Gmail 账号和即时推送仍待验收。 [实现与回归](../superpowers/plans/2026-11-27-project-gmail.md#gmail-匹配触发) | [Rakazo 条目观察](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/routines/routine-watch.ts#L275) · [DuskBot Gmail 触发](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L178) |
@@ -37,6 +38,15 @@
 | P2 | 本机任务可选择并绑定独立浏览器配置 | 本机 owner 在新任务指定配置，租约、接管和重启后的回交按原配置独立处理。真实 Chromium 双会话通过重启与独立回交。回归覆盖错配拒绝和旧后台兼容。跨主机设备权限、远端系统应用和云电脑待对齐。 [本机驱动回归](../superpowers/plans/2026-11-27-browser-sign-in-handoff.md#任务选择浏览器配置) | [OpenMausBot 指定执行位置](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/computer-selection.ts#L12) |
 | P2 | 手机 Web 推送已有传输和会话跳转验收 | Windows Chrome 建立真实 FCM 订阅，发送在 FCM 获得回执并有浏览器入站记录。浏览器订阅撤销后可在页面重新开启。Chromium 合成通知可跳转到原配对会话。实体 iOS/Android 仍需验收后台通知显示及点击，macOS 需实机验证任务卡及子任务控制。 [推送状态](2026-11-24-assistant-capability-parity.md#已定位的能力差距) | [Codync Android Push](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L179) |
 | P2 | Skill 发现、固定版本、导入、修订与本机导出已接入 | 用户可导入原生 Pi 包，按当前版本更新并导出选定版本。已有运行保留原 pin，真实模型用新导入的指定版本验收。助手与用户之间的在线目录、发布和撤回仍待补，质量和成本继续用原生 Pi 对照。 [实现与实测](../superpowers/plans/2026-11-26-skill-authoring.md) | [Rakazo skill_create / skill_update](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tools/builtin-fleet.tool-definition.ts#L61) · [OpenMausBot 管理调用](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-call.ts#L903) |
+
+## 尚有差距的产品能力
+
+| 能力 | Kada 现状与验收条件 | 固定源码参考 |
+| --- | --- | --- |
+| 原生手机后台接回 | 手机 Web 已能在配对后打开原任务和附件，Chromium 已验证推送收件与跳转。实体 Android、iOS 需在应用关闭后收到待答通知，点击进入有权限的原任务，提交一次答复并收到原交付。 | [Codync 的 Android 通知接收和跳转](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/PushService.kt#L175) · [nanoMuse 的会话历史](https://github.com/nano-muse/nanoMuse/blob/09850259cab0/android/src/android/app/src/main/java/com/openminis/app/sandbox/offload/SessionsOffloadHandler.kt#L37) |
+| 跨主机选择执行位置 | 本机已能固定每项任务的浏览器配置和工作目录。跨主机验收需由用户选择已授权的第二台设备，在该设备运行并保存原任务，断线重连后沿原任务和原范围接回。 | [OpenMausBot 的执行位置选择](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/computer-selection.ts#L23) · [Codync 的 iOS 设备选择](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/ios/Views/ChooseComputerView.swift#L7) |
+| 真实应用事件与写入 | Gmail 与日历已有项目绑定、审批和合成回归。真实测试账号需验证授权、事件触发、原对象写入回执及取消授权后的处理。 | [Rakazo 的日历事件同步](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/meetings/calendar/calendar-service.ts#L288) · [DuskBot 的 Gmail 规则](https://github.com/DuskBotAI/duskbot/blob/18df35a445e3/server/app-triggers.ts#L178) |
+| 外部消息渠道 | 配对手机 Web 可派活和回传结果。消息渠道路径需覆盖原消息去重、按会话授权、提交待答和回传原产物。 | [Pots 的 Telegram 适配与轮询](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/channels/telegram/index.ts#L113) · [Pots 的发送回执](https://github.com/Crokily/pi-durable-bot/blob/38486add7c1f/src/gateway/outbox.ts#L54) |
 
 ## 推进规则
 
