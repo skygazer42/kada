@@ -14,6 +14,7 @@ import { RemotePush, RemotePushError, type PushEvent, type PushScope, type PushS
 import { taskGroup, taskView } from "./task-view.js";
 import { QuestionError } from './questions.js';
 import { readJson, redactCredentials, SerialQueue } from "./util.js";
+import { RoomError } from './assistant-rooms.js';
 import { Workspace } from "./workspace.js";
 import { workItemOverdue, type WorkItem } from './work-items.js';
 
@@ -731,8 +732,49 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
       const actionApproval = /^\/remote\/api\/action-approvals\/([a-f0-9-]{36})\/(\d+)$/.exec(route);
       const workItem = /^\/remote\/api\/work-items(?:\/([a-f0-9-]{36})(?:\/runs\/([a-f0-9-]{36})(?:\/(answers|child-answers|control))?)?)?$/.exec(route);
       const sharedThread = /^\/remote\/api\/shared-threads(?:\/([a-f0-9-]{36})(?:\/(answers|confirm|control|artifacts\/[0-9]+\/[a-f0-9]{64}))?)?$/.exec(route);
+      const sharedRoom = /^\/remote\/api\/shared-rooms(?:\/([a-f0-9-]{36})(?:\/(messages))?)?$/.exec(route);
       if (method === "GET" && route === "/remote/api/session") {
-        send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true } : {}) });
+        send(response, 200, { ...scope, pairingId, ...(options.sharedDevices ? { actionApprovals: true, workItems: true, sharedThreads: true, sharedRooms: true } : {}) });
+      } else if (options.sharedDevices && sharedRoom) {
+        const [, id, messages] = sharedRoom;
+        if (method !== (messages ? 'POST' : 'GET')) throw new HttpError(405, 'This method is unavailable for shared rooms.');
+        const input = messages ? await json(request) : undefined;
+        const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
+          const grants = device.sharedThreads ?? [];
+          if (!id) {
+            const rows = [];
+            for (const grant of grants) {
+              const metadata = await runtime.metadata(grant.taskId).catch(error => { if (!isMissing(error)) throw error; });
+              if (metadata?.room) rows.push({ id: metadata.id, title: redactCredentials(metadata.objective), createdAt: metadata.createdAt });
+            }
+            return rows.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+          }
+          const grant = grants.find(item => item.taskId === id);
+          if (!grant) throw new HttpError(404, 'Shared room not found.');
+          const metadata = await runtime.metadata(id).catch(error => { if (!isMissing(error)) throw error; });
+          if (!metadata?.room) throw new HttpError(404, 'Shared room not found.');
+          if (input) {
+            if (!grant.replies) throw new HttpError(403, 'The host has not shared reply access to this room.');
+            const { memberId, requestId, message, roomRevision } = input;
+            if (typeof requestId !== 'string' || !idPattern.test(requestId) || typeof roomRevision !== 'number') {
+              throw new HttpError(400, 'Provide the displayed room revision and a request ID.');
+            }
+            const receipt = await runtime.sendRoomMessage(id, { memberId, message, roomRevision,
+              requestId: digest(JSON.stringify(['shared-room', pairingId, requestId])) });
+            return { ...receipt, requestId };
+          }
+          const before = url.searchParams.get('before');
+          const view = await runtime.roomDetails(id, before === null ? undefined : Number(before));
+          return { id, title: redactCredentials(view.title), revision: view.revision, control: view.control,
+            canSend: !!grant.replies && view.control === 'active',
+            members: view.members.map(({ id, name, revision }) => ({ id, name: redactCredentials(name), revision })),
+            messages: view.messages.map(({ requestId: _request, originalAnswerId: _answer, text, name, toName, ...message }) =>
+              ({ ...message, text: redactCredentials(text), name: redactCredentials(name), ...(toName === undefined ? {} : { toName: redactCredentials(toName) }) })),
+            active: view.active ? { memberId: view.active.memberId } : null, nextBefore: view.nextBefore,
+          };
+        });
+        if (!result) throw new HttpError(401, 'Enter this device’s pairing token.');
+        send(response, 200, result);
       } else if (options.sharedDevices && sharedThread) {
         const [, id, action] = sharedThread;
         const update = action === 'answers' || action === 'confirm' || action === 'control';
@@ -744,7 +786,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             const rows = [];
             for (const grant of grants) {
               const meta = await runtime.metadata(grant.taskId).catch(error => { if (!isMissing(error)) throw error; });
-              if (!meta || meta.remotePolicy) continue;
+              if (!meta || meta.remotePolicy || meta.room) continue;
               const overview = await runtime.taskOverview(meta.id);
               rows.push({ id: meta.id, title: redactCredentials((meta.thread?.title ?? meta.objective).slice(0, 120)),
                 status: overview.status, archived: !!meta.thread?.archivedAt, createdAt: meta.createdAt });
@@ -757,7 +799,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             if (isMissing(error)) throw new HttpError(404, 'Shared thread not found.');
             throw error;
           });
-          if (meta.remotePolicy) throw new HttpError(404, 'Shared thread not found.');
+          if (meta.remotePolicy || meta.room) throw new HttpError(404, 'Shared thread not found.');
           if (input && (action === 'confirm' || action === 'control')) {
             if (!grant.controls) throw new HttpError(403, 'The host has not shared control access to this thread.');
             if (action === 'confirm') {
@@ -1018,7 +1060,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError || error instanceof RoomError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;

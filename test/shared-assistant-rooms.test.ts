@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
+import test from 'node:test';
+import { fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { createClient } from '../src/client.js';
+import { serve } from '../src/server.js';
+import { scriptedFixture, until } from './helpers.js';
+
+test('a paired device sees only granted original rooms and sends once under its independent reply grant', async t => {
+  const fixture = await scriptedFixture(context => {
+    const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
+    return fauxAssistantMessage('Original reply for ' + input.message);
+  });
+  await fixture.runtime.close();
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, '127.0.0.1', resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const config = { ...fixture.settings, port };
+  const server = await serve(config, { models: fixture.models });
+  t.after(async () => { await server.close(); await fixture.close(); });
+  const client = createClient(config);
+  const define = (name: string) => server.runtime.assistants.create({ workspace: fixture.workspace, name, instructions: 'Reply in the original room.', tools: [] });
+  const lead = await define('Lead'), review = await define('Reviewer');
+  const members = [lead, review].map(({ id, revision }) => ({ id, revision }));
+  const room = await server.runtime.createRoom({ workspace: fixture.workspace, title: 'Original room', members });
+  const other = await server.runtime.createRoom({ workspace: fixture.workspace, title: 'Private room', members });
+  const devices = ['one', 'two'];
+  const endpoints = await Promise.all(devices.map(deviceId => client.request<{ token: string }>('/v1/remote/devices', 'POST', { accountId: 'owner', deviceId })));
+  const remote = (path: string, device = 0, input?: unknown) => fetch(`http://127.0.0.1:${port}/remote/api${path}`, {
+    method: input === undefined ? 'GET' : 'POST',
+    headers: { Authorization: `Bearer ${endpoints[device]!.token}`, 'Content-Type': 'application/json' },
+    ...(input === undefined ? {} : { body: JSON.stringify(input) }),
+  });
+  const base = '/shared-rooms', path = base + '/' + room.id;
+  const grant = (operation: string, deviceId: string) => client.request(`/v1/assistant-rooms/${room.id}/${operation}`, 'POST', { accountId: 'owner', deviceId });
+  await grant('share', 'one');
+  const list = await (await remote(base)).json();
+  assert.deepEqual(list.map((row: { id: string }) => row.id), [room.id]);
+  assert.equal((await remote(base + '/' + other.id)).status, 404);
+  assert.equal((await remote(path, 1)).status, 404);
+  assert.deepEqual(await (await remote('/shared-threads')).json(), []);
+  const readOnly = await (await remote(path)).json();
+  assert.equal(readOnly.canSend, false);
+  assert(!JSON.stringify(readOnly).includes(fixture.workspace));
+  assert(!JSON.stringify(readOnly).includes('Reply in the original room.'));
+  const input = { memberId: review.id, message: 'the original mobile input', requestId: 'stable-phone-id', roomRevision: readOnly.revision };
+  assert.equal((await remote(path + '/messages', 0, input)).status, 403);
+  await grant('share-replies', 'one');
+  await grant('share', 'two');
+  await grant('share-replies', 'two');
+  assert.equal((await remote(path + '/messages', 0, { ...input, roomRevision: 99 })).status, 409);
+  const accepted = await remote(path + '/messages', 0, input);
+  assert.equal(accepted.status, 200);
+  const view = await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 2);
+  assert.equal(view.messages[1]?.text, 'Original reply for ' + input.message);
+  const duplicated = await (await remote(path + '/messages', 0, input)).json();
+  assert.equal(duplicated.answerEntryId, view.messages[1]?.id);
+  assert.equal((await remote(path + '/messages', 1, { ...input, message: 'a second phone with the same request ID' })).status, 200);
+  const continued = await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 4);
+  assert.equal(continued.messages[3]?.text, 'Original reply for a second phone with the same request ID');
+  await grant('unshare', 'one');
+  assert.equal((await remote(path)).status, 404);
+  assert.equal((await remote(path + '/messages', 0, input)).status, 404);
+  await grant('share', 'one');
+  assert.equal((await remote(path + '/messages', 0, input)).status, 403);
+});

@@ -45,6 +45,8 @@ try {
     console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
     console.log('\n工作区快照（本机）\n  snapshots save 任务ID "快照名称"\n  snapshots list 任务ID\n  snapshots preview 任务ID 快照ID\n  snapshots restore 任务ID 快照ID 预览版本');
     console.log('\nrun 或 chat 接受可重复的 --collaborator ID@修订。确认任务后，主助手可向选定的同事派活。用 /assistant-work 查看工作，/reply-assistant 答复，/guide-assistant 补充说明，/stop-assistant 停止原工作。');
+    console.log('\n本机助手群组\n  rooms list | rooms show 群组ID [历史游标]\n  rooms add "群组名称" 助手ID@修订 助手ID@修订 […] --workspace 路径\n  rooms edit 群组ID 修改.json\n  rooms send 群组ID 助手ID "消息" [请求ID]');
+    console.log('  rooms share|unshare 群组ID 账户ID 设备ID\n  rooms share-replies|unshare-replies 群组ID 账户ID 设备ID');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -99,7 +101,7 @@ try {
   } else if (command === "models") {
     const models = cloudModels().getModels(id);
     console.log(models.map(m => `${m.provider}/${m.id}`).join("\n"));
-  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants','snapshots'].includes(command)) {
+  } else if (['model','skills','mcp','routines','remote','inbox','files','computer','tasks','work-items','credentials','assistants','rooms','snapshots'].includes(command)) {
     const {ensureDaemon} = await import('./daemon.js');
     await ensureDaemon(config,args.values.config);
     const action = id ?? 'list';
@@ -122,6 +124,23 @@ try {
         const input = await json(rest[0]); result = await request(path, 'POST', { ...input, workspace: input.workspace ?? workspace });
       } else if (action === 'edit') result = await request(path + '/' + segment(rest[0]), 'PATCH', await json(rest[1]));
       else throw new Error('Use assistants list, add FILE.json, show ID or edit ID FILE.json.');
+    }
+    else if (command === 'rooms') {
+      if (!await client.healthy('assistant-rooms')) throw new Error('请重启到支持助手群组的后台版本。');
+      const path = '/v1/assistant-rooms';
+      const [roomOrTitle, memberId, message, requestId] = rest;
+      if (action === 'list' && rest.length === 0) result = await request(path);
+      else if (action === 'add' && roomOrTitle && rest.length >= 3) {
+        result = await request(path, 'POST', { workspace, title: roomOrTitle, members: rest.slice(1).map(parseAssistant) });
+      } else if (action === 'show' && roomOrTitle && rest.length <= 2) {
+        result = await request(path + '/' + segment(roomOrTitle) + (memberId === undefined ? '' : '?before=' + segment(memberId)));
+      } else if (action === 'edit' && roomOrTitle && rest.length === 2) {
+        result = await request(path + '/' + segment(roomOrTitle), 'PATCH', await json(memberId));
+      } else if (action === 'send' && roomOrTitle && memberId && message && rest.length <= 4) {
+        result = await request(path + '/' + segment(roomOrTitle) + '/messages', 'POST', { memberId, message, requestId: requestId ?? randomUUID() });
+      } else if (/^(?:un)?share(?:-replies)?$/.test(action) && rest.length === 3) {
+        result = await request(path + '/' + segment(roomOrTitle) + '/' + action, 'POST', { accountId: memberId, deviceId: message });
+      } else throw new Error('Use rooms list, add, show, edit, send, share or unshare. See help for arguments.');
     }
     else if (command === 'credentials') {
       const path = '/v1/credentials?workspace=' + encodeURIComponent(workspace);

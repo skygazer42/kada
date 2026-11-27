@@ -55,6 +55,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
+import { RoomError, assistantRooms, pendingRoomTurn, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
   type ReceivedThreadReport, type TaskThread, type ThreadInvocation, type ThreadOrigin, type ThreadReport } from './task-threads.js';
 import { ThreadPosts, postInformation, threadPostExtension, threadPostWakeId, threadPostWakePrefix,
@@ -73,6 +74,8 @@ export interface TaskMeta {
   id: string;
   assistant?: AssistantPin;
   collaborators?: AssistantPin[];
+  room?: AssistantPin[];
+  roomRevision?: number;
   objective: string;
   workspace: string;
   model: ModelRef;
@@ -135,7 +138,21 @@ export interface TaskMeta {
   maxReworks?: number;
   maxStalls?: number;
 }
-function publicTaskMeta({ threadEditReceipts: _receipts, ...meta }: TaskMeta) { return meta; }
+function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, ...meta }: TaskMeta) { return meta; }
+
+function roomSummary(meta: TaskMeta & { room: AssistantPin[] }) {
+  return { id: meta.id, title: meta.objective, workspace: meta.workspace, control: meta.control, createdAt: meta.createdAt, revision: meta.roomRevision ?? 1,
+    members: meta.room.map(({ id, revision, name, model }) => ({ id, revision, name, model })) };
+}
+
+function isRoom(meta: TaskMeta): meta is TaskMeta & { room: AssistantPin[] } { return meta.room !== undefined; }
+
+function roomMemberRefs(input: unknown) {
+  if (!Array.isArray(input) || input.length < 2 || input.length > 8) throw new RoomError(400, 'Choose two to eight room members.');
+  const refs = input.map(assistantRef);
+  if (new Set(refs.map(ref => ref.id)).size !== refs.length) throw new RoomError(400, 'Choose distinct room members.');
+  return refs;
+}
 
 function transcriptMessages(entry: EntryRecord) {
   if (!UserEntry.is(entry) && !AssistantEntry.is(entry)) return [];
@@ -340,14 +357,14 @@ export class LocalRuntime {
       return latest;
     });
   }
-  private async metadataList(): Promise<TaskMeta[]> {
+  private async metadataList(includeRooms = false): Promise<TaskMeta[]> {
     await mkdir(join(this.config.dataDir, "tasks"), { recursive: true, mode: 0o700 });
     const names = await readdir(join(this.config.dataDir, "tasks"));
     const values = await Promise.all(names.filter(n => /^[a-f0-9-]{36}$/.test(n)).map(async n => {
       try { return await this.metadata(n); }
       catch(error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
     }));
-    return values.filter((meta):meta is TaskMeta=>meta!==undefined).sort((a, b) => b.createdAt - a.createdAt);
+    return values.filter((meta): meta is TaskMeta => meta !== undefined && (includeRooms || !meta.room)).sort((a, b) => b.createdAt - a.createdAt);
   }
   async list(filter = 'all') {
     if (!['all','running','pending','delivered','archived'].includes(filter)) throw new Error('Task filter must be all, running, pending, delivered or archived.');
@@ -474,7 +491,7 @@ export class LocalRuntime {
     return store.capture(await Workspace.open(status.workspace,{create:false}),status.goal,id,path);
   }
   async recover(): Promise<void> {
-    const metadata=await this.metadataList();
+    const metadata=await this.metadataList(true);
     for(const meta of metadata) if(meta.control==='budget_limited' && meta.routineOccurrenceId) await this.routines.settleBudget(meta.routineOccurrenceId);
     for (const meta of metadata) {
       if (meta.thread?.archivedAt) continue;
@@ -497,13 +514,19 @@ export class LocalRuntime {
     });
     await this.routines.recover();
   }
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
+  private async pinAssistant(workspace: string, ref: AssistantRef, fallback: ModelRef | undefined): Promise<AssistantPin> {
+    const { id, revision, project, name, description, instructions, tools, model } = await this.assistants.select(workspace, ref);
+    return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback) };
+  }
+
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; room?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
       const thread = options.openedThread;
       const source = thread ? await this.metadata(thread.sourceTaskId) : undefined;
       if (source?.remotePolicy) throw new TaskConflictError('A remote task cannot open a local thread.');
+      if (source?.room) throw new TaskConflictError('Open independent work from an ordinary local thread.');
       if (source) workspace = source.workspace;
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
       const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
@@ -532,7 +555,8 @@ export class LocalRuntime {
         ...(options.routineIssue ? { routineIssue: options.routineIssue } : {}),
         ...(options.routinePullRequest ? { routinePullRequest: options.routinePullRequest } : {}),
         ...(options.workItem ? { workItem: options.workItem } : {}), ...(assistant ? { assistant } : {}),
-        ...(collaboratorRefs ? { collaborators: collaboratorRefs } : {}), ...(thread ? { thread } : {}) })).digest("hex");
+        ...(collaboratorRefs ? { collaborators: collaboratorRefs } : {}), ...(thread ? { thread } : {}),
+        ...(options.room ? { room: options.room } : {}) })).digest("hex");
       if (options.id) try {
         const saved = await this.metadata(id);
         if (saved.creationHash !== creationHash) throw new TaskConflictError("This task ID was already used for a different request.");
@@ -548,24 +572,25 @@ export class LocalRuntime {
       const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : inherited?.assistant;
       const projectModel = (!selectedModel && !role?.model) || collaboratorRefs
         ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
+      const pin = (ref: AssistantRef) => this.pinAssistant(requestedWorkspace, ref, projectModel);
+      const room = options.room ? await Promise.all(options.room.map(pin)) : undefined;
       const model = selectedModel ? await selectThreadModel(this.options.models, selectedModel)
-        : validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
-      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(async ref => {
-        const { id, revision, project, name, description, instructions, tools, model } = await this.assistants.select(requestedWorkspace, ref);
-        return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? projectModel) };
-      })) : undefined;
+        : room?.[0]?.model ?? validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
+      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(pin)) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
-      const files = await Workspace.open(requestedWorkspace, { create: !thread });
-      const workItemProject = options.chat && !options.remote ? await memoryProject(files.root) : undefined;
-      const credentialProject = !options.remote ? workItemProject ?? await memoryProject(files.root) : undefined;
-      if (options.chat && !options.remote && !workItemProject) throw new Error('The chat work item project is unavailable.');
+      const files = await Workspace.open(requestedWorkspace, { create: !thread && !room });
+      const localChat = !options.remote && !room;
+      const workItemProject = options.chat && localChat ? await memoryProject(files.root) : undefined;
+      const credentialProject = localChat ? workItemProject ?? await memoryProject(files.root) : undefined;
+      if (options.chat && localChat && !workItemProject) throw new Error('The chat work item project is unavailable.');
       const selection=options.remote ? [] : options.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
-      const mcpPins = options.remote ? [] : await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root);
+      const mcpPins = localChat ? await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root) : [];
       const meta: TaskMeta = { id, objective, workspace: files.root, model, creationHash,
         ...(thread ? { thread: { ...thread, revision: 1 } } : {}),
         ...(collaborators ? { collaborators } : {}),
-        ...(this.config.workspaceSnapshots && !options.remote ? { snapshotBeforeTurn: true as const } : {}),
+        ...(room ? { room } : {}),
+        ...(this.config.workspaceSnapshots && localChat ? { snapshotBeforeTurn: true as const } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
           instructions: role.instructions, tools: [...role.tools], model: { ...model } } } : {}),
         mcpPins,
@@ -583,18 +608,17 @@ export class LocalRuntime {
         ...(budget ? { maxDurationMs: budget.maxDurationMs } : {}),
         maxSubagents: this.config.maxSubagents, control: "active", schemaVersion: 3, planPolicy: "advisory", acceptance: checks,
         ...(!this.options.legacyResources ? { resourcePolicy: "pi-skills" as const,skillPolicy:'catalogue' as const } : {}),
-        ...(this.config.discovery === true && !this.options.legacyResources && !options.remote ? { discovery: true, userMemory: true as const, memoryTracking: true as const } : {}),
-        ...(options.prepare || options.chat ? { preparation: true } : {}),
+        ...(this.config.discovery === true && !this.options.legacyResources && localChat ? { discovery: true, userMemory: true as const, memoryTracking: true as const } : {}),
+        ...(!room && (options.prepare || options.chat) ? { preparation: true } : {}),
         ...(options.chat ? { entrypoint: "chat" as const } : {}),
-        ...(options.chat && !options.remote ? { chatReminders: 'managed' as const } : {}),
+        ...(options.chat && localChat ? { chatReminders: 'managed' as const } : {}),
         ...(workItemProject ? { chatWorkItems: { project: workItemProject } } : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
-        ...(!options.remote ? { historyRecall: true as const } : {}),
-        ...(!options.remote ? { projectTaskCatalog: true as const } : {}),
-        structuredQuestions: true,
+        ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const } : {}),
+        ...(!room ? { structuredQuestions: true as const } : {}),
         ...(credentialProject ? { credentialProject } : {}),
-        ...((options.prepare || options.chat) && this.config.learning && !options.remote ? { learning: true } : {}),
+        ...((options.prepare || options.chat) && this.config.learning && localChat ? { learning: true } : {}),
         ...((budget?.maxTotalTokens ?? this.config.maxTotalTokens) === undefined ? {} : { maxTotalTokens: budget?.maxTotalTokens ?? this.config.maxTotalTokens }),
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
         maxReworks: this.config.maxReworks ?? 3, maxStalls: this.config.maxStalls ?? 2 };
@@ -603,6 +627,74 @@ export class LocalRuntime {
       if (options.signal?.aborted) { meta.control='cancelled';await atomicJson(this.metaFile(id),meta);options.signal.throwIfAborted(); }
       await this.open(meta, true);
       return meta;
+    });
+  }
+
+  async createRoom(input: Record<string, unknown>) {
+    const { workspace, members, id } = input;
+    if (typeof workspace !== 'string' || !workspace.trim() || (id !== undefined && typeof id !== 'string')) {
+      throw new RoomError(400, 'Choose an existing project workspace for the room.');
+    }
+    const meta = await this.create(threadTitle(input.title), workspace, [], { chat: true, room: roomMemberRefs(members), id });
+    return roomSummary({ ...meta, room: meta.room! });
+  }
+
+  async updateRoom(id: string, { revision, title, members }: Record<string, unknown>) {
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) throw new RoomError(400, 'Provide the displayed room revision.');
+    const name = title === undefined ? undefined : threadTitle(title);
+    const refs = members === undefined ? undefined : roomMemberRefs(members);
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (!isRoom(meta)) throw new RoomError(404, 'Assistant room not found.');
+      if (revision !== (meta.roomRevision ?? 1)) throw new RoomError(409, 'The room changed. Read its current revision before editing.');
+      const fallback = refs ? await this.providers.selected(this.config.model, meta.workspace) : undefined;
+      const room = refs ? await Promise.all(refs.map(ref =>
+        meta.room.find(pin => pin.id === ref.id && pin.revision === ref.revision) ?? this.pinAssistant(meta.workspace, ref, fallback))) : meta.room;
+      const objective = name ?? meta.objective;
+      if (objective === meta.objective && room.length === meta.room.length && room.every((pin, index) => pin === meta.room[index])) return roomSummary(meta);
+      const active = await this.open(meta, false);
+      const turn = await pendingRoomTurn(active.harness, ctx);
+      if (turn && [turn, ...turn.candidates].some(member => !room.some(pin => pin.id === member.memberId && pin.revision === member.revision))) {
+        await this.abortAll(active);
+      }
+      const updated = { ...meta, objective, room, roomRevision: revision + 1 };
+      await atomicJson(this.metaFile(id), updated);
+      active.meta = updated;
+      return roomSummary(updated);
+    });
+  }
+
+  async listRooms() { return (await this.metadataList(true)).filter(isRoom).map(roomSummary); }
+
+  async roomDetails(id: string, before?: number) {
+    if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) throw new RoomError(400, 'Provide a valid room history cursor.');
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (!isRoom(meta)) throw new RoomError(404, 'Assistant room not found.');
+      const active = await this.open(meta, false);
+      return { ...roomSummary(meta), ...await roomTranscript(active.root, before, ctx) };
+    });
+  }
+
+  async sendRoomMessage(id: string, raw: Record<string, unknown>) {
+    const input = roomMessageInput(raw);
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (!isRoom(meta)) throw new RoomError(404, 'Assistant room not found.');
+      const active = await this.open(meta, false);
+      let blocked: string | undefined;
+      if (meta.control !== 'active') blocked = `The assistant room is ${meta.control}.`;
+      else if (input.roomRevision !== undefined && input.roomRevision !== (meta.roomRevision ?? 1)) blocked = 'The room changed. Review the current members before sending.';
+      else if (await pendingRoomTurn(active.harness, ctx)) blocked = 'A room member is already answering.';
+      else blocked = await this.budgetReason(active);
+      const limits = { tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
+        costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
+      const turn = await sendRoomMessage(active.root, meta.room, meta.objective, input, blocked, limits, meta.maxDurationMs ?? this.config.maxDurationMs, ctx);
+      if (meta.control === 'active' && turn.status === 'running') {
+        active.enabled = true;
+        active.harness.resume();
+      }
+      return turn;
     });
   }
 
@@ -1082,20 +1174,26 @@ export class LocalRuntime {
           withControl: action => this.peerControl(this.active.get(meta.id)!)(action) });
         extensions.push(peers); coordinatorOnly.push(peers);
       }
-      for (const extension of [...extensions, ...(meta.preparation ? preparationExtensions : []), ...(meta.entrypoint === "chat" ? chatExtensions : []), ...(meta.schemaVersion !== undefined ? [readonly, review] : [])]) registry.install(extension);
+      for (const extension of meta.room ? [assistantRooms] : [...extensions, ...(meta.preparation ? preparationExtensions : []), ...(meta.entrypoint === "chat" ? chatExtensions : []), ...(meta.schemaVersion !== undefined ? [readonly, review] : [])]) registry.install(extension);
       const storage = await openNodeSqliteStorage(join(this.directory(meta.id), "session.sqlite"));
       let harness: Harness|undefined;
       try {
+        const options = this.options, trigger = this.config.compactAtTokens, openTasks = this.active;
+        const compaction = meta.schemaVersion === 3 ? taskCompaction(options.models,
+          [meta.model, meta.subagentModel ?? meta.model, ...(team ?? meta.room ?? []).map(role => role.model)], trigger) : undefined;
         harness = await Harness.open(storage, {
           models: this.options.models, registry,
           env: ({ cwd }) => localEnvironment(cwd ?? meta.workspace),
           settings: { retry: { maxRetries: 2 }, stream: { timeoutMs: 120_000 }, toolExecution: "parallel",
-            ...(meta.schemaVersion === 3 ? { compaction: taskCompaction(this.options.models, [meta.model, meta.subagentModel ?? meta.model, ...(team ?? []).map(role => role.model)], this.config.compactAtTokens) } : {}) },
+            get compaction() {
+              const updated = meta.room && openTasks.get(meta.id)?.meta.room;
+              return updated && updated !== meta.room ? taskCompaction(options.models, updated.map(pin => pin.model), trigger) : compaction;
+            } },
           onReport: (error, info) => console.error(JSON.stringify({ task: meta.id, type: info.type, error: errorText(error) })),
         }, ctx);
-        const initialExtensions = meta.entrypoint === 'chat' ? chatExtensions : meta.preparation ? preparationExtensions : extensions;
+        const initialExtensions = meta.room ? [] : meta.entrypoint === 'chat' ? chatExtensions : meta.preparation ? preparationExtensions : extensions;
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: initialExtensions,
-          ...(meta.assistant ? { tools: assistantTools(initialExtensions.flatMap(extension => extension.tools ?? []), meta.assistant) } : {}),
+          ...(meta.room ? { tools: [] } : meta.assistant ? { tools: assistantTools(initialExtensions.flatMap(extension => extension.tools ?? []), meta.assistant) } : {}),
           instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true, !remote && !!meta.chatWorkItems) : this.instructions(meta, !!meta.preparation) } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
@@ -1110,6 +1208,14 @@ export class LocalRuntime {
         });
         if(!meta.initializationError) await this.configureStage(active);
       } catch (error) { this.active.delete(meta.id);if(harness) await harness.close(ctx);else await storage.close(ctx);throw error; }
+    }
+    if (meta.room) {
+      if (run && meta.control === 'active') {
+        active.enabled = true;
+        await this.supervise(active);
+        if (active.enabled) active.harness.resume();
+      }
+      return active;
     }
     if (run && meta.control === "active" && !meta.thread?.archivedAt) {
       const goal = await this.goalState(active);
@@ -1246,6 +1352,7 @@ export class LocalRuntime {
     });
   }
   private async configureStage(active: Active): Promise<void> {
+    if (active.meta.room) return;
     await this.recordMemory(active);
     let state = await this.goalState(active);
     if (active.meta.entrypoint === "chat" && !state) {
@@ -1486,6 +1593,15 @@ export class LocalRuntime {
   }
   private async supervise(active: Active): Promise<void> {
     if (active.meta.control !== "active") return;
+    if (active.meta.room) {
+      const turn = await pendingRoomTurn(active.harness, ctx);
+      if (!turn) active.enabled = false;
+      else if (Date.now() >= turn.deadlineAt || await this.budgetReason(active)) {
+        await this.abortAll(active);
+        active.enabled = false;
+      }
+      return;
+    }
     let { tasks, submissions } = await active.harness.inspect(ctx);
     let busy = tasks.length > 0 || submissions.length > 0;
     let goal = await this.goalState(active);
@@ -2081,6 +2197,7 @@ export class LocalRuntime {
       if (!message.trim() || message.length > 32000) throw new Error("Provide a message between 1 and 32000 characters");
       if (!requestId.trim() || requestId.length > 200) throw new Error("requestId must contain 1 to 200 characters");
       const meta = await this.metadata(id);
+      if (meta.room) throw new TaskConflictError('Address a specific member through the assistant room.');
       if (question && (question.workspace === undefined ? meta.remotePolicy : meta.remotePolicy !== 'workspace' || meta.workspace !== question.workspace)) throw new QuestionError(404, 'Question not found.');
       if (meta.thread?.archivedAt) throw new TaskConflictError('Restore the archived thread before sending a message.');
       if (images?.length && meta.remotePolicy !== "workspace") throw new Error("Image references require a scoped remote submission.");

@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "environment": "Windows, local Chromium, agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "checks": {
+    "openedExistingRoomAndHistoryWithViewGrant": true,
+    "replyFormHiddenWithViewOnly": true,
+    "replyGrantEnabledTheForm": true,
+    "roomAndDraftSurvivedReload": true,
+    "replyHadOriginalRoomAndSelectedAssistant": true,
+    "ownerSawFourOriginalMessages": true,
+    "revokingViewClearedThePanelAndHistory": true
+  }
+}

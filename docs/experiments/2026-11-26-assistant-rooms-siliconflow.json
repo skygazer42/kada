@@ -1,0 +1,13 @@
+{
+  "provider": "siliconflow",
+  "models": ["Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3.2"],
+  "passed": true,
+  "roomTurns": 3,
+  "rootMessages": 7,
+  "handoffs": 1,
+  "reopenedOriginalRoom": true,
+  "replayUsedAdditionalTokens": false,
+  "totalTokens": 1686,
+  "money": null,
+  "answers": ["RIVER-341", "RIVER-341", "RIVER-341"]
+}

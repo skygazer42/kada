@@ -117,6 +117,25 @@ export const remotePage = String.raw`<!doctype html>
         <ul id="shared-thread-list"></ul>
         <div id="shared-thread-detail" hidden></div>
       </section>
+      <section id="shared-rooms" class="panel task" hidden aria-labelledby="shared-rooms-heading">
+        <h2 id="shared-rooms-heading">Shared rooms</h2>
+        <label for="shared-room">Room</label>
+        <select id="shared-room"></select>
+        <div id="shared-room-detail" hidden>
+          <p id="shared-room-status" role="status"></p>
+          <ol id="shared-room-messages" aria-label="Room messages"></ol>
+          <button type="button" id="shared-room-older" hidden>Older room messages</button>
+          <button type="button" id="shared-room-latest" hidden>Latest room messages</button>
+          <form id="shared-room-composer" hidden>
+            <label for="shared-room-member">Send to</label>
+            <select id="shared-room-member"></select>
+            <label for="shared-room-prompt">Room message</label>
+            <textarea id="shared-room-prompt" maxlength="8000" rows="2" required></textarea>
+            <button type="submit" id="shared-room-send">Send to room</button>
+            <p id="shared-room-feedback" role="status"></p>
+          </form>
+        </div>
+      </section>
       <section id="task" class="panel task" hidden aria-label="Task progress"></section>
       <section id="child-questions" class="panel task" hidden aria-label="Child task questions"></section>
       <details id="task-history" class="panel task" hidden>
@@ -159,6 +178,18 @@ const workItemDetail = field("work-item-detail");
 const sharedThreads = field("shared-threads");
 const sharedThreadList = field("shared-thread-list");
 const sharedThreadDetail = field("shared-thread-detail");
+const roomPanel = field("shared-rooms");
+const roomPicker = field("shared-room");
+const roomDetail = field("shared-room-detail");
+const roomStatus = field("shared-room-status");
+const roomMessages = field("shared-room-messages");
+const roomOlder = field("shared-room-older");
+const roomLatest = field("shared-room-latest");
+const roomComposer = field("shared-room-composer");
+const roomMember = field("shared-room-member");
+const roomPrompt = field("shared-room-prompt");
+const roomSend = field("shared-room-send");
+const roomFeedback = field("shared-room-feedback");
 const task = field("task");
 const childQuestions = field("child-questions");
 const taskHistory = field("task-history");
@@ -196,6 +227,15 @@ let selectedSharedThread = "";
 let sharedThreadBefore = null;
 let sharedThreadAnswer;
 const sharedThreadActions = new Map();
+let selectedRoom = "";
+let roomBefore = null;
+let roomListVersion = 0;
+let roomViewVersion = 0;
+let roomListSnapshot = "";
+let roomMessageSnapshot = "";
+let roomMemberSnapshot = "";
+let roomView;
+const roomDrafts = new Map();
 let historyCursor = null;
 let shownTask = "";
 const childAnswerForms = new Map();
@@ -364,7 +404,7 @@ function resetConversationView() {
 
 async function refreshList() {
   const version = ++listVersion;
-  const [rows] = await Promise.all([get("/conversations"), refreshApprovals(), refreshWorkItems(), refreshSharedThreads()]);
+  const [rows] = await Promise.all([get("/conversations"), refreshApprovals(), refreshWorkItems(), refreshSharedThreads(), refreshSharedRooms()]);
   if (version !== listVersion || !identity) return;
   conversations.replaceChildren();
   pendingTasks.replaceChildren();
@@ -502,6 +542,182 @@ async function refreshSharedThreads() {
   sharedThreads.hidden = !rows.length;
   if (id) await refreshSharedThread(device);
 }
+
+function roomSelectionKey(device) { return "kada:shared-room:" + device.pairingId; }
+function sharedRoomPath(id) { return "/shared-rooms/" + encodeURIComponent(id); }
+function roomDraftKey(device, id) { return roomSelectionKey(device) + ":draft:" + id; }
+
+function restoreRoomDraft(device, id) {
+  if (!roomDrafts.has(id)) {
+    const stored = sessionStorage.getItem(roomDraftKey(device, id));
+    roomDrafts.set(id, stored ? JSON.parse(stored) : {});
+  }
+  return roomDrafts.get(id);
+}
+
+function storeRoomDraft(device, id, draft) {
+  const { text, memberId, attempt } = draft;
+  sessionStorage.setItem(roomDraftKey(device, id), JSON.stringify({ text, memberId, attempt }));
+}
+
+function forgetRoomDraft(device, id) {
+  roomDrafts.delete(id);
+  sessionStorage.removeItem(roomDraftKey(device, id));
+}
+
+function selectRoom(id) {
+  selectedRoom = id;
+  roomBefore = null;
+  roomView = undefined;
+  roomViewVersion++;
+  roomMessageSnapshot = roomMemberSnapshot = "";
+  roomPicker.value = id;
+  roomMessages.replaceChildren();
+  roomMember.replaceChildren();
+  roomDetail.hidden = !id;
+  roomComposer.hidden = roomOlder.hidden = roomLatest.hidden = true;
+  roomStatus.textContent = id ? "Loading room…" : "";
+  roomPrompt.value = id ? restoreRoomDraft(identity, id).text || "" : "";
+  roomFeedback.textContent = "";
+}
+
+function clearSharedRooms() {
+  roomListVersion++;
+  roomListSnapshot = "";
+  roomPanel.hidden = true;
+  roomPicker.replaceChildren();
+  roomDrafts.clear();
+  selectRoom("");
+}
+
+async function refreshSharedRooms() {
+  const device = identity;
+  if (!device?.sharedRooms) return;
+  const version = ++roomListVersion;
+  const rows = await get("/shared-rooms");
+  if (device !== identity || version !== roomListVersion) return;
+  const allowed = new Set(rows.map(row => row.id));
+  for (const id of roomDrafts.keys()) if (!allowed.has(id)) forgetRoomDraft(device, id);
+  const saved = sessionStorage.getItem(roomSelectionKey(device));
+  const id = allowed.has(saved) ? saved : "";
+  if (saved && !id) {
+    sessionStorage.removeItem(roomSelectionKey(device));
+    forgetRoomDraft(device, saved);
+  }
+  const snapshot = JSON.stringify(rows);
+  if (snapshot !== roomListSnapshot) {
+    roomListSnapshot = snapshot;
+    roomPicker.replaceChildren();
+    element("option", "Choose a room", roomPicker).value = "";
+    for (const row of rows) element("option", row.title, roomPicker).value = row.id;
+    roomPicker.value = id;
+  }
+  roomPanel.hidden = !rows.length;
+  if (id !== selectedRoom) selectRoom(id);
+  if (id) await refreshSharedRoom();
+}
+
+async function refreshSharedRoom() {
+  const device = identity, id = selectedRoom, before = roomBefore, version = ++roomViewVersion;
+  const current = () => device === identity && id === selectedRoom && before === roomBefore && version === roomViewVersion;
+  let view;
+  try { view = await get(sharedRoomPath(id) + (before ? "?before=" + before : "")); }
+  catch (error) {
+    if (!current()) return;
+    if (error instanceof RequestError && error.status === 404) {
+      forgetRoomDraft(device, id);
+      sessionStorage.removeItem(roomSelectionKey(device));
+      selectRoom("");
+      return;
+    }
+    throw error;
+  }
+  if (!current()) return;
+  roomView = view;
+  const messageSnapshot = JSON.stringify(view.messages);
+  if (messageSnapshot !== roomMessageSnapshot) {
+    roomMessageSnapshot = messageSnapshot;
+    roomMessages.replaceChildren();
+    for (const message of view.messages) {
+      const item = element("li", "", roomMessages);
+      const label = message.role === "user" ? "User to " + message.name :
+        message.role === "handoff" ? message.name + " handed off to " + message.toName : message.name;
+      element("strong", label, item);
+      element("p", message.text, item);
+      if (["unanswered", "interrupted", "failed"].includes(message.status)) element("small", taskStatusLabel(message.status), item);
+    }
+  }
+  const memberSnapshot = JSON.stringify(view.members);
+  if (memberSnapshot !== roomMemberSnapshot) {
+    roomMemberSnapshot = memberSnapshot;
+    roomMember.replaceChildren();
+    element("option", "Choose an assistant", roomMember).value = "";
+    for (const member of view.members) element("option", member.name, roomMember).value = member.id;
+    roomMember.value = roomDrafts.get(id)?.memberId || "";
+  }
+  const active = view.members.find(member => member.id === view.active?.memberId);
+  roomStatus.textContent = active ? active.name + " is replying…" : view.control === "active" ? "" : taskStatusLabel(view.control);
+  roomOlder.hidden = !view.nextBefore;
+  roomLatest.hidden = !before;
+  roomComposer.hidden = !view.canSend;
+  roomSend.disabled = !!view.active || !!roomDrafts.get(id)?.sending;
+}
+
+roomPicker.addEventListener("change", async () => {
+  const id = roomPicker.value;
+  if (!identity) return;
+  sessionStorage.setItem(roomSelectionKey(identity), id);
+  selectRoom(id);
+  if (id) try { await refreshSharedRoom(); } catch (error) { report(error); }
+});
+
+for (const button of [roomOlder, roomLatest]) button.addEventListener("click", async () => {
+  if (!roomView) return;
+  roomBefore = button === roomOlder ? roomView.nextBefore : null;
+  try { await refreshSharedRoom(); } catch (error) { report(error); }
+});
+
+function saveRoomDraft() {
+  const draft = restoreRoomDraft(identity, selectedRoom);
+  draft.text = roomPrompt.value;
+  draft.memberId = roomMember.value;
+  storeRoomDraft(identity, selectedRoom, draft);
+  return draft;
+}
+
+roomPrompt.addEventListener("input", saveRoomDraft);
+roomMember.addEventListener("change", saveRoomDraft);
+roomComposer.addEventListener("submit", async event => {
+  event.preventDefault();
+  const device = identity, id = selectedRoom, view = roomView;
+  if (!device || !id || !view?.canSend || view.active) return;
+  const draft = saveRoomDraft();
+  if (draft.sending || !draft.text.trim() || !view.members.some(member => member.id === draft.memberId)) return;
+  const { text, memberId } = draft;
+  if (draft.attempt?.text !== text || draft.attempt?.memberId !== memberId) draft.attempt = { text, memberId, id: crypto.randomUUID() };
+  storeRoomDraft(device, id, draft);
+  draft.sending = true;
+  roomSend.disabled = true;
+  roomFeedback.textContent = "Sending…";
+  const current = () => device === identity && id === selectedRoom;
+  try {
+    await post(sharedRoomPath(id) + "/messages", { memberId, message: text, requestId: draft.attempt.id, roomRevision: view.revision });
+    delete draft.attempt;
+    if (draft.text === text && draft.memberId === memberId) draft.text = "";
+    if (device === identity && roomDrafts.get(id) === draft) storeRoomDraft(device, id, draft);
+    if (current()) {
+      roomPrompt.value = draft.text;
+      roomFeedback.textContent = "";
+      roomBefore = null;
+      try { await refreshSharedRoom(); } catch (error) { report(error); }
+    }
+  } catch (error) {
+    if (current()) roomFeedback.textContent = error instanceof RequestError ? error.message : "Connection lost. Send again to check the original message.";
+  } finally {
+    draft.sending = false;
+    if (current()) roomSend.disabled = !!roomView?.active;
+  }
+});
 
 async function refreshSharedThread(device) {
   const id = selectedSharedThread;
@@ -1513,6 +1729,7 @@ async function connect(value) {
   clearApprovals();
   clearWorkItems();
   clearSharedThreads();
+  clearSharedRooms();
   resetConversationView();
   restoreComposer();
   if (pending) displayReceipt({ state: "unknown" });
@@ -1613,6 +1830,7 @@ signout.addEventListener("click", async () => {
   clearApprovals();
   clearWorkItems();
   clearSharedThreads();
+  clearSharedRooms();
   childAnswerForms.clear();
   questionAnswerForms.clear();
   try {
@@ -1759,7 +1977,7 @@ setInterval(async () => {
   if (!identity || polling || document.hidden || busy) return;
   const device = identity;
   polling = true;
-  try { await refresh(); if (selectedSharedThread) await refreshSharedThreads(); }
+  try { await refresh(); if (selectedSharedThread) await refreshSharedThreads(); await refreshSharedRooms(); }
   catch (error) {
     if (device !== identity) return;
     if (error instanceof RequestError && error.status === 401) {
@@ -1767,6 +1985,7 @@ setInterval(async () => {
       clearApprovals();
       clearWorkItems();
       clearSharedThreads();
+      clearSharedRooms();
       childAnswerForms.clear();
       questionAnswerForms.clear();
       sessionStorage.removeItem("kada-device-token");

@@ -65,7 +65,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     try {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','named-assistants','assistant-collaboration','assistant-rooms','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -267,7 +267,11 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         const { accountId, deviceId } = await body(req);
         if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide the paired account and device IDs.');
         const shared = action!.startsWith('share-');
-        if (shared && (await runtime.metadata(id!)).remotePolicy) return send(409, { error: 'Share an original local thread from the host.' });
+        if (shared) {
+          const task = await runtime.metadata(id!);
+          if (task.remotePolicy) return send(409, { error: 'Share an original local thread from the host.' });
+          if (task.room) return send(409, { error: 'Assistant rooms are available from the local host.' });
+        }
         const access = action!.endsWith('-controls') ? 'controls' : action!.endsWith('-replies') ? 'replies' : 'view';
         return send(200, await devices.setSharedThread(accountId, deviceId, id!, shared, access));
       }
@@ -294,6 +298,28 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         return send(200,await runtime.captureSkill(capture[1]!,input.path));
       }
       if (url.pathname === "/v1/tasks" && req.method === "GET") return send(200, await runtime.list(url.searchParams.get('filter') ?? 'all'));
+      if (url.pathname === '/v1/assistant-rooms') {
+        if (req.method === 'GET') return send(200, await runtime.listRooms());
+        if (req.method === 'POST') return send(201, await runtime.createRoom(await body(req)));
+        return send(405, { error: 'Method not allowed' });
+      }
+      const room = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})(?:\/(messages|(?:un)?share(?:-replies)?))?$/.exec(url.pathname);
+      if (room) {
+        const [, id, action] = room;
+        if (!action && req.method === 'GET') {
+          const before = url.searchParams.get('before');
+          return send(200, await runtime.roomDetails(id!, before === null ? undefined : Number(before)));
+        }
+        if (!action && req.method === 'PATCH') return send(200, await runtime.updateRoom(id!, await body(req)));
+        if (action === 'messages' && req.method === 'POST') return send(200, await runtime.sendRoomMessage(id!, await body(req)));
+        if (action && action !== 'messages' && req.method === 'POST') {
+          if (!(await runtime.metadata(id!)).room) return send(404, { error: 'Assistant room not found.' });
+          const { accountId, deviceId } = await body(req);
+          if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide the paired account and device IDs.');
+          return send(200, await devices.setSharedThread(accountId, deviceId, id!, action.startsWith('share'), action.endsWith('-replies') ? 'replies' : 'view'));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       if (url.pathname === "/v1/tasks" && req.method === "POST") {
         const input = await body(req);
         if (typeof input.objective !== "string" || (input.workspace !== undefined && typeof input.workspace !== "string")) throw new Error("Expected objective and optional workspace strings");
