@@ -314,6 +314,21 @@ npm run harness -- work-items calendar-clear --workspace E:/project
 
 打开看板的截止日历即可浏览本月外部日程。工作项日期沿其保存时区显示，外部日程沿日历来源所选时区显示。 [工具契约与验收](superpowers/plans/2026-11-27-project-calendar.md)
 
+### 即将开始的日程提醒
+
+完成项目日历绑定后，用 `routines add` 保存这条例行规则。此例每五分钟检查一次，收件箱会提醒未来 30 分钟内开始的新日程。规则保存时固定日历和连接修订。同一日程和开始时刻在同一规则修订下只提醒一次。用 `routines history calendar-alert` 查看原日程和检查结果。 [源码与验收](superpowers/plans/2026-11-27-project-calendar.md#即将开始的日程提醒)
+
+```json
+{
+  "id": "calendar-alert",
+  "action": "notify",
+  "objective": "即将开始的日程",
+  "workspace": "E:/project",
+  "schedule": { "kind": "interval", "everyMinutes": 5, "anchorAt": "2026-11-27T00:00:00Z" },
+  "precheck": { "calendar": { "withinMinutes": 30 } }
+}
+```
+
 ### Gmail
 
 在 Google Workspace MCP 的 Gmail 连接上启用只读的 `search_gmail_messages` 和 `get_gmail_message_content`，并允许项目使用它们。将 MCP 连接 ID、当前测试修订和邮箱地址保存为配置文件。

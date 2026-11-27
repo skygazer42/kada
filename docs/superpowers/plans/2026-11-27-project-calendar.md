@@ -20,6 +20,16 @@ Rakazo 为获得授权的账号读取即将发生的日程。Google Calendar MCP
 
 创建审批可包含 Google Meet 请求，会议请求使用原工具调用的稳定事件 ID。日程列表可返回 Google Meet 链接。邀请回复沿用所选账号和原日程，审批保存回复状态、备注、周期范围和通知选项。合成回归核对 Meet 请求及原账号回复邀请的准确参数。 [会议创建](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/handlers/core/CreateEventHandler.ts#L142) · [邀请回复实现](https://github.com/nspady/google-calendar-mcp/blob/29a7090d17175745c2b3a9aa10d0ff464432f3ca/src/handlers/core/RespondToEventHandler.ts#L22) · [回归](../../../test/project-calendar.test.ts)
 
+## 即将开始的日程提醒
+
+Rakazo 从授权日历读取未来窗口，以会议和开始时间生成稳定预约 ID。Kada 将这个机制用于本地例行提醒。用户指定提前分钟数，Pi 定时读取绑定日历，按原日程 ID 和起始时刻识别同一场日程。匹配结果进入当前例行任务的已保存发生项，再沿原通知回执进入本机收件箱。 [未来日程筛选](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/meetings/calendar/calendar-service.ts#L911) · [预约身份](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/meetings/calendar/calendar-rules.ts#L17)
+
+- 用假时钟验收具体窗口、同一预约的去重、重启和权限撤回。
+- 在原项目日历适配器复用只读权限检查、事件投影和账号匹配。提醒适用于有开始时刻的日程。
+- 在现有 Pi 例行任务落盘本次日历身份、事件和通知决策。本机通知展示原标题及开始时间。
+
+提醒需要当前项目的只读日历工具，提前量可设为 1 至 1440 分钟。每次检查进入未来窗口的有时刻日程，每一轮最多通知 100 条。收件箱写入前再次检查日历绑定和规则状态。回归通过合成 Calendar MCP 验证精确窗口、daemon 重启后的去重、权限撤回及日程范围。 [回归](../../../test/project-calendar.test.ts)
+
 ## 浏览器项目绑定
 
 项目 MCP 设置页显示当前 Gmail 与 Google 日历绑定。候选连接按项目已启用的只读工具及其修订计算。页面持原项目授权，保存与解除复用终端的来源配置，储存失败时保留表单输入。真实 Chromium 在合成连接上验证两种绑定、无效时区恢复、刷新后读回配置及单独解除 Gmail。 [Rakazo 的已连接应用列表](https://github.com/elie222/rakazo/blob/e64d73292179/apps/mobile/components/integrations/connected-apps.tsx#L58) · [项目范围 API 回归](../../../test/mcp-tools.test.ts)

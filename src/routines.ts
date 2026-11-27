@@ -13,6 +13,7 @@ import { normalizeMcpPrecheck, type McpPrecheck, type McpTools } from "./mcp-too
 import { githubIssueTarget, githubPullRequestEvents, githubPullRequestTarget, type GithubIssue, type GithubPullRequest } from "./github-routine-events.js";
 import type { AccountRefusal } from './routine-account-backoff.js';
 import { gmailSearchQuery, type ProjectGmail, type RoutineGmailBinding, type RoutineGmailMatch } from './project-gmail.js';
+import type { CalendarReminder, ProjectCalendars } from './project-calendars.js';
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -37,7 +38,7 @@ export type RoutineInput = {
   overlapPolicy?: "skip";
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
-  precheck?: { command: string[] } | { mcp: McpPrecheck } | { gmail: { query: string } };
+  precheck?: { command: string[] } | { mcp: McpPrecheck } | { gmail: { query: string } } | { calendar: { withinMinutes: number } };
   activity?: { withinMinutes: number; minIntervalMinutes: number };
   accountBackoff?: true;
   event?: RoutineEvent;
@@ -61,6 +62,8 @@ export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPoli
   timing?: RoutineTiming;
   gmailMailbox?: RoutineGmailBinding;
   gmail?: RoutineGmailMatch;
+  calendarSource?: { fingerprint: string };
+  calendar?: CalendarReminder[];
 };
 
 export type RoutineExecution =
@@ -84,6 +87,7 @@ type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt" | "trigger" | "event
   timing?: RoutineTiming;
   precheck?: PrecheckResult;
   gmail?: { messageIds: string[] };
+  calendar?: CalendarReminder[];
   activity?: ActivityResult;
   startedAt?: number;
   accountCooldown?: AccountCooldown;
@@ -143,22 +147,25 @@ async function interruptManual(tx: Tx, conversationId: ConversationId, rule: Sto
     ...(admissionPossible && manual.accepted.taskId ? { taskId: manual.accepted.taskId } : {}),
     ...(precheck ? { precheck } : {}),
     ...(claim?.gmail ? { gmail: { messageIds: claim.gmail.messageIds } } : {}),
+    ...(claim?.calendar ? { calendar: claim.calendar } : {}),
     detail: !claim ? "The rule changed before this run could begin."
       : admissionPossible ? "The run was interrupted during admission. Its task may already have started."
       : "The run was interrupted during precheck. The check may have had effects.",
   }, now);
 }
 
-async function interruptGmailClaim(tx: Tx, conversationId: ConversationId, rule: StoredRoutine, now: number) {
+async function interruptWatchClaim(tx: Tx, conversationId: ConversationId, rule: StoredRoutine, now: number) {
   const claim = rule.claim;
-  if (!claim?.gmail) return;
+  if (!claim?.gmail && !claim?.calendar) return;
   await recordOccurrence(tx, conversationId, rule, {
     id: claim.id, scheduledAt: claim.scheduledAt, status: 'interrupted',
-    gmail: { messageIds: claim.gmail.messageIds },
+    ...(claim.gmail ? { gmail: { messageIds: claim.gmail.messageIds } } : {}),
+    ...(claim.calendar ? { calendar: claim.calendar } : {}),
     ...(claim.precheckResult ? { precheck: claim.precheckResult } : {}),
     ...(claim.action === 'task' ? { taskId: claim.taskId } : {}),
     ...(claim.timing ? { timing: claim.timing } : {}),
-    detail: 'The Gmail matches were saved before the rule was interrupted during delivery.',
+    detail: claim.gmail ? 'The Gmail matches were saved before the rule was interrupted during delivery.'
+      : 'The calendar events were saved before the rule was interrupted during delivery.',
   }, now);
 }
 
@@ -210,6 +217,7 @@ type StoredRoutine = Routine & {
   lastPrecheckScheduledAt?: string;
   gmailMailbox?: RoutineGmailBinding;
   gmailBaseline?: true;
+  calendarSource?: { fingerprint: string };
   lastStarted?: StartedOccurrence;
   lastStartedAt?: number;
   lastAccountResult?: string;
@@ -222,6 +230,7 @@ export interface LocalRoutineOptions {
   taskOverview?(taskId: string): Promise<TaskOverview | undefined>;
   mcp?: Pick<McpTools, "validatePrecheck" | "samplePrecheck">;
   gmail?: Pick<ProjectGmail, "watchMailbox" | "watchMessageIds">;
+  calendar?: Pick<ProjectCalendars, "watchCalendar" | "upcomingReminders">;
   lastUserActivity?(workspace: string): Promise<number | undefined>;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
@@ -246,6 +255,11 @@ const observedGmail = defineDocFamily<{ seen: boolean }, null>({
   initial: () => ({ seen: false }), checkpointWhen: () => true,
 });
 
+const observedCalendar = defineDocFamily<{ seen: boolean }, null>({
+  scope: 'session', family: true, kind: 'local.routine.calendar-observed', version: 1,
+  initial: () => ({ seen: false }), checkpointWhen: () => true,
+});
+
 type TimerInput = { routineId: string; revision: number; firstAt: number; manual?: RoutineOccurrence };
 type TimerCheckpoint = { phase: "wait"; at: number } | { phase: "deliver"; at: number };
 type Session = { harness: Harness; conversationId: ConversationId; timer: ReturnType<typeof makeTimer> };
@@ -258,7 +272,7 @@ function snapshot<T>(value: T): T {
 }
 
 function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample,
-  gmailMailbox: _mailbox, gmailBaseline: _gmailBaseline, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt,
+  gmailMailbox: _mailbox, gmailBaseline: _gmailBaseline, calendarSource: _calendar, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt,
   lastAccountResult: _accountResult, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
@@ -352,6 +366,14 @@ function definition(input: RoutineInput): RoutineDefinition {
         throw new RoutineError(400, 'A Gmail precheck requires a recurring project rule and a search query.');
       }
       precheck = { gmail: { query: gmailSearchQuery(value.query) } };
+    } else if ("calendar" in precheck) {
+      const value = precheck.calendar;
+      if (input.action !== 'notify' || schedule.kind === 'once' || schedule.kind === 'event' || input.event !== undefined ||
+          !value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 ||
+          !Number.isSafeInteger(value.withinMinutes) || value.withinMinutes < 1 || value.withinMinutes > 1440) {
+        throw new RoutineError(400, 'A calendar precheck requires a recurring project notification and a lead time of 1 to 1440 minutes.');
+      }
+      precheck = { calendar: { withinMinutes: value.withinMinutes } };
     } else if (input.action !== 'task') throw new RoutineError(400, 'Command and MCP prechecks require a task.');
     else if ("mcp" in precheck) precheck = { mcp: normalizeMcpPrecheck(precheck.mcp) };
     else if ("command" in precheck && Array.isArray(precheck.command) && precheck.command.length <= 64 &&
@@ -424,6 +446,7 @@ function occurrenceFor(rule: StoredRoutine, at: number, requestKey?: string): Ro
     ...(precheck ? { precheck } : {}),
     ...(activity ? { activity } : {}),
     ...(rule.gmailMailbox ? { gmailMailbox: rule.gmailMailbox } : {}),
+    ...(rule.calendarSource ? { calendarSource: rule.calendarSource } : {}),
   };
 }
 
@@ -463,7 +486,7 @@ function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
 }
 
 async function samplePrecheck(due: RoutineOccurrence, precheck: NonNullable<RoutineInput["precheck"]>, ctx: typeof context,
-  options: LocalRoutineOptions): Promise<{ sha256: string; messageIds?: string[] } | { detail: string }> {
+  options: LocalRoutineOptions, now: number): Promise<{ sha256: string; messageIds?: string[]; calendar?: CalendarReminder[] } | { detail: string }> {
   const workspace = due.workspace!;
   const signal = () => AbortSignal.any([AbortSignal.timeout(30_000), ...(ctx.abortSignal ? [ctx.abortSignal] : [])]);
   if ("gmail" in precheck) {
@@ -474,6 +497,16 @@ async function samplePrecheck(due: RoutineOccurrence, precheck: NonNullable<Rout
     } catch {
       ctx.abortSignal?.throwIfAborted();
       return { detail: 'Gmail precheck failed. Check the pinned mailbox, search range and read permission.' };
+    }
+  }
+  if ("calendar" in precheck) {
+    try {
+      if (!options.calendar || !due.calendarSource) throw new Error('Calendar prechecks are unavailable.');
+      const calendar = await options.calendar.upcomingReminders(workspace, due.calendarSource.fingerprint, now, precheck.calendar.withinMinutes, signal());
+      return { calendar, sha256: createHash('sha256').update(JSON.stringify(calendar.map(({id,start}) => [id,start]))).digest('hex') };
+    } catch {
+      ctx.abortSignal?.throwIfAborted();
+      return { detail: 'Calendar precheck failed. Check the pinned calendar and read permission.' };
     }
   }
   if ("mcp" in precheck) {
@@ -506,6 +539,19 @@ async function observeGmail(tx: Tx, rule: StoredRoutine, ids: string[]) {
       added.push(id);
       if (added.length === 100) break;
     }
+  }
+  return added;
+}
+
+async function observeCalendar(tx: Tx, rule: StoredRoutine, events: CalendarReminder[]) {
+  const added: CalendarReminder[] = [];
+  for (const event of events) {
+    const key = createHash('sha256').update(JSON.stringify([rule.id, rule.revision, event.id, event.start])).digest('hex');
+    const observation = await tx.doc(observedCalendar, key, null);
+    if (observation.seen) continue;
+    observation.seen = true;
+    added.push(event);
+    if (added.length === 100) break;
   }
   return added;
 }
@@ -667,8 +713,8 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
 
         const due = occurrence;
         const { id, scheduledAt } = due;
-        if (due.precheck && (newClaim || ("gmail" in due.precheck && !precheck))) {
-          const sample = await samplePrecheck(due, due.precheck, ctx, options);
+        if (due.precheck && (newClaim || (!precheck && ("gmail" in due.precheck || "calendar" in due.precheck)))) {
+          const sample = await samplePrecheck(due, due.precheck, ctx, options, runtime.now());
           if (runtime.signal.aborted) return;
           await runtime.commit(async (tx) => {
             const { rules } = await tx.doc(routinesDoc);
@@ -690,13 +736,18 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
                   gmail: { messageIds: ids },
                 }, runtime.now());
               }
+            } else if (sample.calendar) {
+              const events = await observeCalendar(tx, rule, sample.calendar);
+              precheck = { status: events.length ? "changed" : "unchanged", sha256: sample.sha256 };
+              if (events.length) due.calendar = events;
             } else {
               const other = (manual ? rule.claim : rule.manual?.claim)?.precheckResult;
               const status = sample.sha256 === rule.lastPrecheckSha256 ? "unchanged"
                 : other?.status === "changed" && other.sha256 === sample.sha256 ? "pending" : "changed";
               precheck = { status, sha256: sample.sha256 };
             }
-            rules[key] = storeClaim(rule, { ...claim, precheckResult: precheck, ...(due.gmail ? { gmail: due.gmail } : {}) });
+            rules[key] = storeClaim(rule, { ...claim, precheckResult: precheck,
+              ...(due.gmail ? { gmail: due.gmail } : {}), ...(due.calendar ? { calendar: due.calendar } : {}) });
           }, ctx);
           if (!precheck || runtime.signal.aborted) return;
         } else if (due.precheck && !precheck) {
@@ -705,7 +756,7 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         const timing=occurrence.timing ? {timing:occurrence.timing} : {};
         const evidence = { id, scheduledAt, ...timing, ...(due.trigger ? { trigger: due.trigger } : {}),
           ...(due.event ? { event: due.event } : {}), ...(precheck ? { precheck } : {}), ...(activity ? { activity } : {}),
-          ...(due.gmail ? { gmail: { messageIds: due.gmail.messageIds } } : {}) };
+          ...(due.gmail ? { gmail: { messageIds: due.gmail.messageIds } } : {}), ...(due.calendar ? { calendar: due.calendar } : {}) };
         let receipt: Receipt;
         try {
           if (precheck && precheck.status !== "changed") {
@@ -788,23 +839,28 @@ export class LocalRoutines {
     }
   }
 
-  private async validatePrecheck(details: RoutineDefinition) {
+  private async validatePrecheck(details: RoutineDefinition): Promise<Pick<StoredRoutine, "gmailMailbox" | "calendarSource">> {
     const check = details.precheck;
-    if (!check || "command" in check) return;
+    if (!check || "command" in check) return {};
     try {
       if ("gmail" in check) {
         if (!this.options.gmail) throw new Error("Gmail prechecks are unavailable.");
-        return await this.options.gmail.watchMailbox(details.workspace!, details.action === 'task');
+        return { gmailMailbox: await this.options.gmail.watchMailbox(details.workspace!, details.action === 'task') };
+      }
+      if ("calendar" in check) {
+        if (!this.options.calendar) throw new Error("Calendar prechecks are unavailable.");
+        return { calendarSource: await this.options.calendar.watchCalendar(details.workspace!) };
       }
       if (!this.options.mcp) throw new Error("MCP prechecks are unavailable.");
       await this.options.mcp.validatePrecheck(details.workspace!, check.mcp);
+      return {};
     }
     catch (error) { throw new RoutineError(400, (error as Error).message); }
   }
 
   async create(input: RoutineInput): Promise<Routine> {
     const details = definition(input);
-    const gmailMailbox = await this.validatePrecheck(details);
+    const binding = await this.validatePrecheck(details);
     const id = input.id === undefined ? randomUUID() : inputId(input.id);
     const { harness, conversationId, timer } = await this.open();
     const routine = await harness.commit(async (tx) => {
@@ -817,7 +873,7 @@ export class LocalRoutines {
         }
         return toRoutine(previous);
       }
-      const next: StoredRoutine = { ...details, id, revision: 1, status: "scheduled", ...(gmailMailbox ? { gmailMailbox } : {}) };
+      const next: StoredRoutine = { ...details, ...binding, id, revision: 1, status: "scheduled" };
       if (details.schedule.kind !== "event") {
         const firstAt = firstTime(details.schedule, this.now());
         next.nextRunAt = new Date(firstAt).toISOString();
@@ -972,7 +1028,7 @@ export class LocalRoutines {
       typeof request.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(request.requestId))) throw new RoutineError(400, 'Provide an expected revision and valid update request ID.');
     const details = definition(input);
     const fingerprint = request ? createHash('sha256').update(JSON.stringify([request.expectedRevision, details])).digest('hex') : undefined;
-    const gmailMailbox = await this.validatePrecheck(details);
+    const binding = await this.validatePrecheck(details);
     const { harness, conversationId, timer } = await this.open();
     const result = await harness.commit(async (tx) => {
       const { rules } = await tx.doc(routinesDoc);
@@ -995,7 +1051,8 @@ export class LocalRoutines {
         } });
         return routine;
       };
-      if (previous.status === "scheduled" && previous.gmailMailbox?.fingerprint === gmailMailbox?.fingerprint &&
+      if (previous.status === "scheduled" && previous.gmailMailbox?.fingerprint === binding.gmailMailbox?.fingerprint &&
+        previous.calendarSource?.fingerprint === binding.calendarSource?.fingerprint &&
         JSON.stringify(definition(previous)) === JSON.stringify(details)) {
         return { routine: await receipt(toRoutine(previous)) };
       }
@@ -1003,7 +1060,7 @@ export class LocalRoutines {
       const priorClaim = previous.claim ?? previous.manual?.claim;
       const next: StoredRoutine = {
         ...details, id, revision, status: keepPaused ? 'paused' : 'scheduled',
-        ...(gmailMailbox ? { gmailMailbox } : {}),
+        ...binding,
         ...(previous.lastOccurrence ? { lastOccurrence: previous.lastOccurrence } : {}),
         ...(previous.lastStartedAt === undefined ? {} : { lastStartedAt: previous.lastStartedAt }),
         ...(previous.accountCooldown ? { accountCooldown: previous.accountCooldown } : {}),
@@ -1022,7 +1079,7 @@ export class LocalRoutines {
         }
       }
       await interruptManual(tx, conversationId, previous, this.now());
-      await interruptGmailClaim(tx, conversationId, previous, this.now());
+      await interruptWatchClaim(tx, conversationId, previous, this.now());
       rules[key] = next;
       return { routine: await receipt(toRoutine(next)), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
     }, context);
@@ -1043,7 +1100,7 @@ export class LocalRoutines {
       if (previous.status === "cancelled") return { routine: toRoutine(previous) };
       const next = endSchedule(previous, "cancelled");
       await interruptManual(tx, conversationId, previous, this.now());
-      await interruptGmailClaim(tx, conversationId, previous, this.now());
+      await interruptWatchClaim(tx, conversationId, previous, this.now());
       delete next.manual;
       rules[key] = next;
       return { routine: toRoutine(next), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
@@ -1081,7 +1138,7 @@ export class LocalRoutines {
           next.lastStarted = { occurrenceId: claim.id, taskId: claim.taskId };
         }
         await interruptManual(tx, conversationId, rule, this.now());
-        await interruptGmailClaim(tx, conversationId, rule, this.now());
+        await interruptWatchClaim(tx, conversationId, rule, this.now());
         delete next.manual;
         rules[key] = next;
         return { routine: toRoutine(next), previousTimer: rule.timerId, manualTimer: rule.manual?.timerId };

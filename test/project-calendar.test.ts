@@ -9,7 +9,7 @@ import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { createClient } from '../src/client.js';
 import { LocalRuntime } from '../src/runtime.js';
 import { serve } from '../src/server.js';
-import { hasTool, scriptedFixture, until } from './helpers.js';
+import { fakeRoutineClock, hasTool, scriptedFixture, until } from './helpers.js';
 
 const calendarServer = `
   const fs = require('node:fs');
@@ -37,10 +37,20 @@ const calendarServer = `
     if (request.method === 'tools/call') {
       const args = request.params.arguments;
       const range = args.timeMin + '/' + args.timeMax;
+      const upcoming = ['2026-11-10T02:40:00.000Z/2026-11-10T03:10:00.000Z',
+        '2026-11-10T02:45:00.000Z/2026-11-10T03:15:00.000Z'].includes(range);
       if (request.params.name !== 'list-events' || args.account !== 'work' || args.calendarId !== 'primary' ||
-          !['2026-11-01T00:00:00/2026-12-01T00:00:00','2026-11-09T00:00:00/2026-11-11T00:00:00'].includes(range) ||
+          !(upcoming || ['2026-11-01T00:00:00/2026-12-01T00:00:00','2026-11-09T00:00:00/2026-11-11T00:00:00'].includes(range)) ||
           args.timeZone !== 'America/New_York') {
         results['tools/call'] = { isError: true, content: [{ type: 'text', text: 'Incorrect calendar query' }] };
+      }
+      if (upcoming && !results['tools/call'].isError) {
+        const payload = JSON.parse(results['tools/call'].content[0].text);
+        const start = {dateTime:'2026-11-10T02:50:00Z'}, end = {dateTime:'2026-11-10T03:00:00Z'};
+        payload.events.push(event('another-account', 'Private overlap', start, end, 'private'),
+          { ...event('cancelled', 'Cancelled overlap', start, end), status:'cancelled' },
+          event('outside-window', 'Late event', {dateTime:'2026-11-10T04:00:00Z'}, {dateTime:'2026-11-10T05:00:00Z'}));
+        results['tools/call'].content[0].text = JSON.stringify(payload);
       }
       if (request.params.name === 'list-events' && args.timeMin === '2026-11-09T00:00:00' && !results['tools/call'].isError) {
         const payload = JSON.parse(results['tools/call'].content[0].text);
@@ -73,6 +83,47 @@ const calendarServer = `
     console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result:results[request.method]}));
   });
 `;
+
+test('an opted-in project calendar reminder delivers one upcoming event across restart', async t => {
+  const start = Date.parse('2026-11-10T02:35:00.000Z');
+  const clock = fakeRoutineClock(start);
+  const fixture = await scriptedFixture(() => assert.fail('a reminder must not need a model'));
+  const options = { models: fixture.models, routineClock: clock };
+  let runtime = new LocalRuntime(fixture.settings, options);
+  t.after(async () => { await runtime.close(); await fixture.close(); });
+  const step = 5 * 60_000;
+  await runtime.mcp.configure({ id:'calendar', transport:'stdio', command:process.execPath, args:['-e',calendarServer] });
+  const { revision } = await runtime.mcp.test('calendar');
+  await runtime.mcp.enable('calendar',['list-events'],revision);
+  const calendar = { id:'calendar', revision, account:'work', calendarId:'primary', timeZone:'America/New_York' };
+  const rule = { id:'upcoming', workspace:fixture.workspace, action:'notify' as const, objective:'Upcoming review',
+    schedule:{ kind:'interval' as const, everyMinutes:5, anchorAt:new Date(start + step).toISOString() },
+    precheck:{ calendar:{ withinMinutes:30 } } };
+  await assert.rejects(runtime.routines.create(rule), /bind a project calendar/i);
+  await runtime.calendars.setSource(fixture.workspace,calendar);
+  await runtime.routines.create(rule);
+  async function tick(slot: number) {
+    const at = start + slot * step;
+    await until(async () => clock.waitingAt(at),Boolean);
+    clock.advanceTo(at);
+    return until(async () => (await runtime.routines.history(rule.id)).find(row => row.scheduledAt === new Date(at).toISOString() && row.status !== 'claimed'),Boolean);
+  }
+  const first = await tick(1);
+  assert.equal(first?.status,'notified');
+  assert.deepEqual(first?.calendar,[{id:'timed',title:'Afternoon review',start:'2026-11-10T03:00:00.000Z'}]);
+  const notices = await runtime.notifications();
+  assert.equal(notices.length,1);
+  assert.match(notices[0]!.detail,/Afternoon review.*2026-11-10T03:00:00/);
+  assert.doesNotMatch(notices[0]!.detail,/private event notes|Other account|Late event|Cancelled/);
+  await runtime.close();
+  runtime = new LocalRuntime(fixture.settings,options);
+  await runtime.routines.recover();
+  assert.equal((await tick(2))?.precheck?.status,'unchanged');
+  assert.deepEqual(await runtime.notifications(),notices);
+  await runtime.mcp.setApproval('calendar',['list-events'],revision);
+  assert.equal((await tick(3))?.precheck?.status,'failed');
+  assert.deepEqual(await runtime.notifications(),notices);
+});
 
 test('the workboard reads one bound calendar in the selected month and honors current MCP permission', async t => {
   const f = await scriptedFixture(() => fauxAssistantMessage('No model request is needed.'));

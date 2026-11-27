@@ -12,6 +12,7 @@ import { localCalendarDay } from './work-items.js';
 type CalendarSource = { id: string; revision: string; account: string; calendarId: string; timeZone: string; allowAssistant?: boolean };
 type CalendarEvent = { id: string; title: string; day: string; start: string; end: string; allDay: boolean;
   seriesId?: string; originalStartTime?: string; meetUrl?: string };
+export type CalendarReminder = Pick<CalendarEvent, 'id' | 'title' | 'start'>;
 export const calendarMutations = ['create-event','update-event','delete-event','respond-to-event'] as const;
 export type CalendarMutation = typeof calendarMutations[number];
 export const calendarFreeBusyTool = 'get-freebusy';
@@ -57,9 +58,12 @@ function parseSource(input: unknown): CalendarSource {
   }
 }
 
-function assistantFingerprint(project: string, source: CalendarSource | null | undefined) {
-  if (!source?.allowAssistant) return;
+function calendarFingerprint(project: string, source: CalendarSource) {
   return createHash('sha256').update(JSON.stringify([project,source.id,source.revision,source.account,source.calendarId,source.timeZone])).digest('hex');
+}
+
+function assistantFingerprint(project: string, source: CalendarSource | null | undefined) {
+  if (source?.allowAssistant) return calendarFingerprint(project, source);
 }
 
 function monthBounds(month: string) {
@@ -123,6 +127,25 @@ export class ProjectCalendars {
     const source = (await this.read())[project];
     const fingerprint = assistantFingerprint(project, source);
     if (source && fingerprint) return { id:source.id, fingerprint };
+  }
+  async watchCalendar(workspace: string) {
+    const { project, source } = await this.source(workspace);
+    if (!source) throw new CalendarError(409, 'Bind a project calendar before creating reminders.');
+    await this.checkPermission(project, { id: source.id, revision: source.revision, tool: 'list-events', arguments: {} });
+    return { fingerprint: calendarFingerprint(project, source) };
+  }
+
+  async upcomingReminders(workspace: string, fingerprint: string, now: number, withinMinutes: number, signal?: AbortSignal): Promise<CalendarReminder[]> {
+    const { project, source } = await this.source(workspace);
+    if (!source || calendarFingerprint(project, source) !== fingerprint) throw new CalendarError(409, 'The authorized project calendar changed.');
+    const end = now + withinMinutes * 60_000;
+    const from = localCalendarDay(now, source.timeZone);
+    const to = new Date(Date.parse(localCalendarDay(end, source.timeZone)) + 86_400_000).toISOString().slice(0,10);
+    const events = await this.listEvents(project, source, { from, to, timeMin: new Date(now).toISOString(), timeMax: new Date(end).toISOString() }, signal);
+    return events.filter(event => {
+      const startsAt = Date.parse(event.start);
+      return !event.allDay && startsAt >= now && startsAt < end;
+    }).map(({ id, title, start }) => ({ id, title, start }));
   }
   async mutationTarget(scope: ApplicationApprovalScope, tool: string) {
     if (!calendarMutations.some(name => name === tool)) throw new CalendarError(400, 'Choose a supported calendar mutation.');
@@ -209,7 +232,7 @@ export class ProjectCalendars {
       throw new CalendarError(409, 'The authorized project calendar changed.');
     }
     if (!source) return { configured: false, timeZone: null, events: [] };
-    const { account, calendarId, timeZone } = source;
+    const { timeZone } = source;
     if (from === undefined && to === undefined) {
       from = localCalendarDay(Date.now(),timeZone);
       to = new Date(Date.parse(from) + 86_400_000).toISOString().slice(0,10);
@@ -217,22 +240,29 @@ export class ProjectCalendars {
     if (!dateOnly(from) || !dateOnly(to) || to <= from || Date.parse(to) - Date.parse(from) > 31 * 86_400_000) {
       throw new CalendarError(400, 'Use an inclusive start date and an exclusive end date at most 31 days apart.');
     }
-    const startDate = from, endDate = to;
+    const events = await this.listEvents(project, source, { from, to, timeMin: from + 'T00:00:00', timeMax: to + 'T00:00:00' }, expected?.signal);
+    return { configured: true, timeZone, events };
+  }
+
+  private async listEvents(project: string, source: CalendarSource, window: {
+    from: string; to: string; timeMin: string; timeMax: string;
+  }, signal?: AbortSignal) {
+    const { account, calendarId, timeZone } = source;
     const payload = await this.readTool(project,source,'list-events',{
-      account, calendarId, timeZone, timeMin: from + 'T00:00:00', timeMax: to + 'T00:00:00',
+      account, calendarId, timeZone, timeMin: window.timeMin, timeMax: window.timeMax,
       fields: ['id', 'summary', 'start', 'end', 'status', 'recurringEventId', 'originalStartTime', 'hangoutLink'],
-    },expected?.signal);
+    },signal);
     try {
       if (!Array.isArray(payload.events) || Array.isArray(payload.partialFailures) && payload.partialFailures.length) throw new Error('Unexpected calendar response.');
       const events = payload.events.filter(value => {
         const event = record(value);
         return event && event.accountId === account && event.status !== 'cancelled';
       }).flatMap(value => {
-        const event = projectEvent(value, timeZone, startDate, endDate);
+        const event = projectEvent(value, timeZone, window.from, window.to);
         return event ? [event] : [];
       });
       events.sort((a, b) => a.day.localeCompare(b.day) || Number(b.allDay) - Number(a.allDay) || a.start.localeCompare(b.start) || a.title.localeCompare(b.title));
-      return { configured: true, timeZone, events };
+      return events;
     } catch {
       throw new CalendarError(502, 'The provider did not return a supported Google Calendar event list.');
     }

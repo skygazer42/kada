@@ -58,7 +58,12 @@ export class NotificationStore {
       const stored = await this.load(), id = hash(['routine',occurrence.id]);
       if (!stored.reminders.some(event => event.id === id)) {
         const count = occurrence.gmail?.messageIds.length;
-        const detail = count ? occurrence.objective + ' (' + count + ' new Gmail ' + (count === 1 ? 'match' : 'matches') + ')' : occurrence.objective;
+        let detail = occurrence.objective;
+        if (occurrence.calendar?.length) {
+          detail += '\n' + occurrence.calendar.map(event => event.title + ' · ' + event.start).join('\n');
+        } else if (count) {
+          detail += ' (' + count + ' new Gmail ' + (count === 1 ? 'match' : 'matches') + ')';
+        }
         stored.reminders.push({id,routineId:occurrence.routineId,revision:occurrence.revision,event:'reminder',at:Date.parse(occurrence.scheduledAt),detail,readAt:null});
         if (requireAdmission) await requireAdmission();
         await atomicJson(this.path,stored);

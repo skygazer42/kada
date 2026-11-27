@@ -293,7 +293,7 @@ export class LocalRuntime {
       }),
     }, this.assistants);
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,gmail:this.gmail,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,gmail:this.gmail,calendar:this.calendars,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
       try { return await this.taskOverview(id); }
       catch (error) {
         const cause = error as NodeJS.ErrnoException;
@@ -301,7 +301,13 @@ export class LocalRuntime {
       }
     },execute:async (occurrence,signal) => {
       signal.throwIfAborted();
-      const requireRoutineAdmission = () => this.routines.requireAdmission(occurrence);
+      const requireRoutineAdmission = async () => {
+        if (occurrence.calendarSource) {
+          const binding = await this.calendars.watchCalendar(occurrence.workspace!);
+          if (binding.fingerprint !== occurrence.calendarSource.fingerprint) throw new Error('The authorized project calendar changed.');
+        }
+        await this.routines.requireAdmission(occurrence);
+      };
       if (occurrence.action === 'notify') { await this.inbox.notify(occurrence,requireRoutineAdmission); return {status:'notified'}; }
       const task = await this.create(occurrence.objective,occurrence.workspace,occurrence.acceptance,{id:occurrence.taskId,budget:occurrence.budget,routineOccurrenceId:occurrence.id,notifyOnChange:occurrence.notifyOnChange,signal,
         requireRoutineAdmission,
