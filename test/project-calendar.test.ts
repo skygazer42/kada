@@ -22,6 +22,7 @@ const calendarServer = `
       initialize: { protocolVersion: request.params?.protocolVersion, serverInfo: {name:'calendar-fixture',version:'1'}, capabilities: {tools:{}} },
       'tools/list': { tools: [
         { name: 'list-events', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+        { name: 'get-freebusy', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
         ...['create-event','update-event','delete-event'].map(name => ({
           name, inputSchema: { type: 'object' }, annotations: { readOnlyHint: false },
         })),
@@ -44,6 +45,14 @@ const calendarServer = `
       if (['create-event','update-event','delete-event'].includes(request.params.name)) {
         fs.appendFileSync(process.argv[1], JSON.stringify({ name:request.params.name,args }) + '\\n');
         results['tools/call'] = { content: [{ type:'text', text:'Confirmed action for ' + args.eventId }] };
+      }
+      if (request.params.name === 'get-freebusy' && args.account === 'work' && args.calendars?.length === 1 &&
+          args.calendars[0].id === 'primary' && args.timeZone === 'America/New_York') {
+        const primary = args.timeMin.startsWith('2026-11-10') ? {busy:[],errors:[{reason:'notFound'}]} : {busy:[
+          {start:'2026-11-09T09:30:00-05:00',end:'2026-11-09T10:30:00-05:00'},
+          {start:'2026-11-09T10:00:00-05:00',end:'2026-11-09T11:00:00-05:00'},
+        ]};
+        results['tools/call'] = { content: [{type:'text',text:JSON.stringify({calendars:{primary}})}] };
       }
     }
     console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result:results[request.method]}));
@@ -104,13 +113,23 @@ test('project calendar mutations dispatch the approved target once and reject a 
   const start = '2026-11-09T10:00:00-05:00', end = '2026-11-09T11:00:00-05:00';
   const f = await scriptedFixture(context => {
     const initial = JSON.stringify(context.messages.find(message => message.role === 'user')?.content);
+    const viaChat = initial.includes('from this chat');
+    if (!hasTool(context,'task_submit')) {
+      assert(!hasTool(context,'project_calendar_create'));
+      return fauxAssistantMessage(fauxToolCall('task_prepare',{
+        outcome:'Schedule the requested event',deliverables:['One event'],inputs:[],scope:['Create the budget review'],
+        criteria:[{text:'The requested calendar event is created',method:'inspect'}],assumptions:[],questions:[],
+      }),{stopReason:'toolUse'});
+    }
     const operation = initial.includes('Edit original') ? 'update' : initial.includes('Cancel original') ? 'delete' : 'create';
     const tool = 'project_calendar_' + operation;
     const requested = context.messages.some(message => message.role === 'toolResult' && message.toolName === tool);
     if (!hasTool(context, tool)) return fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Calendar unavailable.', artifacts:[] }),{ stopReason:'toolUse' });
     const args = operation === 'update' ? {eventId:'timed',summary:'Revised review'} : operation === 'delete'
       ? {eventId:'timed',notifyGuests:true} : { summary:'Budget review', start,end, attendees:['guest@example.invalid'] };
-    return requested ? fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Reviewed the action outcome.', artifacts:[] }),{ stopReason:'toolUse' })
+    return requested ? fauxAssistantMessage(fauxToolCall('task_submit',{ summary:'Reviewed the action outcome.', artifacts:[],
+      ...(viaChat ? {criteria:[{id:1,status:'passed',evidence:'The approved Calendar call returned a confirmed event ID.'}]} : {}),
+    }),{ stopReason:'toolUse' })
       : fauxAssistantMessage(fauxToolCall(tool,args),{ stopReason:'toolUse' });
   },{maxDurationMs:90_000});
   let runtime = f.runtime;
@@ -126,13 +145,18 @@ test('project calendar mutations dispatch the approved target once and reject a 
   const source = { id:'calendar', revision, account:'work', calendarId:'primary', timeZone:'America/New_York', allowAssistant:true };
   await runtime.calendars.setSource(f.workspace,source);
   const writes = async () => (await readFile(log,'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const request = async (objective = 'Schedule the budget review and invite the specified guest.') => {
-    const run = await runtime.create(objective,f.workspace);
+  const request = async (objective = 'Schedule the budget review and invite the specified guest.',viaChat = false) => {
+    const run = await runtime.create(objective,f.workspace,[],{chat:viaChat});
+    if (viaChat) {
+      const waiting = await until(() => runtime.status(run.id), row => row.status === 'awaiting_confirmation');
+      assert.deepEqual(await writes(),[]);
+      await runtime.confirm(run.id,waiting.goal!.brief!.revision,waiting.briefDigest!);
+    }
     const status = await until(() => runtime.status(run.id), row => ['waiting_user','completed','failed'].includes(row.status));
     assert.equal(status.status,'waiting_user');
     return { run, approval:status.approvals[0]! };
   };
-  const {run,approval} = await request();
+  const {run,approval} = await request('Schedule the budget review from this chat and invite the specified guest.',true);
   assert.equal(approval.tool,'create-event');
   assert.deepEqual(approval.arguments,{
     account:'work', calendarId:'primary', timeZone:'America/New_York',
@@ -148,6 +172,7 @@ test('project calendar mutations dispatch the approved target once and reject a 
   await runtime.decideApproval(run.id,approval.id,'allow',approval.digest);
   await until(() => runtime.status(run.id), row => row.approvals[0]?.status === 'completed');
   assert.deepEqual(await writes(),[{name:'create-event',args:approval.arguments}]);
+  await until(() => runtime.status(run.id), row => row.status === 'completed');
 
   const edit = await request('Edit original appointment.');
   assert.equal(edit.approval.tool,'update-event');
@@ -173,19 +198,27 @@ test('project calendar mutations dispatch the approved target once and reject a 
 });
 
 test('an opted-in local chat reads the requested days of its project calendar and honors a later revocation', async t => {
-  const tool = 'project_calendar_list';
+  const tool = 'project_calendar_list', availability = 'project_calendar_available';
   const f = await scriptedFixture(context => {
     if (!hasTool(context, tool)) return fauxAssistantMessage('Calendar not enabled.');
     const input = context.messages.findLastIndex(message => message.role === 'user');
-    const result = context.messages.slice(input + 1).find(message => message.role === 'toolResult' && message.toolName === tool);
-    return result ? fauxAssistantMessage(result.isError ? 'Calendar access changed.' : 'Schedule reviewed.')
-      : fauxAssistantMessage(fauxToolCall(tool, { from:'2026-11-09', to:'2026-11-11' }), { stopReason:'toolUse' });
+    const results = context.messages.slice(input + 1).filter(message => message.role === 'toolResult');
+    if (results.some(result => result.isError)) return fauxAssistantMessage('Calendar access changed.');
+    if (!results.some(result => result.toolName === tool)) {
+      return fauxAssistantMessage(fauxToolCall(tool, { from:'2026-11-09', to:'2026-11-11' }), { stopReason:'toolUse' });
+    }
+    if (hasTool(context,availability) && !results.some(result => result.toolName === availability)) {
+      const day = JSON.stringify(context.messages[input])?.includes('busy service error') ? '2026-11-10' : '2026-11-09';
+      return fauxAssistantMessage(fauxToolCall(availability,{from:day+'T09:00:00-05:00',to:day+'T12:00:00-05:00',durationMinutes:30}),
+        {stopReason:'toolUse'});
+    }
+    return fauxAssistantMessage('Schedule reviewed.');
   });
   t.after(() => f.close());
   const runtime = f.runtime, mcp = runtime.mcp;
   await mcp.configure({ id:'calendar', transport:'stdio', command:process.execPath, args:['-e',calendarServer] });
   const { revision } = await mcp.test('calendar');
-  await mcp.enable('calendar',['list-events'],revision);
+  await mcp.enable('calendar',['list-events','get-freebusy'],revision);
   const source = { id:'calendar', revision, account:'work', calendarId:'primary', timeZone:'America/New_York' };
   await runtime.calendars.setSource(f.workspace,source);
   const ask = 'What is on my calendar on November 9 and 10?';
@@ -199,6 +232,17 @@ test('an opted-in local chat reads the requested days of its project calendar an
   assert.equal(schedule.goal,undefined);
   assert.match(JSON.stringify(schedule.messages),/Afternoon review/);
   assert.doesNotMatch(JSON.stringify(schedule.messages),/All-day event|Other account|private event notes/);
+  const slots = schedule.messages.find(message => message.role === 'toolResult' && message.toolName === availability);
+  assert(slots && slots.role === 'toolResult' && !slots.isError);
+  const output = slots.content.find(part => part.type === 'text');
+  assert(output?.type === 'text');
+  assert.deepEqual(JSON.parse(output.text).slots,[
+    {start:'2026-11-09T14:00:00.000Z',end:'2026-11-09T14:30:00.000Z'},
+    {start:'2026-11-09T16:00:00.000Z',end:'2026-11-09T17:00:00.000Z'},
+  ]);
+  await runtime.followUp(task.id,'Check the busy service error fixture.','calendar-busy-error');
+  const failed = await wait(task.id,'user:calendar-busy-error');
+  assert.match(JSON.stringify(failed.messages),/Google Calendar did not confirm busy time/);
   const remote = await runtime.create(ask,f.workspace,[],{ chat:true, remote:true });
   assert.doesNotMatch(JSON.stringify((await wait(remote.id)).messages), /"toolName":"project_calendar_list"/);
   await runtime.followUp(old.id,ask,'old-calendar');

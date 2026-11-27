@@ -13,6 +13,7 @@ type CalendarSource = { id: string; revision: string; account: string; calendarI
 type CalendarEvent = { id: string; title: string; day: string; start: string; end: string; allDay: boolean };
 export const calendarMutations = ['create-event','update-event','delete-event'] as const;
 export type CalendarMutation = typeof calendarMutations[number];
+export const calendarFreeBusyTool = 'get-freebusy';
 
 export class CalendarError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
@@ -141,6 +142,34 @@ export class ProjectCalendars {
     const { from, to } = monthBounds(month);
     return this.range(workspace,from,to,{ project:expectedProject });
   }
+  private async readTool(project: string, source: CalendarSource, tool: string, args: McpPrecheck['arguments'], abort?: AbortSignal) {
+    const check = { id:source.id, revision:source.revision, tool, arguments:args };
+    const ensureSource = async () => {
+      const current = (await this.read())[project];
+      if (JSON.stringify(current) !== JSON.stringify(source)) throw new CalendarError(409, 'The project calendar source changed.');
+    };
+    await this.checkPermission(project,check);
+    const timeout = AbortSignal.timeout(15_000);
+    const signal = abort ? AbortSignal.any([abort,timeout]) : timeout;
+    const result = await this.mcp.runReadOnly(project,check,signal,ensureSource).catch(async () => {
+      abort?.throwIfAborted();
+      await this.checkPermission(project,check);
+      await ensureSource();
+      throw new CalendarError(502,'Could not read the configured Google Calendar.');
+    });
+    await this.checkPermission(project,check);
+    await ensureSource();
+    try {
+      if (result.isError) throw new Error('Provider error.');
+      const text = result.content.length === 1 && result.content[0]?.type === 'text' ? result.content[0].text : undefined;
+      if (!text || Buffer.byteLength(text) > 1_000_000) throw new Error('Unexpected calendar response.');
+      const payload = record(JSON.parse(text));
+      if (!payload) throw new Error('Unexpected calendar response.');
+      return payload;
+    } catch {
+      throw new CalendarError(502,'The provider did not return a supported Google Calendar response.');
+    }
+  }
   async range(workspace: string, from?: string, to?: string,
     expected?: { project?: string; fingerprint?: string; signal?: AbortSignal }) {
     const { project, source } = await this.source(workspace);
@@ -149,7 +178,7 @@ export class ProjectCalendars {
       throw new CalendarError(409, 'The authorized project calendar changed.');
     }
     if (!source) return { configured: false, timeZone: null, events: [] };
-    const { id, revision, account, calendarId, timeZone } = source;
+    const { account, calendarId, timeZone } = source;
     if (from === undefined && to === undefined) {
       from = localCalendarDay(Date.now(),timeZone);
       to = new Date(Date.parse(from) + 86_400_000).toISOString().slice(0,10);
@@ -158,31 +187,12 @@ export class ProjectCalendars {
       throw new CalendarError(400, 'Use an inclusive start date and an exclusive end date at most 31 days apart.');
     }
     const startDate = from, endDate = to;
-    const check = { id, revision, tool: 'list-events', arguments: {
+    const payload = await this.readTool(project,source,'list-events',{
       account, calendarId, timeZone, timeMin: from + 'T00:00:00', timeMax: to + 'T00:00:00',
       fields: ['id', 'summary', 'start', 'end', 'status'],
-    } };
-    const ensureSource = async () => {
-      const current = (await this.read())[project];
-      if (JSON.stringify(current) !== JSON.stringify(source)) throw new CalendarError(409, 'The project calendar source changed.');
-    };
-    await this.checkPermission(project, check);
-    const timeout = AbortSignal.timeout(15_000);
-    const signal = expected?.signal ? AbortSignal.any([expected.signal,timeout]) : timeout;
-    const result = await this.mcp.runReadOnly(project, check, signal, ensureSource).catch(async () => {
-      expected?.signal?.throwIfAborted();
-      await this.checkPermission(project, check);
-      await ensureSource();
-      throw new CalendarError(502, 'Could not read the configured Google Calendar.');
-    });
-    await this.checkPermission(project, check);
-    await ensureSource();
+    },expected?.signal);
     try {
-      if (result.isError) throw new Error('Provider error.');
-      const text = result.content.length === 1 && result.content[0]?.type === 'text' ? result.content[0].text : undefined;
-      if (!text || Buffer.byteLength(text) > 1_000_000) throw new Error('Unexpected calendar response.');
-      const payload = record(JSON.parse(text));
-      if (!Array.isArray(payload?.events) || Array.isArray(payload.partialFailures) && payload.partialFailures.length) throw new Error('Unexpected calendar response.');
+      if (!Array.isArray(payload.events) || Array.isArray(payload.partialFailures) && payload.partialFailures.length) throw new Error('Unexpected calendar response.');
       const events = payload.events.filter(value => {
         const event = record(value);
         return event && event.accountId === account && event.status !== 'cancelled';
@@ -196,9 +206,50 @@ export class ProjectCalendars {
       throw new CalendarError(502, 'The provider did not return a supported Google Calendar event list.');
     }
   }
+  async availability(workspace: string, fingerprint: string, input: {from:string;to:string;durationMinutes:number}, signal?: AbortSignal) {
+    const {from,to,durationMinutes} = input;
+    const start = explicitInstant(from,'Availability start'), end = explicitInstant(to,'Availability end');
+    if (end <= start || !Number.isSafeInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440) {
+      throw new CalendarError(400,'Provide a time window and a meeting length from 1 to 1,440 minutes.');
+    }
+    const { project,source } = await this.source(workspace);
+    if (!source || assistantFingerprint(project,source) !== fingerprint) throw new CalendarError(409,'The authorized project calendar changed.');
+    const { account,calendarId,timeZone } = source;
+    const payload = await this.readTool(project,source,calendarFreeBusyTool,{
+      account,calendars:[{id:calendarId}],timeMin:from,timeMax:to,timeZone,
+    },signal);
+    const data = record(record(payload.calendars)?.[calendarId]);
+    if (!Array.isArray(data?.busy) || (data.errors !== undefined && (!Array.isArray(data.errors) || data.errors.length))) {
+      throw new CalendarError(502,'Google Calendar did not confirm busy time for the selected calendar.');
+    }
+    let busy: { start:number; end:number }[];
+    try {
+      busy = data.busy.map(value => {
+        const slot = record(value);
+        if (typeof slot?.start !== 'string' || typeof slot.end !== 'string') throw new Error('Invalid busy interval.');
+        const first = explicitInstant(slot.start,'Busy start'), last = explicitInstant(slot.end,'Busy end');
+        if (last <= first) throw new Error('Invalid busy interval.');
+        return {start:Math.max(start,first),end:Math.min(end,last)};
+      }).filter(slot => slot.start < slot.end).sort((a,b) => a.start-b.start);
+    } catch {
+      throw new CalendarError(502,'Google Calendar returned an invalid busy interval.');
+    }
+    const minimum = durationMinutes * 60_000;
+    const slots: {start:string;end:string}[] = [];
+    const addSlot = (from: number,to: number) => {
+      if (to-from >= minimum) slots.push({start:new Date(from).toISOString(),end:new Date(to).toISOString()});
+    };
+    let cursor = start;
+    for (const slot of busy) {
+      addSlot(cursor,slot.start);
+      cursor = Math.max(cursor,slot.end);
+    }
+    addSlot(cursor,end);
+    return { timeZone,slots:slots.slice(0,50),truncated:slots.length>50 };
+  }
 }
 
-export function projectCalendarExtension(calendars: ProjectCalendars, workspace: string, fingerprint: string) {
+export function projectCalendarExtension(calendars: ProjectCalendars, workspace: string, fingerprint: string, available = false) {
   const date = Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' });
   return defineExtension({ name:'local_project_calendar', tools:[defineTool({
     name:'project_calendar_list',
@@ -208,7 +259,16 @@ export function projectCalendarExtension(calendars: ProjectCalendars, workspace:
     execute:async ({ from,to }, _api, context) => ({ output:[{ type:'text', text:JSON.stringify(
       await calendars.range(workspace,from,to,{ fingerprint, signal:context.abortSignal }),
     ) }] }),
-  })] });
+  }),...(available ? [defineTool({
+    name:'project_calendar_available',
+    description:'Find confirmed free windows on the authorized project calendar. Provide start and end timestamps with UTC offsets, and the minimum meeting length in minutes. Results apply to this calendar only.',
+    parameters:Type.Object({from:Type.String({minLength:1,maxLength:40}),to:Type.String({minLength:1,maxLength:40}),
+      durationMinutes:Type.Integer({minimum:1,maximum:1440})},{additionalProperties:false}),
+    replay:'safe',
+    execute:async (args,_api,context) => ({output:[{type:'text',text:JSON.stringify(
+      await calendars.availability(workspace,fingerprint,args,context.abortSignal),
+    )}]}),
+  })] : [])] });
 }
 
 function validateEventTime(start?: string, end?: string) {

@@ -30,7 +30,7 @@ import { remoteFilePolicy,remoteFileTools } from './remote-policy.js';
 import { ModelProposalError, ProviderSettings, type ModelProposalDecision } from "./provider-settings.js";
 import { McpProposalError, McpTools, type McpConnectionProposalInput, type McpPin, type McpProposalDecision, type ProjectMcpTool } from "./mcp-tools.js";
 import { gmailAttachmentTool, gmailMutations, ProjectGmail, projectGmailExtension, projectGmailFiles, projectGmailWrites, type GmailMutation, type RoutineGmailMatch } from './project-gmail.js';
-import { calendarMutations, ProjectCalendars, projectCalendarExtension, projectCalendarWrites, type CalendarMutation } from './project-calendars.js';
+import { calendarFreeBusyTool, calendarMutations, ProjectCalendars, projectCalendarExtension, projectCalendarWrites, type CalendarMutation } from './project-calendars.js';
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
@@ -111,6 +111,7 @@ export interface TaskMeta {
   gmailFiles?: string;
   chatCalendar?: string;
   calendarWrite?: { fingerprint: string; tools: CalendarMutation[] };
+  calendarAvailability?: string;
   projectCatalog?: true;
   threadTools?: true;
   thread?: TaskThread;
@@ -152,7 +153,7 @@ export interface TaskMeta {
   maxStalls?: number;
 }
 function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevision: _roomRevision, chatGmail: _chatGmail, gmailWrite: _gmailWrite, gmailFiles: _gmailFiles,
-  routineGmail: _routineGmail, chatCalendar: _chatCalendar, calendarWrite: _calendarWrite, ...meta }: TaskMeta) { return meta; }
+  routineGmail: _routineGmail, chatCalendar: _chatCalendar, calendarWrite: _calendarWrite, calendarAvailability: _calendarAvailability, ...meta }: TaskMeta) { return meta; }
 
 function roomSummary(meta: TaskMeta & { room: AssistantPin[] }) {
   return { id: meta.id, title: meta.objective, workspace: meta.workspace, control: meta.control, createdAt: meta.createdAt, revision: meta.roomRevision ?? 1,
@@ -662,8 +663,12 @@ export class LocalRuntime {
       }
       const calendarMcp = calendar && mcpPins.find(pin => pin.id === calendar.id);
       const calendarTools = calendarMcp ? calendarMutations.filter(tool => calendarMcp.tools.includes(tool) && calendarMcp.approvalTools?.includes(tool)) : [];
-      if (calendar && calendarTools.length) {
+      const calendarAvailable = calendarMcp?.tools.includes(calendarFreeBusyTool) &&
+        calendarMcp.discovery?.some(tool => tool.name === calendarFreeBusyTool && tool.readOnly) &&
+        !calendarMcp.approvalTools?.includes(calendarFreeBusyTool);
+      if (calendar && (calendarTools.length || calendarAvailable)) {
         const dedicated = new Set<string>(calendarTools);
+        if (calendarAvailable) dedicated.add(calendarFreeBusyTool);
         mcpPins = mcpPins.map(pin => pin.id === calendar.id
           ? { ...pin, tools:pin.tools.filter(name => !dedicated.has(name)) } : pin).filter(pin => pin.tools.length);
       }
@@ -700,6 +705,7 @@ export class LocalRuntime {
         ...(fileSource && attachmentPin ? { gmailFiles:fileSource.fingerprint } : {}),
         ...(options.chat && calendar ? { chatCalendar:calendar.fingerprint } : {}),
         ...(calendar && calendarTools.length ? { calendarWrite:{fingerprint:calendar.fingerprint,tools:calendarTools} } : {}),
+        ...(calendar && calendarAvailable ? {calendarAvailability:calendar.fingerprint} : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const, chartDelivery: true as const } : {}),
@@ -1249,7 +1255,7 @@ export class LocalRuntime {
         ...(questions ? [questions] : []),
         ...(!remote && meta.chatWorkItems ? [chatWorkItemsExtension(this.workItems, meta.workspace, meta.chatWorkItems.project, meta.id)] : []),
         ...(!remote && meta.chatGmail ? [projectGmailExtension(this.gmail, meta.workspace, meta.chatGmail)] : []),
-        ...(!remote && meta.chatCalendar ? [projectCalendarExtension(this.calendars, meta.workspace, meta.chatCalendar)] : []),
+        ...(!remote && meta.chatCalendar ? [projectCalendarExtension(this.calendars,meta.workspace,meta.chatCalendar,!!meta.calendarAvailability)] : []),
         ...(!remote && meta.chatAssistants ? [chatAssistantsExtension(this.assistants, meta.workspace, meta.chatAssistants.project, meta.id, async () => {
           const current = this.active.get(meta.id); if (!current) throw new Error('The assistant catalog task is not open.');
           const tools = new Map([...current.executionExtensions, ...current.preparationExtensions, ...current.chatExtensions].flatMap(extension => extension.tools ?? [])
@@ -1293,9 +1299,9 @@ export class LocalRuntime {
         ? approvalExtension(this.mcp,{calendar:this.calendars,gmail:this.gmail}).extension : undefined;
       const calendarWrites = !remote && meta.calendarWrite
         ? projectCalendarWrites(this.calendars,{workspace:meta.workspace,fingerprint:meta.calendarWrite.fingerprint},meta.id,meta.calendarWrite.tools) : undefined;
-      if (calendarWrites && meta.calendarWrite) {
-        extra.push(calendarWrites,projectCalendarExtension(this.calendars,meta.workspace,meta.calendarWrite.fingerprint));
-      }
+      if (calendarWrites) extra.push(calendarWrites);
+      const executionCalendar = meta.calendarWrite?.fingerprint ?? meta.calendarAvailability;
+      if (!remote && executionCalendar) extra.push(projectCalendarExtension(this.calendars,meta.workspace,executionCalendar,!!meta.calendarAvailability));
       const gmailWrites = !remote && meta.gmailWrite
         ? projectGmailWrites(this.gmail,{workspace:meta.workspace,fingerprint:meta.gmailWrite.fingerprint},meta.gmailWrite.tools) : undefined;
       if (gmailWrites && meta.gmailWrite) {

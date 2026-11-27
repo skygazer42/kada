@@ -298,6 +298,8 @@ npm run harness -- work-items calendar-clear --workspace E:/project
 
 在日历来源里设置 `"allowAssistant": true` 后，新建本机聊天可询问当天或指定日期范围的日程。查询默认使用绑定日历的时区，助手可获得返回的标题和起止时间。
 
+给同一连接启用只读的 `get-freebusy` 后，可以问指定时间窗内有没有符合会议时长的空档。工具参数使用带 UTC 偏移的时间。返回的空档来自该日历的忙碌记录，权限或上游查询失败时会显示失败。
+
 要让助手创建、修改或取消日程，在这条连接上启用所需的 `create-event`、`update-event` 或 `delete-event`，并用 `mcp approval` 为相应工具开启逐次审批。在项目执行任务中，用 `/approvals` 查看原日历、事件 ID、变更字段和邀请设置，再用 `/allow` 或 `/deny` 处理。派发前会复核项目当前的日历绑定和工具许可。 [日历工具及验收](superpowers/plans/2026-11-27-project-calendar.md)
 
 打开看板的截止日历即可浏览本月外部日程。工作项日期沿其保存时区显示，外部日程沿日历来源所选时区显示。 [工具契约与验收](superpowers/plans/2026-11-27-project-calendar.md)
