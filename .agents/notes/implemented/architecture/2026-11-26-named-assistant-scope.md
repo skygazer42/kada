@@ -16,6 +16,8 @@ Pi 工具选择与角色名单取交集，固定 ToolTask.beforeTool 允许表�
 
 本机浏览器的助手设置链接绑定规范化项目路径，配置读取和写入沿原目录。保存使用当前修订和原请求回执，角色由原会话启动入口使用。页面生成的新会话命令同时引用助手修订和工作区。 [项目助手设置验收](../../../../docs/superpowers/plans/2026-11-26-project-assistants-page.md)
 
+本机直接启动的角色把共享或私有记忆范围固定在原任务快照。 [助手私有记忆](2026-11-26-assistant-private-memory.md)
+
 当前 acceptance/CheckSchema 只有机械文件检查，不增加虚构的 command 分支。真实命令入口 criterion.verification 和 task_verify 要求 bash，后者通过原 Pi 嵌套 bash 执行并再次受允许表约束。角色工具是现有能力的上限，未授权连接或不存在的阶段工具不会因此启用。
 
 新客户端要求 named-assistants capability，避免同版本旧服务忽略 assistant 参数后当普通任务执行。原消息接口拒绝换角色。指令字符串保留原空白/Unicode 码点，标签拒绝终端控制字符，部分编辑的 undefined 不清除已有模型。

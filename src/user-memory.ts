@@ -154,16 +154,19 @@ export class UserMemoryStore {
   readonly profile: string;
   readonly evidence: string;
   private queue = new SerialQueue();
-  constructor(readonly directory: string) { this.profile = join(directory, "user-memory.md"); this.evidence = join(directory, "user-evidence.md"); }
+  constructor(readonly directory: string, private readonly policyDirectory = directory) {
+    this.profile = join(directory, "user-memory.md");
+    this.evidence = join(directory, "user-evidence.md");
+  }
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
     return this.queue.run(async () => {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
-      const release = await lockfile.lock(this.directory, { stale: 30000, update: 10000, retries: { retries: 100, minTimeout: 50, maxTimeout: 200 } });
+      const release = await lockfile.lock(this.policyDirectory, { stale: 30000, update: 10000, retries: { retries: 100, minTimeout: 50, maxTimeout: 200 } });
       try { return await operation(); } finally { await release(); }
     });
   }
   private async disabledProjects(): Promise<string[]> {
-    const file = join(this.directory, "memory-capture.json");
+    const file = join(this.policyDirectory, "memory-capture.json");
     const projects = await readJson<unknown>(file).catch(error => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
@@ -186,12 +189,12 @@ export class UserMemoryStore {
       const disabled = new Set(await this.disabledProjects());
       const changed = enabled ? disabled.delete(project) : !disabled.has(project);
       if (!enabled) disabled.add(project);
-      if (changed) await atomicJson(join(this.directory, "memory-capture.json"), [...disabled].sort());
+      if (changed) await atomicJson(join(this.policyDirectory, "memory-capture.json"), [...disabled].sort());
       return { project, enabled };
     });
   }
   private async reviewedProjects(): Promise<string[]> {
-    const projects = await readJson<unknown>(join(this.directory, "memory-review.json")).catch(error => {
+    const projects = await readJson<unknown>(join(this.policyDirectory, "memory-review.json")).catch(error => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     });
@@ -212,7 +215,7 @@ export class UserMemoryStore {
       const projects = new Set(await this.reviewedProjects());
       const changed = enabled ? !projects.has(project) : projects.delete(project);
       if (enabled) projects.add(project);
-      if (changed) await atomicJson(join(this.directory, "memory-review.json"), [...projects].sort());
+      if (changed) await atomicJson(join(this.policyDirectory, "memory-review.json"), [...projects].sort());
       return { project, enabled };
     });
   }
@@ -335,7 +338,9 @@ export class UserMemoryStore {
       const disabledScopes = new Set(disabled.flatMap(project => [project, claudeProject(project)]));
       const frozen = (source: Pick<Source, "scope" | "project">) => source.scope === "project" && !!source.project && disabledScopes.has(source.project);
       const value = await this.read(inventory.home), now = Date.now();
-      const { specs, project, notices } = await memorySources(inventory, this.directory, workspace);
+      const shared = this.directory === this.policyDirectory;
+      const { specs, project, notices } = shared ? await memorySources(inventory, this.directory, workspace)
+        : { specs: [], project: await memoryProject(workspace), notices: [] as string[] };
       const sources: Source[] = [], seen = new Set<string>(); let bytes = 0;
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       // Preserve the previous version before replacing a legacy source cache.
@@ -376,7 +381,7 @@ export class UserMemoryStore {
       const environment = [`系统：${inventory.platform}；语言环境：${inventory.locale}；时区：${inventory.timezone}`,
         ...inventory.agents.filter(a => a.language).map(a => `${a.name} 配置语言：${a.language}`),
         ...inventory.agents.filter(a => a.model).map(a => `${a.name} 配置模型：${a.model}`)].join("\n\n");
-      sources.push({ id: "environment", kind: "environment", scope: "global", provider: "shared", path: join(this.directory, "inventory.json"), text: environment, sha256: hash(environment), observedAt: inventory.scannedAt });
+      if (shared) sources.push({ id: "environment", kind: "environment", scope: "global", provider: "shared", path: join(this.directory, "inventory.json"), text: environment, sha256: hash(environment), observedAt: inventory.scannedAt });
       // Workspace instructions for another project were not scanned; retain their last observation.
       const retained = value.sources.filter(s => frozen(s) || s.kind === "user" || (s.scope === "project" && s.project && !s.project.startsWith("claude:") && s.project !== project && !sources.some(n => n.id === s.id)));
       value.sources = [...sources, ...retained.filter(s => !sources.some(n => n.id === s.id))];

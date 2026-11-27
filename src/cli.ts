@@ -83,7 +83,10 @@ try {
     const { ensureDaemon } = await import("./daemon.js");
     await ensureDaemon(config, args.values.config);
     const workspace = args.values.workspace ? resolve(args.values.workspace) : process.cwd();
+    const memoryAssistantId = selectedAssistant()?.id;
+    if (memoryAssistantId && !await client.healthy("assistant-memory")) throw new Error("请重启到支持助手私有记忆的后台版本。");
     if (id === "capture" || id === "review") {
+      if (memoryAssistantId) throw new Error("记忆记录与复核设置以整个项目为范围。");
       const setting = rest[0];
       if (rest.length > 1 || (setting !== undefined && setting !== "on" && setting !== "off")) {
         throw new Error("Use memory capture|review [on|off] --workspace PATH.");
@@ -95,7 +98,7 @@ try {
       console.log(JSON.stringify(state, null, 2));
     } else if (["candidates", "accept", "reject"].includes(id ?? "")) {
       const path = "/v1/environment/memory/candidates";
-      const query = "?workspace=" + encodeURIComponent(workspace);
+      const query = "?" + new URLSearchParams({ workspace, ...(memoryAssistantId ? { assistant: memoryAssistantId } : {}) });
       if (id !== "candidates" && (!rest[0] || !/^[a-f0-9]{24}$/.test(rest[0]))) throw new Error("Provide the displayed memory candidate ID.");
       console.log(JSON.stringify(id === "candidates" ? await request(path + query)
         : await request(path + "/" + rest[0] + "/" + id + query, "POST", {}), null, 2));
@@ -106,7 +109,7 @@ try {
         if (!rest[0]) throw new Error("Provide a task ID after memory used.");
         await session.attach(rest[0]);
         await session.handle("/memory used");
-      } else await session.handle("/memory " + [id ?? "list", ...rest].join(" "));
+      } else await session.handle("/memory " + [id ?? "list", ...rest].join(" "), memoryAssistantId);
     }
   } else if (command === "models") {
     const models = cloudModels().getModels(id);

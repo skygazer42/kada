@@ -41,11 +41,12 @@ test('a local assistant settings link edits only its project and reuses the orig
   assert.equal((await call('state', 'GET', undefined, token, 'https://example.test')).status, 403);
   assert.equal((await call('roles/' + foreign.id, 'GET', undefined, token)).status, 404);
   assert.equal((await call('roles/' + foreign.id, 'PATCH', { requestId: 'foreign', revision: 1, name: 'Foreign edit' }, token)).status, 404);
-  const body = { ...definition, requestId: 'browser-create-1' };
+  const body = { ...definition, memoryScope: 'isolated', requestId: 'browser-create-1' };
   assert.equal((await call('roles', 'POST', { ...body, workspace: another }, token)).status, 400);
   const created = await call('roles', 'POST', body, token);
   assert.equal(created.status, 201);
   const role = await created.json();
+  assert.equal(role.memoryScope, 'isolated');
   assert.equal((await (await call('roles', 'POST', body, token)).json()).id, role.id);
   const edit = 'roles/' + role.id;
   assert.equal((await (await call(edit, 'GET', undefined, token)).json()).instructions, definition.instructions);
@@ -53,6 +54,7 @@ test('a local assistant settings link edits only its project and reuses the orig
   const archived = await (await call(edit, 'PATCH', patch, token)).json();
   assert.equal(archived.revision, 2);
   assert.deepEqual(archived.tools, []);
+  assert.equal(archived.memoryScope, 'isolated');
   assert.equal(archived.archived, true);
   assert.equal((await call(edit, 'PATCH', { requestId: 'stale', revision: 1, name: 'Stale title' }, token)).status, 409);
   assert.equal((await (await call(edit, 'PATCH', { requestId: 'restore', revision: 2, archived: false }, token)).json()).archived, false);

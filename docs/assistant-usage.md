@@ -117,6 +117,8 @@ npm run harness -- memory review off --workspace E:/project
 
 `npm run harness -- assistants browser --workspace 路径` 打开本机项目助手设置。选择或新建助手，编辑原指令、选定模型与工具，或归档和恢复。保存后可从页面复制带项目路径和助手修订的新会话命令。 [浏览器验收](superpowers/plans/2026-11-26-project-assistants-page.md)
 
+开启本机记忆时，可以将角色的「记忆范围」设为「此助手的私有记忆」。同一角色的新会话可检索自己的私有事实和原对话。记录与复核开关沿用项目设置。已接回的私有会话用 `/memory list` 查看，终端也可在 `memory list`、`memory edit`、`memory forget`、`memory candidates`、`memory accept` 或 `memory reject` 加 `--assistant ID@修订 --workspace 路径` 管理私有记录。 [实现与验收](superpowers/plans/2026-11-26-assistant-private-memory.md)
+
 先在项目中保存一份角色定义，例如 `reader.json`：
 
 ```json

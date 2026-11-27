@@ -40,6 +40,8 @@ export const projectAssistantsPage = String.raw`<!doctype html>
         <label for="description">说明</label><textarea id="description" maxlength="1000"></textarea>
         <label for="instructions">指令</label><textarea id="instructions" required maxlength="16000"></textarea>
         <label for="model">模型</label><select id="model"></select>
+        <label for="memoryScope">记忆范围</label>
+        <select id="memoryScope"><option value="shared">共享项目记忆</option><option value="isolated">此助手的私有记忆</option></select>
         <label for="tools">允许的工具（每行一个）</label><textarea id="tools" spellcheck="false"></textarea>
         <label id="archive" hidden><input id="archived" type="checkbox"> 归档此助手</label>
         <div class="actions"><button id="save" class="primary" type="submit">保存助手</button></div>
@@ -91,6 +93,7 @@ function render(role) {
   pending = undefined;
   for (const id of ['name','description','instructions']) field(id).value = role?.[id] ?? '';
   field('tools').value = role?.tools.join('\n') ?? '';
+  field('memoryScope').value = role?.memoryScope ?? 'shared';
   field('archive').hidden = !role;
   field('archived').checked = role?.archived ?? false;
   field('launch').hidden = !role || role.archived;
@@ -132,10 +135,12 @@ field('editor').addEventListener('submit', event => {
     const path = current ? 'roles/' + encodeURIComponent(current.id) : 'roles';
     const method = current ? 'PATCH' : 'POST';
     const model = models.value ? JSON.parse(models.value) : null;
+    const memoryScope = field('memoryScope').value;
     const body = {
       name:field('name').value, description:field('description').value, instructions:field('instructions').value,
       tools:field('tools').value.split(/\r?\n/).map(name => name.trim()).filter(Boolean),
       ...(!current || JSON.stringify(model) !== JSON.stringify(current.model) ? { model } : {}),
+      ...(memoryScope !== (current?.memoryScope ?? 'shared') ? { memoryScope } : {}),
       ...(current ? { revision:current.revision, archived:field('archived').checked } : {}),
     };
     const signature = JSON.stringify([path, body]);

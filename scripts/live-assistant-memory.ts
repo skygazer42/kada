@@ -43,10 +43,11 @@ const proposalModel = process.env.KADA_LIVE_CASES === 'T05-model-proposals' ? te
 const chatChoosesThreadModel = process.env.KADA_LIVE_CASES === 'T09-thread-models-chat';
 const chatManagesThreads = process.env.KADA_LIVE_CASES === 'T10-chat-thread-management';
 const sharedControlFixture = process.env.KADA_LIVE_CASES === 'T13-shared-thread-controls';
+const privateMemoryFixture = process.env.KADA_LIVE_CASES === 'A04-private-memory';
 const threadFixture = chatManagesThreads || chatChoosesThreadModel || process.env.KADA_LIVE_CASES === 'T09-thread-models';
 const otherModel = proposalModel ?? (threadFixture ? template : undefined);
 const native = openAICompletionsApi(),deadline = AbortSignal.timeout(12*60_000);
-const maxRequests = sharedControlFixture ? 8 : ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management','T11-thread-posts'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
+const maxRequests = sharedControlFixture || privateMemoryFixture ? 8 : ['A02-chat-assistants','T08-thread-reports','T10-chat-thread-management','T11-thread-posts'].includes(process.env.KADA_LIVE_CASES ?? '') ? 16 : threadFixture || process.env.KADA_LIVE_CASES === 'K01-application-credential' ? 10 : ['F11-chat-reminder-management','W01-chat-work-items','W02-work-item-planning','A01-named-assistant','T03-local-threads'].includes(process.env.KADA_LIVE_CASES ?? '') ? 12 : ['F11-chat-reminder','H01-project-history','D01-mcp-discovery','T01-project-tasks','T02-project-catalog','T04-workspace-snapshots','T05-model-proposals','T06-mcp-proposals','T07-mcp-scope-proposals','Q01-structured-question'].includes(process.env.KADA_LIVE_CASES ?? '') ? 8 : 32;
 let requests=0;
 let onModelRequest: (() => void) | undefined;
 const threadDispatches: string[] = [];
@@ -123,6 +124,34 @@ async function chat(workspace:string,prompt:string,timeoutMs=90_000) {
   return {status,answer:status.messages.map(conversationAnswer).filter(text=>text!==undefined).at(-1) ?? '',memory:await server.runtime.taskMemory(task.id)};
 }
 try {
+  if (privateMemoryFixture) await check('A04-private-memory', async () => {
+    const marker = 'CEDAR_REPORT_9275';
+    const fact = '我希望在此项目中使用 ' + marker + ' 作为季度复核报告代号。';
+    const makeRole = (name: string) => server.runtime.assistants.create({ workspace: alpha, name, instructions: '只使用当前助手的记忆。',
+      memoryScope: 'isolated', tools: ['user_remember', 'user_memory_search'] });
+    const writer = await makeRole('私有报告助手'), reader = await makeRole('独立研究助手');
+    const ask = async (prompt: string) => {
+      const task = await server.runtime.create(prompt, alpha, [], { chat: true, assistant: { id: writer.id, revision: writer.revision } });
+      tasks.add(task.id);
+      const result = await until(() => server.runtime.status(task.id), state => ['answered', 'failed', 'budget_limited'].includes(state.status), 140_000);
+      assert.equal(result.status, 'answered');
+      return result;
+    };
+    await server.runtime.memoryReview(alpha, true);
+    await ask('请用 user_remember 保存我的项目偏好。范围 project，分类 preferences，domain general，certainty stated。事实和 user 来源的 quote 都用此原句。' + fact + ' 保存后简短答复。');
+    const [candidate] = await server.runtime.memoryCandidates(alpha, undefined, undefined, writer.id);
+    assert(candidate?.text.includes(marker));
+    await server.runtime.memoryCandidates(alpha, candidate.id, 'accept', writer.id);
+    await server.close();
+    server = await serve(config, serverOptions);
+    const result = await ask('请用 user_memory_search 搜索“季度复核报告”，domain general，然后告诉我记下的报告代号。');
+    const answer = result.messages.map(conversationAnswer).filter(Boolean).at(-1);
+    assert(answer?.includes(marker));
+    assert((await server.runtime.localMemory(alpha, writer.id)).facts.some(entry => entry.text.includes(marker)));
+    assert(!(await server.runtime.localMemory(alpha, reader.id)).facts.some(entry => entry.text.includes(marker)));
+    assert(!(await server.runtime.localMemory(alpha)).facts.some(entry => entry.text.includes(marker)));
+    evidence.privateMemory = { reviewed: true, rereadBySameRoleAfterRestart: true, excludedFromOtherRoleAndSharedMemory: true, requests };
+  });
   if (sharedControlFixture) await check('T13-shared-thread-controls', async () => {
     const checks: Record<string, unknown> = { childToolsSpecifiedByFixture: true };
     evidence.sharedThreadControls = checks;

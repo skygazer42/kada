@@ -10,6 +10,7 @@ export type AssistantCatalog = {
 };
 const id = Type.String({ minLength: 1, maxLength: 120 });
 const model = Type.Union([Type.Object({ provider: Type.String({ minLength: 1, maxLength: 128 }), modelId: Type.String({ minLength: 1, maxLength: 256 }) }, { additionalProperties: false }), Type.Null()]);
+const memoryScope = Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')]));
 const settings = {
   name: Type.String({ minLength: 1, maxLength: 80 }), description: Type.String({ maxLength: 1000 }), instructions: Type.String({ minLength: 1, maxLength: 16_000 }),
   model, tools: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 128 }),
@@ -18,7 +19,7 @@ const pagination = { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50
 const outputLimits = { maxBytes: 262_144, maxLines: 1 };
 const output = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 const summary = (role: Omit<Assistant, 'instructions'>) => ({ id: role.id, revision: role.revision, name: role.name, description: role.description.slice(0, 300), descriptionTruncated: role.description.length > 300,
-  model: role.model, toolCount: role.tools.length, archived: role.archived, updatedAt: role.updatedAt });
+  model: role.model, toolCount: role.tools.length, archived: role.archived, updatedAt: role.updatedAt, ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}) });
 const page = <T>(items: T[], { offset = 0, limit = 20 }: { offset?: number; limit?: number }) => ({ items: items.slice(offset, offset + limit), total: items.length, nextOffset: offset + limit < items.length ? offset + limit : null });
 
 export function chatAssistantsExtension(roles: Assistants, workspace: string, project: string, chatId: string, catalog: () => Promise<AssistantCatalog>) {
@@ -43,12 +44,12 @@ export function chatAssistantsExtension(roles: Assistants, workspace: string, pr
       },
     }),
     defineTool({ name: 'assistant_create', description: 'Save a reusable project assistant only when the user requests configuration. This never starts a Goal, task, reminder or new conversation and never switches the current role. Use an explicit action tool ceiling without wildcards; model=null (default) follows the project default at future task creation. Use exact IDs from assistant_catalog for requested models/tools, clarify material ambiguity, and claim saved only after success. A replay result is the original operation; read again for current settings.',
-      parameters: Type.Object({ name: settings.name, instructions: settings.instructions, tools: settings.tools, description: Type.Optional(settings.description), model: Type.Optional(model) }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
+      parameters: Type.Object({ name: settings.name, instructions: settings.instructions, tools: settings.tools, description: Type.Optional(settings.description), model: Type.Optional(model), memoryScope }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
       execute: async (args, api) => { const role = await roles.create({ ...args, workspace }, request(api.taskId)); return output({ assistant: summary(role), instructionsLength: role.instructions.length, workspace, started: false }); },
     }),
     defineTool({ name: 'assistant_update', description: 'Edit an existing project assistant configuration only as the user requested. Use exact ID/revision from list/read, provide changed fields only, and read complete original instructions before an amendment. instructions replaces the full string; model=null follows future project defaults. archived=true/false archives/restores without deleting history or cancelling tasks. Existing role pins and budgets stay unchanged. This never starts or switches work. On replay read again for current settings.',
       parameters: Type.Object({ id, revision: Type.Integer({ minimum: 1 }), name: Type.Optional(settings.name), description: Type.Optional(settings.description), instructions: Type.Optional(settings.instructions),
-        tools: Type.Optional(settings.tools), model: Type.Optional(model), archived: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
+        tools: Type.Optional(settings.tools), model: Type.Optional(model), memoryScope, archived: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
       execute: async ({ id, ...args }, api) => { const role = await roles.update(id, args, request(api.taskId)); return output({ assistant: summary(role), instructionsLength: role.instructions.length, workspace, started: false }); },
     }),
   ] });

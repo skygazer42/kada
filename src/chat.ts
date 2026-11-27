@@ -54,7 +54,7 @@ export class ChatSession {
     await this.client.request(`/v1/tasks/${id}/notifications/read`,'POST',{});
   }
   /** false means exit the client; the daemon and tasks are left running. */
-  async handle(line: string): Promise<boolean> {
+  async handle(line: string, memoryAssistantId?: string): Promise<boolean> {
     const text = line.trim();
     if (!text) return true;
     if (text.startsWith("/")) {
@@ -258,8 +258,17 @@ export class ChatSession {
             reference.factId + " " + reference.text + "\n  来源：" + reference.evidence.map(item => item.path).join("、")).join("\n") : "当前会话尚未引入记忆背景。");
           return true;
         }
-        const workspace = this.taskId ? (await this.client.request<TaskStatus>("/v1/tasks/" + this.taskId)).workspace : this.workspace ?? process.cwd();
-        const query = "?workspace=" + encodeURIComponent(workspace);
+        const task = this.taskId ? await this.client.request<TaskStatus>("/v1/tasks/" + this.taskId) : undefined;
+        const workspace = task?.workspace ?? this.workspace ?? process.cwd();
+        let assistant = memoryAssistantId;
+        if (task?.assistant?.memoryScope === "isolated") assistant = task.assistant.id;
+        if (!task && !assistant && this.assistant) {
+          const role = await this.client.request<AssistantRef & { memoryScope?: string }>("/v1/assistants/" + this.assistant.id);
+          if (role.revision !== this.assistant.revision) throw new Error("请在新会话选择助手的当前修订。");
+          if (role.memoryScope === "isolated") assistant = role.id;
+        }
+        if (assistant && !await this.client.healthy("assistant-memory")) throw new Error("请重启到支持助手私有记忆的后台版本。");
+        const query = "?" + new URLSearchParams({ workspace, ...(assistant ? { assistant } : {}) });
         const view = await this.client.request<{ facts: MemoryFactView[] }>("/v1/environment/memory" + query);
         if (action === "list") {
           this.info(view.facts.length ? view.facts.map(fact => [

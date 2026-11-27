@@ -7,14 +7,16 @@ import { validateModel } from './models.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
 export type AssistantRef = { id: string; revision: number };
-type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[] };
+type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[]; memoryScope?: 'shared' | 'isolated' };
 export type Assistant = AssistantRef & Definition & { project: string; archived: boolean; createdAt: number; updatedAt: number };
 export type AssistantPin = AssistantRef & Definition & { project: string; model: ModelRef };
 export type AssistantMutation = { requestId: string; project: string; workspace: string };
 type StoredAssistant = Assistant & { operations?: { requestId: string; fingerprint: string; result: Assistant }[] };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-const definitionKeys = ['name', 'description', 'instructions', 'model', 'tools'];
-const storedKeys = [...definitionKeys, 'id', 'revision', 'project', 'archived', 'createdAt', 'updatedAt'];
+const requiredDefinitionKeys = ['name', 'description', 'instructions', 'model', 'tools'];
+const definitionKeys = [...requiredDefinitionKeys, 'memoryScope'];
+const requiredStoredKeys = [...requiredDefinitionKeys, 'id', 'revision', 'project', 'archived', 'createdAt', 'updatedAt'];
+const storedKeys = [...requiredStoredKeys, 'memoryScope'];
 export class AssistantError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message); } }
 
 function fields(input: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -49,9 +51,14 @@ function toolNames(input: unknown): string[] {
     new Set(input).size !== input.length) throw new AssistantError(400, 'Provide an explicit array of up to 128 distinct tool names, without wildcards.');
   return [...input].sort();
 }
+function memoryScope(input: unknown): 'shared' | 'isolated' {
+  if (input !== 'shared' && input !== 'isolated') throw new AssistantError(400, 'Choose shared or isolated assistant memory.');
+  return input;
+}
 function definition(input: Record<string, unknown>): Definition {
   return { name: assistantName(input.name), description: input.description === undefined ? '' : text(input.description, 'description', 1000, true).trim(),
-    instructions: text(input.instructions, 'instructions', 16_000), model: modelRef(input.model), tools: toolNames(input.tools) };
+    instructions: text(input.instructions, 'instructions', 16_000), model: modelRef(input.model), tools: toolNames(input.tools),
+    ...(input.memoryScope === undefined ? {} : { memoryScope: memoryScope(input.memoryScope) }) };
 }
 const nameKey = (name: string) => name.trim().normalize('NFC').toLowerCase();
 export async function assistantProject(workspace: unknown): Promise<string> {
@@ -61,12 +68,12 @@ export async function assistantProject(workspace: unknown): Promise<string> {
   return project;
 }
 function publicAssistant(item: Assistant): Assistant {
-  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt } = item;
-  return { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt };
+  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, memoryScope } = item;
+  return { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, ...(memoryScope ? { memoryScope } : {}) };
 }
 function storedAssistant(input: unknown, allowed: readonly string[] = storedKeys): Assistant {
   const value = fields(input, allowed); definition(value);
-  if (!storedKeys.every(key => Object.hasOwn(value, key)) || typeof value.id !== 'string' || !uuid.test(value.id) ||
+  if (!requiredStoredKeys.every(key => Object.hasOwn(value, key)) || typeof value.id !== 'string' || !uuid.test(value.id) ||
     typeof value.project !== 'string' || !isAbsolute(value.project) || typeof value.archived !== 'boolean' ||
     typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt) || value.createdAt < 0 ||
     typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt) || value.updatedAt < 0) throw new Error('Invalid stored identity.');
@@ -162,7 +169,8 @@ export class Assistants {
       ...(value.description === undefined ? {} : { description: text(value.description, 'description', 1000, true).trim() }),
       ...(value.instructions === undefined ? {} : { instructions: text(value.instructions, 'instructions', 16_000) }),
       ...(value.model === undefined ? {} : { model: modelRef(value.model) }), ...(value.tools === undefined ? {} : { tools: toolNames(value.tools) }),
-      ...(value.archived === undefined ? {} : { archived: value.archived as boolean }) };
+      ...(value.archived === undefined ? {} : { archived: value.archived as boolean }),
+      ...(value.memoryScope === undefined ? {} : { memoryScope: memoryScope(value.memoryScope) }) };
     const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, patch, request?.project, request?.workspace])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load(), receipt = replay(items, request, fingerprint); if (receipt) return receipt;

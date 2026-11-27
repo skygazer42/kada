@@ -151,6 +151,7 @@ function roomSummary(meta: TaskMeta & { room: AssistantPin[] }) {
 }
 
 function isRoom(meta: TaskMeta): meta is TaskMeta & { room: AssistantPin[] } { return meta.room !== undefined; }
+function memoryOwner(meta: TaskMeta) { return meta.assistant?.memoryScope === 'isolated' ? meta.assistant.id : undefined; }
 
 function roomMemberRefs(input: unknown) {
   if (!Array.isArray(input) || input.length < 2 || input.length > 8) throw new RoomError(400, 'Choose two to eight room members.');
@@ -293,9 +294,26 @@ export class LocalRuntime {
     try { return await this.discovery.view(refresh); }
     catch { return { ...empty, notices: ["本机环境发现暂不可用，任务仍可正常执行。"] }; }
   }
-  async localMemory(workspace?: string) {
+  private taskMemoryStore(meta: TaskMeta) {
+    const owner = memoryOwner(meta);
+    return owner ? this.discovery.assistantMemory(owner) : this.discovery.memory;
+  }
+  private async ownerMemoryStore(workspace?: string, assistantId?: string) {
+    if (assistantId === undefined) return this.discovery.memory;
+    const role = await this.assistants.get(assistantId);
+    if (await memoryProject(workspace) !== role.project) throw new MemoryMutationError(404, "Assistant memory not found in this project.");
+    return this.discovery.assistantMemory(role.id);
+  }
+  private async refreshTaskMemory(store: LocalDiscovery["memory"]) {
+    for (const active of this.active.values()) if (active.meta.memoryTracking && this.taskMemoryStore(active.meta) === store) {
+      active.localContext = await this.discovery.context(true, active.meta.workspace, active.meta.objective, store);
+      await this.recordMemory(active, true);
+      await this.configureStage(active);
+    }
+  }
+  async localMemory(workspace?: string, assistantId?: string) {
     if (this.config.discovery !== true) return { enabled: false, updatedAt: null, facts: [], notices: [] };
-    return this.discovery.memoryView(workspace);
+    return this.discovery.memoryView(workspace, await this.ownerMemoryStore(workspace, assistantId));
   }
   async memoryCapture(workspace: string, enabled?: boolean) {
     if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
@@ -307,32 +325,26 @@ export class LocalRuntime {
     if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
     return enabled === undefined ? this.discovery.memory.reviewSettings(workspace) : this.discovery.memory.setReview(workspace, enabled);
   }
-  async memoryCandidates(workspace: string, id?: string, decision?: "accept" | "reject") {
+  async memoryCandidates(workspace: string, id?: string, decision?: "accept" | "reject", assistantId?: string) {
     if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
     return this.changes.run(async () => {
       const inventory = await this.discovery.load();
-      if (!id || !decision) return this.discovery.memory.listCandidates(inventory.home, workspace);
-      await this.discovery.memory.refresh(inventory, workspace);
-      const result = await this.discovery.memory.decideCandidate(inventory.home, workspace, id, decision);
-      for (const active of this.active.values()) if (active.meta.memoryTracking) {
-        active.localContext = await this.discovery.context(true, active.meta.workspace, active.meta.objective);
-        await this.recordMemory(active, true);
-        await this.configureStage(active);
-      }
+      const store = await this.ownerMemoryStore(workspace, assistantId);
+      if (!id || !decision) return store.listCandidates(inventory.home, workspace);
+      await store.refresh(inventory, workspace);
+      const result = await store.decideCandidate(inventory.home, workspace, id, decision);
+      await this.refreshTaskMemory(store);
       return result;
     });
   }
-  async changeMemory(id: string, input: MemoryChange, workspace?: string) {
+  async changeMemory(id: string, input: MemoryChange, workspace?: string, assistantId?: string) {
     return this.changes.run(async () => {
       if (this.config.discovery !== true) throw new MemoryMutationError(400, "Local memory is disabled.");
       const inventory = await this.discovery.load();
-      await this.discovery.memory.refresh(inventory, workspace);
-      const result = await this.discovery.memory.change(inventory.home, id, input, workspace);
-      for (const active of this.active.values()) if (active.meta.memoryTracking) {
-        active.localContext = await this.discovery.context(true, active.meta.workspace, active.meta.objective);
-        await this.recordMemory(active, true);
-        await this.configureStage(active);
-      }
+      const store = await this.ownerMemoryStore(workspace, assistantId);
+      await store.refresh(inventory, workspace);
+      const result = await store.change(inventory.home, id, input, workspace);
+      await this.refreshTaskMemory(store);
       return result;
     });
   }
@@ -529,8 +541,8 @@ export class LocalRuntime {
     await this.routines.recover();
   }
   private async pinAssistant(workspace: string, ref: AssistantRef, fallback: ModelRef | undefined): Promise<AssistantPin> {
-    const { id, revision, project, name, description, instructions, tools, model } = await this.assistants.select(workspace, ref);
-    return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback) };
+    const { id, revision, project, name, description, instructions, tools, model, memoryScope } = await this.assistants.select(workspace, ref);
+    return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback), ...(memoryScope ? { memoryScope } : {}) };
   }
 
   async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantRef[]; room?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
@@ -606,7 +618,7 @@ export class LocalRuntime {
         ...(room ? { room } : {}),
         ...(this.config.workspaceSnapshots && localChat ? { snapshotBeforeTurn: true as const } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
-          instructions: role.instructions, tools: [...role.tools], model: { ...model } } } : {}),
+          instructions: role.instructions, tools: [...role.tools], model: { ...model }, ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}) } } : {}),
         mcpPins,
         ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
         ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
@@ -933,7 +945,7 @@ export class LocalRuntime {
     const caller = await this.metadata(callerId);
     const project = !caller.remotePolicy && caller.historyRecall ? await memoryProject(caller.workspace) : undefined;
     if (!project) throw new Error('Project history is unavailable for this task.');
-    return project;
+    return { project, owner: memoryOwner(caller) };
   }
   async projectTasks(callerId: string, filter = 'all', limit = 20, offset = 0, expectedProject?: string) {
     if (!['all', 'running', 'pending', 'delivered', 'archived'].includes(filter)) throw new Error('Invalid project task filter.');
@@ -943,7 +955,8 @@ export class LocalRuntime {
     if (!project || expectedProject !== undefined && project !== expectedProject) throw new Error('Project task catalog is unavailable for this task.');
     const tasks = [];
     for (const meta of await this.metadataList()) {
-      if (meta.id === callerId || meta.remotePolicy || (filter === 'archived') !== Boolean(meta.thread?.archivedAt) || await memoryProject(meta.workspace) !== project) continue;
+      if (meta.id === callerId || meta.remotePolicy || memoryOwner(meta) !== memoryOwner(caller) ||
+          (filter === 'archived') !== Boolean(meta.thread?.archivedAt) || await memoryProject(meta.workspace) !== project) continue;
       const status = await this.status(meta.id), handoff = taskHandoff(status);
       if (filter !== 'all' && handoff.group !== filter) continue;
       tasks.push({ id: meta.id, createdAt: meta.createdAt, status: status.status, group: handoff.group,
@@ -1034,9 +1047,9 @@ export class LocalRuntime {
     const terms = historyQuery(query, limit);
     // shortcut: scan original Pi history; add a derived index only if measured project-history latency warrants it.
     return this.changes.run(async () => {
-      const project = await this.historyProject(callerId), hits: NonNullable<ReturnType<typeof historyMatch>>[] = [];
+      const { project, owner } = await this.historyProject(callerId), hits: NonNullable<ReturnType<typeof historyMatch>>[] = [];
       for (const meta of await this.metadataList()) {
-        if (meta.id === callerId || meta.remotePolicy || await memoryProject(meta.workspace) !== project) continue;
+        if (meta.id === callerId || meta.remotePolicy || memoryOwner(meta) !== owner || await memoryProject(meta.workspace) !== project) continue;
         for await (const message of this.historyMessages(meta)) {
           const hit = historyMatch(message, terms);
           if (hit) { hits.push(hit); hits.sort((a, b) => b.score - a.score || b.timestamp - a.timestamp || a.taskId.localeCompare(b.taskId) || b.entryId - a.entryId); hits.length = Math.min(hits.length, limit); }
@@ -1047,8 +1060,8 @@ export class LocalRuntime {
   }
   async readHistory(callerId: string, taskId: string, entryId: number) {
     return this.changes.run(async () => {
-      const project = await this.historyProject(callerId);
-      const meta = (await this.metadataList()).find(meta => meta.id === taskId && meta.id !== callerId && !meta.remotePolicy);
+      const { project, owner } = await this.historyProject(callerId);
+      const meta = (await this.metadataList()).find(meta => meta.id === taskId && meta.id !== callerId && !meta.remotePolicy && memoryOwner(meta) === owner);
       if (meta && Number.isSafeInteger(entryId) && entryId > 0 && await memoryProject(meta.workspace) === project) {
         for await (const message of this.historyMessages(meta)) if (message.entryId === entryId) return { ...message, text: message.text.slice(0, 8000), truncated: message.text.length > 8000 };
       }
@@ -1070,9 +1083,10 @@ export class LocalRuntime {
       const history = !remote && meta.historyRecall ? historyExtension((query, limit) => this.searchHistory(meta.id, query, limit), (taskId, entryId) => this.readHistory(meta.id, taskId, entryId)) : undefined;
       const projectTasks = !remote && meta.projectTaskCatalog ? projectTasksExtension((filter, limit, offset) => this.projectTasks(meta.id, filter, limit, offset)) : undefined;
       const nativeSkills = meta.resourcePolicy === "pi-skills";
-      const localContext = !remote && meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective).catch(() => undefined) : undefined;
+      const store = this.taskMemoryStore(meta);
+      const localContext = !remote && meta.discovery && this.config.discovery === true ? await this.discovery.context(meta.userMemory === true, meta.workspace, meta.objective, store).catch(() => undefined) : undefined;
       const statements = () => this.userStatements(this.active.get(meta.id)!);
-      const memory = localContext?.memory ? this.discovery.memory.extension(meta.id, localContext.memory.home, () => this.discovery.load(), meta.entrypoint === "chat" ? statements : undefined, meta.workspace,meta.memoryTracking===true) : undefined;
+      const memory = localContext?.memory ? store.extension(meta.id, localContext.memory.home, () => this.discovery.load(), meta.entrypoint === "chat" ? statements : undefined, meta.workspace,meta.memoryTracking===true) : undefined;
       const readObserver = skillReads(meta.skillPolicy==='catalogue' ? [] : localContext?.skills);
       const memoryUse=meta.memoryTracking ? defineExtension({name:'local_memory_use',hooks:[{task:'pi.generation',handlers:{
         beforeRequest:async(request,api,context)=>{
@@ -1362,7 +1376,7 @@ export class LocalRuntime {
     const previous = await active.harness.commit(async tx => plain(await tx.doc(MemoryUseDoc, active.root.id)), ctx);
     const currentReferences = previous.references.filter(reference => previous.current.includes(reference.factId + "@" + reference.revision));
     const changedScope = currentReferences.some(reference => reference.scope === 'project' && reference.project !== memory.project && reference.project !== (memory.project ? claudeProject(memory.project) : undefined));
-    const changed = previous.initialized && (changedScope || await this.discovery.memory.referencesChanged(memory.home, currentReferences));
+    const changed = previous.initialized && (changedScope || await this.taskMemoryStore(active.meta).referencesChanged(memory.home, currentReferences));
     if (previous.initialized && !refresh && !changed) {
       active.localContext!.memory={...memory,summary:previous.summary,references:currentReferences};
     }

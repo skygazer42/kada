@@ -79,7 +79,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (chartPreviews.handle(req, res, url)) return;
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-memory','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -107,7 +107,9 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         return send(200,url.pathname.endsWith('/takeover') ? await controls.takeover() : await controls.returnControl());
       }
       if (url.pathname === "/v1/environment" && req.method === "GET") return send(200, await runtime.localSetup());
-      if (url.pathname === "/v1/environment/memory" && req.method === "GET") return send(200, await runtime.localMemory(url.searchParams.get("workspace") ?? undefined));
+      if (url.pathname === "/v1/environment/memory" && req.method === "GET") {
+        return send(200, await runtime.localMemory(url.searchParams.get("workspace") ?? undefined, url.searchParams.get("assistant") ?? undefined));
+      }
       if (url.pathname === "/v1/settings/memory/capture") {
         if (req.method === "GET") return send(200, await runtime.memoryCapture(url.searchParams.get("workspace") ?? ""));
         if (req.method === "PUT") {
@@ -125,17 +127,17 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         }
       }
       if (url.pathname === "/v1/environment/memory/candidates" && req.method === "GET") {
-        return send(200, await runtime.memoryCandidates(url.searchParams.get("workspace") ?? ""));
+        return send(200, await runtime.memoryCandidates(url.searchParams.get("workspace") ?? "", undefined, undefined, url.searchParams.get("assistant") ?? undefined));
       }
       const candidate = /^\/v1\/environment\/memory\/candidates\/([a-f0-9]{24})\/(accept|reject)$/.exec(url.pathname);
       if (candidate && req.method === "POST") {
-        return send(200, await runtime.memoryCandidates(url.searchParams.get("workspace") ?? "", candidate[1]!, candidate[2] as "accept" | "reject"));
+        return send(200, await runtime.memoryCandidates(url.searchParams.get("workspace") ?? "", candidate[1]!, candidate[2] as "accept" | "reject", url.searchParams.get("assistant") ?? undefined));
       }
       const memory = /^\/v1\/environment\/memory\/([^/]+)(?:\/(forget))?$/.exec(url.pathname);
       if (memory && ((!memory[2] && req.method === "PATCH") || (memory[2] === "forget" && req.method === "POST"))) {
         const input = await body(req);
         if (typeof input.expectedRevision !== "string" || typeof input.requestId !== "string" || (req.method === "PATCH" && typeof input.text !== "string")) throw new MemoryMutationError(400, "Supply expectedRevision, requestId and correction text.");
-        return send(200, await runtime.changeMemory(decodeURIComponent(memory[1]!), { action: memory[2] === "forget" ? "forget" : "correct", expectedRevision: input.expectedRevision, requestId: input.requestId, ...(typeof input.text === "string" ? { text: input.text } : {}) }, url.searchParams.get("workspace") ?? undefined));
+        return send(200, await runtime.changeMemory(decodeURIComponent(memory[1]!), { action: memory[2] === "forget" ? "forget" : "correct", expectedRevision: input.expectedRevision, requestId: input.requestId, ...(typeof input.text === "string" ? { text: input.text } : {}) }, url.searchParams.get("workspace") ?? undefined, url.searchParams.get("assistant") ?? undefined));
       }
       if (url.pathname === "/v1/environment/refresh" && req.method === "POST") return send(200, await runtime.localSetup(true));
       if (url.pathname === '/v1/settings/models/link' && req.method === 'POST') {

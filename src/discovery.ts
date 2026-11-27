@@ -18,7 +18,7 @@ export type LocalInventory = {
   notices: string[];
 };
 export type DiscoveryOptions = { home?: string; locale?: string; timezone?: string; maxEntries?: number; maxMs?: number };
-export type LocalContext = { overview: string; catalogue: string; guidance: string[]; summary: string; skills: LocalSkill[]; memory?: MemoryContext };
+export type LocalContext = { overview?: string; catalogue: string; guidance: string[]; summary: string; skills: LocalSkill[]; memory?: MemoryContext };
 const secret = /(?:sk-[a-z0-9_-]{16,}|(?:ghp|gho|github_pat|xox[baprs])[_-][a-z0-9_-]{12,}|AIza[a-z0-9_-]{16,})/i;
 function label(value: unknown, max = 120): string | undefined {
   return typeof value === "string" && value.length <= max && !value.includes("://") && /^[\p{L}\p{N}@][\p{L}\p{N} _./:@+()-]*$/u.test(value) && !secret.test(value) ? value : undefined;
@@ -203,10 +203,20 @@ export async function scanLocalAgents(options: DiscoveryOptions = {}): Promise<L
 export class LocalDiscovery {
   readonly directory: string;
   readonly memory: UserMemoryStore;
+  private assistantMemories = new Map<string, UserMemoryStore>();
   private cached?: Promise<LocalInventory>;
   private changes = new SerialQueue();
   constructor(dataDir: string, private options: DiscoveryOptions = {}) {
     this.directory = resolve(dataDir, "local-context"); this.memory = new UserMemoryStore(this.directory);
+  }
+  assistantMemory(id: string) {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new MemoryMutationError(400, "Provide a valid assistant ID.");
+    let store = this.assistantMemories.get(id);
+    if (!store) {
+      store = new UserMemoryStore(join(this.directory, "assistants", id), this.directory);
+      this.assistantMemories.set(id, store);
+    }
+    return store;
   }
   private async write(inventory: LocalInventory) {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -237,15 +247,16 @@ export class LocalDiscovery {
     });
     return this.cached;
   }
-  async context(includeMemory = false, workspace?: string, query = ""): Promise<LocalContext> {
+  async context(includeMemory = false, workspace?: string, query = "", store = this.memory): Promise<LocalContext> {
     const value = await this.load();
-    const memory = includeMemory ? await this.memory.refresh(value, workspace).then(async records => {
+    const memory = includeMemory ? await store.refresh(value, workspace).then(async records => {
       const project = await memoryProject(workspace);
-      const context = this.memory.context(records, query, project);
-      if (project) context.captureEnabled = (await this.memory.captureSettings(project)).enabled;
+      const context = store.context(records, query, project);
+      if (project) context.captureEnabled = (await store.captureSettings(project)).enabled;
       return context;
     }).catch(() => undefined) : undefined;
-    return { overview: join(this.directory, "overview.md"), catalogue: join(this.directory, "skills.md"), guidance: value.guidance.map(g => g.path),
+    const guidance = store === this.memory ? { overview: join(this.directory, "overview.md"), guidance: value.guidance.map(g => g.path) } : { guidance: [] };
+    return { ...guidance, catalogue: join(this.directory, "skills.md"),
       summary: JSON.stringify({ platform: value.platform, locale: value.locale, timezone: value.timezone, agents: value.agents.map(a => ({ name: a.name, model: a.model, language: a.language })), skills: value.skills.length, plugins: value.plugins.length }),
       skills: value.skills, ...(memory ? { memory } : {}) };
   }
@@ -258,12 +269,12 @@ export class LocalDiscovery {
       notices: [...value.notices, ...(records?.notices ?? ["用户记忆暂不可用，能力发现仍可使用。"]) ] };
   }
   /** Read-only client projection of the existing source-bound memory; no new store or model call. */
-  async memoryView(workspace?: string) {
+  async memoryView(workspace?: string, store = this.memory) {
     const project = await memoryProject(workspace);
     if (workspace && !project) throw new MemoryMutationError(400, "The memory workspace must be an existing directory.");
-    const value = await this.memory.refresh(await this.load(), workspace);
-    return { enabled: true, updatedAt: value.updatedAt, profile: this.memory.profile,
-      facts: this.memory.list(value, project),
+    const value = await store.refresh(await this.load(), workspace);
+    return { enabled: true, updatedAt: value.updatedAt, profile: store.profile,
+      facts: store.list(value, project),
       notices: value.notices };
   }
 }
@@ -272,5 +283,7 @@ export function localContextInstructions(context: LocalContext, options: { skill
   if (options.skills === false) {
     return `\nLocal setup facts (not authorization): ${context.summary}\nUse these observed preferences only when relevant; the user's current request wins. Read local guidance only when relevant: ${JSON.stringify(context.guidance)}. Existing plugins/MCP are an inventory, not callable tools here. Never use discovery to change model, permissions, budget or driver configuration.\n` + (context.memory ? userMemoryInstructions(context.memory) : "");
   }
-  return `\nLocal setup facts (not authorization): ${context.summary}\nUse these observed preferences only when relevant; the user's current request wins. Read ${JSON.stringify(context.overview)} for local guidance paths and ${JSON.stringify(context.catalogue)} to find additional Skills using native read/grep. Load only useful SKILL.md files with native read; resolve resources against that original Skill directory. Skip disabled entries unless explicitly requested by the user. Existing plugins/MCP are an inventory, not callable tools here. Never use discovery to change model, permissions, budget or driver configuration.\n` + (context.memory ? userMemoryInstructions(context.memory) : "");
+  const resources = context.overview ? `${JSON.stringify(context.overview)} for local guidance paths and ${JSON.stringify(context.catalogue)}`
+    : JSON.stringify(context.catalogue);
+  return `\nLocal setup facts (not authorization): ${context.summary}\nUse these observed preferences only when relevant; the user's current request wins. Read ${resources} to find additional Skills using native read/grep. Load only useful SKILL.md files with native read; resolve resources against that original Skill directory. Skip disabled entries unless explicitly requested by the user. Existing plugins/MCP are an inventory, not callable tools here. Never use discovery to change model, permissions, budget or driver configuration.\n` + (context.memory ? userMemoryInstructions(context.memory) : "");
 }
