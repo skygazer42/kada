@@ -45,7 +45,12 @@ export function taskGroup(status: TaskStatus['status']) {
     : ['completed','answered'].includes(status) ? 'delivered' : status === 'cancelled' ? 'closed' : 'running';
 }
 
-export function taskHandoff(status:TaskStatus) {
+type HandoffStatus = Pick<TaskStatus, 'status' | 'goal' | 'thread' | 'interaction' | 'userQuestion'> & {
+  delegations: Pick<TaskStatus['delegations'][number], 'status' | 'question'>[];
+  assistantWork: Pick<TaskStatus['assistantWork'][number], 'stop' | 'result' | 'origin' | 'questions'>[];
+};
+
+export function taskHandoffSummary(status: HandoffStatus) {
   const goal = status.goal;
   const child = status.status === "running" ? status.delegations.find(item => item.status === "waiting_input") : undefined;
   const group = status.thread?.archivedAt ? 'archived' : child ? "pending" : taskGroup(status.status);
@@ -56,7 +61,11 @@ export function taskHandoff(status:TaskStatus) {
   const question = goal?.question ?? status.userQuestion?.text ?? child?.question?.text ?? peerQuestion?.text ?? null;
   const summary = group === 'pending' ? question ?? goal?.reason ?? (status.status === 'awaiting_confirmation' ? '等待确认任务说明和预算' : status.status)
     : goal?.candidate?.summary ?? step ?? (status.interaction === 'chat' ? '普通对话' : '执行目标');
-  return {group,summary:summary.slice(0,2000),question,step:step ?? null,
+  return {group,summary:summary.slice(0,2000),question,step:step ?? null};
+}
+
+export function taskHandoff(status: TaskStatus) {
+  return { ...taskHandoffSummary(status),
     budget:{totalTokens:status.budget.totalTokens,estimatedCostUsd:status.budget.priceKnown ? status.budget.estimatedCostUsd : null,costLimit:status.budget.costLimit},
-    artifacts:status.status === 'completed' ? goal?.candidate?.artifacts ?? [] : []};
+    artifacts:status.status === 'completed' ? status.goal?.candidate?.artifacts ?? [] : []};
 }

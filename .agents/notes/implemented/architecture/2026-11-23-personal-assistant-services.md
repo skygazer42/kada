@@ -70,7 +70,7 @@ PR 事件复用原 GitHub 签名入口与 Pi 事件事务。只接受 opened、r
 
 大型 MCP 清单沿用 Pi 原生 deferred/tool_search。新任务总固定工具数大于 20 时保存 mcpDiscovery，工具注册只增加 deferred，具体执行仍走原 MCP 和审批路径。执行阶段配置从 Pi 当前 agent 投影已加载 MCP 工具并保留到原 modelTools，不另存目录或加载状态。只在执行扩展选择 tool-search；主会话从 enabled tools 移除 delegation_ask，防止目录把原本不可见的后台待答工具加载给主助手。同步子任务使用原范围，后台子任务仍保留文件工具与自己的待答入口。 [Rakazo 超过 20 个工具切换目录](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/mcp/mcp-connector.ts#L440) · [Pi 原生加载与持久化](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/src/tool-search/tool-search.ts)
 
-项目任务目录以新主任务的 projectTaskCatalog 标记固定，复用 memoryProject 和原 status/taskHandoff；先筛项目元数据，再读 Pi 状态，只返回有界的目标、摘要、问题和步骤。status 自己进入运行时状态队列，目录不能在同一队列内再等待它。查询不提交模型输入、不恢复工作，也不修改预算；子会话、旧任务和远程私有会话不获得工具。目录分页是当前视图，不是跨页快照。 [OpenMausBot 原任务目录](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/drivers/agents-catalog.ts#L236) · [Rakazo 目录聚合](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22)
+主任务的 `projectTaskCatalog` 标记决定工具可用性。目录按项目和助手身份筛选元数据，每次查询只解析一次相同的工作区路径。原生任务状态与摘要规则由目录和完整详情共用。正在使用的会话从原运行时读取，已关闭的会话经 Pi Session 读取后立即关闭。若任务创建中断，初始化仍走原打开入口。分页读取每次查询时的状态。 [OpenMausBot 原任务列表](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routes/internal-threads.ts#L45) · [Rakazo 目录聚合](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/task-catalog.ts#L22)
 
 聊天待办沿原 WorkItems 保存规划状态，不建立第二份待办来源。新聊天固定 chatWorkItems 原项目，只在无 Goal 的聊天阶段提供工具；创建固定原工作区，修改在原保存队列核对项目及修订。open/parked/done 和 archived 与 Pi 运行状态独立，完成/归档不取消原工作，不能作为交付验证。原运行请求重试先找原任务，新运行才要求待办已恢复。旧数组读取补默认值，不自动改写历史文件。 [Rakazo 实际修改归属](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/tasks/scratchpad-tools.ts#L131) · [Suparagent 规划和原运行分离](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L31)
 
@@ -94,7 +94,7 @@ Goal 答复回执与原用户消息、修订和 outbox 在同一 Pi 事务保存
 
 另建聊天待办文件能少改原服务，但会使工作项、共享和原运行身份分叉，所以扩展既有 WorkItems。只在 Pi 工具回执记录成功能节省一份操作记录，但无法跨过文件已提交、工具尚未回执的崩溃窗口；摘要与历史结果同次保存在工作项。只保留最新回执会遗失旧工具恢复所需身份，所以当前不按数量裁剪；文件体积与后续清理政策须测量后再决定。
 
-直接调用 owner list 再过滤可减少代码，但会先打开其他项目状态；项目目录先筛元数据。只用元数据推测状态可避免打开旧 Harness，却不能呈现 Pi 子任务待答、预算与交付，所以复用既有只读状态入口。该入口可能打开原存储做 Pi 投影，但不会启动 scheduler 或提交原工作；不同于仅取旧讨论的 history 工具，目录需要当前业务状态。
+完整详情入口可以直接提供交接摘要，连续翻页也能复用已打开的会话。项目只有历史任务时，这条路径会把每个会话都留在内存中。仅凭任务元数据判断状态会遗漏 Pi 中保存的答复和交付。目录按原生任务和提交状态生成摘要，可以及时关闭历史会话，每页仍需要计算当前待处理排序和总数。
 
 自建搜索、加载、执行代理可定制排序及中文分词，但 Pi 已提供工具检索和原生加载状态；增加代理会再做参数与权限入口。一次发送所有 schema 接法最短，但大型清单把无关工具结构带到每次请求；按已有参考的 20 个工具阈值为新任务选择延迟注册，旧任务保留原快照行为。只隐藏 modelTools 中的 delegation_ask 不足以限制搜索，因为 Pi 从 enabled deferred 清单检索，所以在主会话的 tools 范围排除它。
 
@@ -182,7 +182,7 @@ readline 取消不会自行丢弃当前输入，单纯清 history 也保留 kill
 
 聊天待办有 4 个实际 SIGKILL 场景验证操作重入和后续编辑保护；普通聊天、旧范围、分页/截断和聊天转 Goal 后撤下工具都有 Pi 回归。DeepSeek 经硅基流动完成保存、重启后改名/完成及归档，8 次请求、53,405 总 token，无 Goal/运行，金额未知。Chromium 390 × 844 验证已完成/归档待办与仍待答的原运行同时展示，展开原运行不改变未发送草稿；实体手机尚未验收。新增回执会增加原 JSON 大小，未证明大规模编辑性能或成本改善。
 
-项目任务目录复用既有完整状态读取，减少状态分叉并保留原子任务的待答投影；它仍需遍历同项目任务，大量历史的延迟和跨页变动尚未量化。6 项 Pi 回归覆盖范围、截断、分页、坏存储、重启与聊天转 Goal；硅基流动 DeepSeek 的中文查询使用 4 次请求、20,844 总 token，金额未知，不能推出成本或任务质量收益。参考项目完整产品能力仍按能力核对表逐项补齐。
+项目任务目录从已有的 Pi 状态保留原子任务待答和交付摘要。回归覆盖范围、截断、分页、坏存储、重启、聊天转 Goal、保存的数据库内容及历史会话释放。大量历史仍需逐条读取状态来计算分页。 [目录回归及性能记录](../../../../docs/superpowers/plans/2026-11-25-project-task-catalog.md)
 
 周期提醒的确定性回归验证每周通知、改为每日、保留原政策及无效输入拒绝。实际 SIGKILL 覆盖更新未提交、已提交后被再次编辑和已提交后被取消，回放保持原结果且不覆盖当前规则。DeepSeek V3.2 用 9 次请求完成中文创建、重启后修改和取消，原提醒 ID 保留，无 Goal；52,054 总 token 包含缓存，金额未知。当前不提供通知型 Cron/间隔、执行型任务或跨设备聊天管理，不据此声称全场景时间理解和成本改善。
 

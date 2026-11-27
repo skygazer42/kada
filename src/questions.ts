@@ -27,7 +27,7 @@ export function questionChoices(text: string, options: string[], detail?: string
   return { text: text.trim(), options: options.map(option => option.trim()), ...(detail?.trim() ? { detail: detail.trim() } : {}) };
 }
 
-export async function currentQuestion(harness: Harness, conversation: ConversationId, submissionId: SubmissionId | undefined, goal?: GoalState) {
+export async function currentQuestion(harness: Pick<Harness, 'snapshot'>, conversation: ConversationId, submissionId: SubmissionId | undefined, goal?: GoalState) {
   const state = await harness.snapshot(Questions, conversation, context), question = state?.current ? state.questions[state.current] : undefined;
   if (!question || question.answer || question.retired || question.submissionId !== submissionId ||
     (goal ? question.revision !== goal.revision || question.epoch !== goal.epoch || !['waiting_user', 'clarifying'].includes(goal.phase) : question.revision !== undefined)) return null;

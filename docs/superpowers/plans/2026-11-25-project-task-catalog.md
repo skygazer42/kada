@@ -50,3 +50,16 @@ Rakazo 的 `taskCatalogFromTool` 分别从清单、日程和 Skill 的原存储�
 DeepSeek V3.2 的最终验收以 3 次请求读到四类原记录，排除另一项目，完成中文答复，查询前后的待办修订一致。首轮模型选择了运行一类，后续生成在测试时限内仍未返回。工具说明和复测提示补充了空参数组合查询方式，两次结果均保留。[硅基流动验收](../../experiments/2026-11-26-project-catalog-deepseek.json)
 
 类型、构建、提交候选、diff 空白及三项笔记校验通过。独立审查命令为 `python <autoreview>/scripts/autoreview --mode local --no-tools --no-web-search --output <临时目录文件>`；因缺少 TruffleHog 在调用 reviewer 前退出，没有独立审查结论。此次没有新增运行时依赖或自动安装审查工具。
+
+## 200 条历史任务验证
+
+OpenMausBot 的内部列表用任务记录与当前等待状态生成简要行，再按页返回。Kada 的列表沿用 Pi 原状态和现有交接摘要。已关闭的会话只打开 Pi Session 读取必要的状态，读取后关闭。完整任务详情仍按原入口读取。 [OpenMausBot 内部任务列表](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/routes/internal-threads.ts#L45) · [Kada 状态读取](../../../src/runtime.ts) · [回归](../../../test/project-tasks.test.ts)
+
+Windows 上对比 `dae579f` 和新读取路径。每侧创建相同的 200 条已答复合成任务，启动新的本机 runtime，连续读取每页 5 条、偏移量为 0、5、100 的结果。两侧的任务总数与分页位置正确。记录各一次。
+
+| 读取方式 | 首页耗时 | 后续两页耗时 | 三页后仍打开的会话 | 三页后进程 RSS |
+| --- | ---: | ---: | ---: | ---: |
+| `dae579f` 完整详情 | 7.37 秒 | 1.52 秒、1.56 秒 | 200 | 337 MiB |
+| Pi Session 读取状态 | 4.31 秒 | 3.18 秒、2.03 秒 | 0 | 294 MiB |
+
+每页仍需读取同项目状态才能按当前待答排序并返回总数。连续翻页会重复这项读取。数据库回归核对读取前后的已保存会话字节、原待答和模型请求次数。

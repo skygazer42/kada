@@ -401,7 +401,7 @@ export async function savedDelegation(api: ToolExecutionApi, selector: "list" | 
 }
 
 export async function listDelegations(
-  harness: Harness,
+  harness: Pick<Harness, 'commit' | 'snapshot'>,
   workspace: string,
   records: readonly OwnedConversation[],
 ): Promise<DelegationSummary[]> {

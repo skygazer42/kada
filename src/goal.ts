@@ -103,7 +103,7 @@ export async function changeGoal<T>(tx: Tx, change: GoalChange<T>, remoteConvers
   }
   return result;
 }
-export async function readGoal(harness: Harness): Promise<GoalState> {
+export async function readGoal(harness: Pick<Harness, 'commit'>): Promise<GoalState> {
   return harness.commit(async tx => plain(await tx.doc(GoalDoc)), ctx);
 }
 

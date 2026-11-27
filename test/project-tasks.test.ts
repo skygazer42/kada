@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { LocalRuntime } from '../src/runtime.js';
@@ -65,10 +65,16 @@ test('a local chat calls project_tasks without a Goal and reads the original pen
   const value = JSON.parse(result.content.filter(block => block.type === 'text').map(block => block.text).join(''));
   assert.equal(value.tasks[0].id, source.id); assert.equal(value.tasks[0].question, 'CSV 还是 XLSX？');
   await runtime['closeTask'](source.id);
+  const sourceDatabase = join(f.directory, 'tasks', source.id, 'session.sqlite');
+  const originalDatabase = await readFile(sourceDatabase);
   const before = requests;
   assert.equal((await runtime.projectTasks(caller.id, 'pending')).tasks[0].id, source.id);
   assert.equal(requests, before, 'a status query cannot submit or resume model work');
+  assert(!runtime['active'].has(source.id), 'reading a catalog page must not keep a previously closed session open');
+  assert.deepEqual(await readFile(sourceDatabase), originalDatabase, 'reading a saved task must not rewrite its session');
   assert.equal((await runtime.status(source.id)).status, 'waiting_user');
+  await runtime.projectTasks(caller.id, 'pending');
+  assert(runtime['active'].has(source.id), 'an already open catalog session must stay open');
 });
 
 test('remote and historical sessions cannot acquire the task catalog; invalid filters and pages are rejected', async t => {

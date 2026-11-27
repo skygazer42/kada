@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type EntryRecord, type Extension, type GenerationHooks, type SubmissionId } from "@earendil-works/pi-durable";
+import { Harness, LiveDoc, UserEntry, AssistantEntry, UsageDoc, ROOT_CONVERSATION_ID, configure, createRegistry, createSession, defineExtension, type Conversation, type ConversationRecord, type Cursor, type EntryId, type EntryRecord, type Extension, type GenerationHooks, type SubmissionId, type SubmissionRecord } from "@earendil-works/pi-durable";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
@@ -34,7 +34,7 @@ import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
 import { chartArtifactExtension } from './chart-preview.js';
-import { taskHandoff } from "./task-view.js";
+import { taskHandoff, taskHandoffSummary } from "./task-view.js";
 import { claudeProject, memoryProject } from './memory-sources.js';
 import { imageInput, inputImageExtension, type InputImage } from './input-images.js';
 import { approvalExtension, approvalViews, approvalReport, decideApproval, requestApproval, stopObsoleteApprovals, ApprovalError } from './approvals.js';
@@ -195,6 +195,10 @@ interface Active {
   /** Disposable cache derived from Pi entries; rebuilt from storage after reopening. */
   compactionCounts: Map<Conversation["id"], { last?: EntryId; count: number }>;
 }
+type TaskReader = Pick<Active, 'storage' | 'meta'> & {
+  harness: Pick<Harness, 'commit' | 'snapshot'>;
+  root: Pick<Conversation, 'id'>;
+};
 export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: Pick<ComputerBridge, "forTask" | "release"> & Partial<Pick<ComputerBridge,'status'|'takeover'|'returnControl'|'browserKey'>>; discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 type BrowserHold = { taskId: string; questionId: string };
 const browserSignInRequest = (questionId: string) => 'browser-sign-in-' + questionId;
@@ -953,23 +957,62 @@ export class LocalRuntime {
     if (!project) throw new Error('Project history is unavailable for this task.');
     return { project, owner: memoryOwner(caller) };
   }
+  private async projectTaskHandoff(id: string) {
+    return this.changes.run(async () => {
+      if (this.closing) throw new Error('Runtime is shutting down');
+      const meta = await this.metadata(id);
+      const existing = this.active.get(id);
+      if (existing) return this.readTaskHandoff(existing, meta, await this.taskState(existing, meta));
+      const storage = await openNodeSqliteStorage(join(this.directory(id), 'session.sqlite'));
+      const harness = createSession(storage);
+      try {
+        const root = await storage.conversation(ROOT_CONVERSATION_ID, ctx);
+        if (root && (meta.entrypoint === 'chat' || meta.schemaVersion === undefined || (await harness.snapshot(GoalDoc, ctx))?.initialized)) {
+          const reader = { harness, storage, root, meta };
+          const submission = await this.latest(reader);
+          const state = await this.readTaskState(reader, meta, submission, await this.hasStoredWork(storage));
+          return await this.readTaskHandoff(reader, meta, state);
+        }
+      } finally { await harness.close(ctx); }
+      // Let the normal open path finish a task creation that was interrupted.
+      const active = await this.open(meta, false);
+      try { return await this.readTaskHandoff(active, meta, await this.taskState(active, meta)); }
+      finally {
+        try { await active.harness.close(ctx); }
+        finally { this.active.delete(active.meta.id); }
+      }
+    });
+  }
+  private async readTaskHandoff(active: TaskReader, meta: TaskMeta, state: Awaited<ReturnType<LocalRuntime['readTaskState']>>) {
+    const { goal, status, userQuestion, assistantState } = state;
+    const interaction = meta.entrypoint === 'chat' && !goal ? 'chat' : 'goal';
+    const delegations = status === 'running'
+      ? await listDelegations(active.harness, meta.workspace, await this.conversations(active)) : [];
+    const assistantWork = status === 'waiting_assistant'
+      ? Object.values(assistantState?.work ?? {}).map(work => assistantWorkView(assistantState, work.id)!) : [];
+    const handoff = taskHandoffSummary({ status, goal, userQuestion, thread: meta.thread, interaction, delegations, assistantWork });
+    return { status, objective: goal?.objective || meta.objective, handoff };
+  }
   async projectTasks(callerId: string, filter = 'all', limit = 20, offset = 0, expectedProject?: string) {
     if (!['all', 'running', 'pending', 'delivered', 'archived'].includes(filter)) throw new Error('Invalid project task filter.');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid project task page.');
     const caller = await this.metadata(callerId);
     const project = !caller.remotePolicy && caller.projectTaskCatalog ? await memoryProject(caller.workspace) : undefined;
     if (!project || expectedProject !== undefined && project !== expectedProject) throw new Error('Project task catalog is unavailable for this task.');
+    const projects = new Map<string, string | undefined>([[caller.workspace, project]]);
     const tasks = [];
     for (const meta of await this.metadataList()) {
       if (meta.id === callerId || meta.remotePolicy || memoryOwner(meta) !== memoryOwner(caller) ||
-          (filter === 'archived') !== Boolean(meta.thread?.archivedAt) || await memoryProject(meta.workspace) !== project) continue;
-      const status = await this.status(meta.id), handoff = taskHandoff(status);
+          (filter === 'archived') !== Boolean(meta.thread?.archivedAt)) continue;
+      if (!projects.has(meta.workspace)) projects.set(meta.workspace, await memoryProject(meta.workspace));
+      if (projects.get(meta.workspace) !== project) continue;
+      const { status, objective, handoff } = await this.projectTaskHandoff(meta.id);
       if (filter !== 'all' && handoff.group !== filter) continue;
-      tasks.push({ id: meta.id, createdAt: meta.createdAt, status: status.status, group: handoff.group,
+      tasks.push({ id: meta.id, createdAt: meta.createdAt, status, group: handoff.group,
         ...(meta.thread?.title ? { title: meta.thread.title } : {}), ...(meta.thread?.sourceTaskId ? { sourceTaskId: meta.thread.sourceTaskId } : {}),
-        objective: status.objective.slice(0, 500), summary: handoff.summary.slice(0, 500),
+        objective: objective.slice(0, 500), summary: handoff.summary.slice(0, 500),
         question: handoff.question?.slice(0, 1000) ?? null, step: handoff.step?.slice(0, 200) ?? null,
-        truncated: status.objective.length > 500 || handoff.summary.length > 500 || (handoff.question?.length ?? 0) > 1000 || (handoff.step?.length ?? 0) > 200 });
+        truncated: objective.length > 500 || handoff.summary.length > 500 || (handoff.question?.length ?? 0) > 1000 || (handoff.step?.length ?? 0) > 200 });
     }
     tasks.sort((a, b) => Number(b.group === 'pending') - Number(a.group === 'pending') || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
     return { tasks: tasks.slice(offset, offset + limit), total: tasks.length, nextOffset: offset + limit < tasks.length ? offset + limit : null };
@@ -1347,7 +1390,7 @@ export class LocalRuntime {
     return active;
   }
   /** Pi snapshot reads do not create the business document in an ordinary chat. */
-  private async goalState(active: Active): Promise<GoalState | undefined> {
+  private async goalState(active: TaskReader): Promise<GoalState | undefined> {
     if (active.meta.schemaVersion === undefined) return;
     if (active.meta.entrypoint !== "chat") return readGoal(active.harness);
     const state = await active.harness.snapshot(GoalDoc, ctx);
@@ -1481,7 +1524,7 @@ export class LocalRuntime {
       return plain(goal);
     }, active.meta.remotePolicy === "workspace" ? active.root.id : undefined), ctx);
   }
-  private async latest(active: Active, conversationId = active.root.id) {
+  private async latest(active: TaskReader, conversationId = active.root.id) {
     let cursor: Cursor | undefined;
     do {
       const page = await active.storage.scanSubmissions({ conversationId, order: 'descending' }, 1, cursor, ctx);
@@ -1490,7 +1533,7 @@ export class LocalRuntime {
       cursor = page.next;
     } while (cursor);
   }
-  private async latestInput(active: Active, includeWake = false) {
+  private async latestInput(active: TaskReader, includeWake = false) {
     let cursor: Cursor | undefined;
     do {
       const page = await active.storage.scanSubmissions({ conversationId: active.root.id, order: 'descending' }, 200, cursor, ctx);
@@ -1947,10 +1990,22 @@ export class LocalRuntime {
     if (active.meta.collaborators) await this.haltCollaborativeTask(active, 'budget_limited');
     await this.closeTask(active.meta.id);
   }
+  private async hasStoredWork(storage: TaskReader['storage']): Promise<boolean> {
+    for (const status of ['queued', 'placed'] as const) {
+      if ((await storage.scanSubmissions({ status }, 1, undefined, ctx)).items.length) return true;
+    }
+    for (const status of ['pending', 'running', 'waiting', 'sleeping', 'completing'] as const) {
+      if ((await storage.scanTasks({ status }, 1, undefined, ctx)).items.length) return true;
+    }
+    return false;
+  }
   private async taskState(active: Active, meta: TaskMeta) {
     const submission = await this.latest(active);
     const inspection = await active.harness.inspect(ctx);
     const busy = inspection.tasks.length > 0 || inspection.submissions.length > 0;
+    return { ...await this.readTaskState(active, meta, submission, busy), inspection };
+  }
+  private async readTaskState(active: TaskReader, meta: TaskMeta, submission: SubmissionRecord | undefined, busy: boolean) {
     const goal = await this.goalState(active);
     const userQuestion = meta.structuredQuestions ? await currentQuestion(active.harness, active.root.id, (await this.latestInput(active))?.id, goal) : null;
     const assistantState = meta.collaborators ? await active.harness.snapshot(AssistantPeers, ctx) : undefined;
@@ -1960,7 +2015,7 @@ export class LocalRuntime {
     const status = meta.control !== "active" ? meta.control : waitingAssistant ? 'waiting_assistant' : goal ?
       goal.phase === "working" ? busy ? "running" : "pending" : ["clarifying", "awaiting_confirmation"].includes(goal.phase) && busy ? "running" : goal.phase === "submitted" ? "verifying" : goal.phase :
       busy ? "running" : userQuestion ? "waiting_user" : submission?.status === "done" ? "answered" : submission?.status === "unanswered" ? "failed" : "pending";
-    return { submission, inspection, goal, status, userQuestion, assistantState };
+    return { submission, goal, status, userQuestion, assistantState };
   }
   async taskOverview(id: string) {
     return this.changes.run(async () => {
@@ -2675,7 +2730,7 @@ export class LocalRuntime {
   private async abortAll(active: Active): Promise<void> {
     for (const record of await this.conversations(active)) if (!record.owner) await (await active.harness.conversation(record.id, ctx))?.abort(ctx, { background: true });
   }
-  private async conversations(active: Active): Promise<ConversationRecord[]> {
+  private async conversations(active: TaskReader): Promise<ConversationRecord[]> {
     return active.harness.commit(async tx => {
       const items: ConversationRecord[] = [];
       let cursor: Cursor | undefined;
