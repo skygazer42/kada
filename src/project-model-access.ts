@@ -2,14 +2,14 @@ import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { modelRef, type ModelRef } from './config.js';
 import type { ProviderSettings } from './provider-settings.js';
-import { createProjectBrowserSessions } from './project-browser-sessions.js';
+import { createLocalBrowserSessions } from './local-browser-sessions.js';
 import { projectModelPage } from './project-model-page.js';
 
 const prefix = '/project-model';
 
 export function createProjectModelAccess(providers: ProviderSettings, defaultModel: ModelRef | undefined, origin: string,
   readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>) {
-  const host = new URL(origin).host, sessions = createProjectBrowserSessions();
+  const host = new URL(origin).host, sessions = createLocalBrowserSessions();
   async function link(workspace: string) {
     const { project } = await providers.projectDefault(workspace, defaultModel);
     return { url: origin + prefix + '?open#' + sessions.ticket(project) };
@@ -35,7 +35,7 @@ export function createProjectModelAccess(providers: ProviderSettings, defaultMod
       const token = sessions.exchange((await readBody(req)).ticket);
       return token ? send(200, { token }) : send(401, { error: 'Open the model settings again from Kada.' });
     }
-    const project = sessions.project(req.headers.authorization);
+    const project = sessions.scope(req.headers.authorization);
     if (!project) return send(401, { error: 'Open the model settings again from Kada.' });
     if (path === prefix + '/state' && req.method === 'GET') {
       const preferences = await providers.projectDefault(project, defaultModel);

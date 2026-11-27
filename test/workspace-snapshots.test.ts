@@ -12,6 +12,49 @@ import { serve } from '../src/server.js';
 import { WorkspaceSnapshots } from '../src/workspace-snapshots.js';
 import { hasTool, recoveryTestTimeoutMs, scriptedFixture, startRecoveryWorker, until } from './helpers.js';
 
+test('a local workspace snapshot link binds the original task and restores the displayed preview', async t => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage('Ready.'));
+  await fixture.runtime.close();
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, '127.0.0.1', resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const config = { ...fixture.settings, port };
+  const server = await serve(config, { models: fixture.models });
+  t.after(async () => { await server.close(); await fixture.close(); });
+  const file = join(fixture.workspace, 'notes.txt');
+  await writeFile(file, 'Original text.');
+  const task = await server.runtime.create('Workspace for the snapshot page.', fixture.workspace, [], { chat: true });
+  await until(() => server.runtime.status(task.id), state => state.status === 'answered');
+  await server.runtime.pause(task.id);
+  const client = createClient(config);
+  const { url } = await client.request<{ url: string }>(`/v1/tasks/${task.id}/snapshots/link`, 'POST', {});
+  assert.match(await (await fetch(url)).text(), /工作区快照/);
+  const location = new URL(url);
+  const call = (route: string, method: string, token?: string, input?: unknown) => fetch(location.origin + location.pathname + '/' + route, {
+    method, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(input !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    ...(input !== undefined ? { body: JSON.stringify(input) } : {}),
+  });
+  assert.equal((await call('state', 'GET')).status, 401);
+  const ticket = location.hash.slice(1);
+  const { token } = await (await call('session', 'POST', undefined, { ticket })).json();
+  assert.equal((await call('session', 'POST', undefined, { ticket })).status, 401);
+  const saved = await (await call('snapshots', 'POST', token, { label: 'Original' })).json();
+  await writeFile(file, 'Edit before preview.');
+  const snapshot = 'snapshots/' + saved.id;
+  const stale = await (await call(snapshot + '/preview', 'GET', token)).json();
+  assert.deepEqual(stale.changes.map((change: { path: string; action: string }) => [change.path, change.action]), [['notes.txt', 'replace']]);
+  await writeFile(file, 'Edit after preview.');
+  assert.equal((await call(snapshot + '/restore', 'POST', token, { version: stale.version })).status, 409);
+  assert.equal(await readFile(file, 'utf8'), 'Edit after preview.');
+  const ready = await (await call(snapshot + '/preview', 'GET', token)).json();
+  assert.equal((await call(snapshot + '/restore', 'POST', token, { version: ready.version, taskId: randomUUID() })).status, 400);
+  const restored = await call(snapshot + '/restore', 'POST', token, { version: ready.version });
+  assert.equal(restored.status, 200);
+  assert((await restored.json()).undoSnapshotId);
+  assert.equal(await readFile(file, 'utf8'), 'Original text.');
+});
+
 test('restore uses the displayed workspace version and preserves a reversible snapshot of the previous bytes', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'kada-snapshot-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

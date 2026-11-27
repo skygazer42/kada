@@ -48,6 +48,8 @@ npm run harness -- voice play 会话ID reply-1
 
 ## 工作区快照
 
+`snapshots browser 任务ID` 生成原工作区的本机浏览器链接。页面可以保存快照、比对要恢复或移除的文件，再确认当前预览。恢复前的一份自动快照可用于撤销。 [验收](superpowers/plans/2026-11-26-workspace-snapshot-page.md)
+
 保存快照后可预览工作区的文件差异，再提交显示的 `version`。恢复会保存一个撤销快照，回执给出 `undoSnapshotId`，用同一预览与恢复入口可撤销这次操作。重叠任务还在执行或工作区在预览后发生编辑时，恢复返回当前冲突。[实现与验收](superpowers/plans/2026-11-26-workspace-snapshots.md)
 
 在后台配置加入 `"workspaceSnapshots": true` 后，新本机任务会在确认后的每个执行回合保存一个快照。默认保留最近十份自动快照，并保留手工快照与恢复历史引用的快照。

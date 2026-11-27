@@ -54,6 +54,7 @@ try {
     console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
     console.log('model browser --workspace 路径　生成本机项目模型设置链接。');
     console.log('mcp browser --workspace 路径　生成本机项目 MCP 工具设置链接。');
+    console.log('snapshots browser 任务ID　生成对应工作区的本机快照链接。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -179,10 +180,14 @@ try {
       const [taskId, value, version] = rest;
       const path = '/v1/tasks/' + segment(taskId) + '/snapshots';
       if (id === 'list' && rest.length === 1) result = await request(path);
+      else if (id === 'browser' && rest.length === 1) {
+        if (!await client.healthy('workspace-snapshot-page')) throw new Error('请重启到支持工作区快照页面的后台版本。');
+        result = await request(path + '/link', 'POST', {});
+      }
       else if (id === 'save' && value && rest.length === 2) result = await request(path, 'POST', { label: value });
       else if (id === 'preview' && rest.length === 2) result = await request(path + '/' + segment(value) + '/preview');
       else if (id === 'restore' && version && rest.length === 3) result = await request(path + '/' + segment(value) + '/restore', 'POST', { version });
-      else throw new Error('Use snapshots list TASK, save TASK LABEL, preview TASK SNAPSHOT or restore TASK SNAPSHOT VERSION.');
+      else throw new Error('Use snapshots list, browser, save, preview or restore. See help for arguments.');
     }
     else if (command === 'work-items') {
       const path = '/v1/work-items';

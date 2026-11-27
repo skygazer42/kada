@@ -1,13 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { projectRoot, type McpTools } from './mcp-tools.js';
-import { createProjectBrowserSessions } from './project-browser-sessions.js';
+import { createLocalBrowserSessions } from './local-browser-sessions.js';
 import { projectMcpPage } from './project-mcp-page.js';
 
 const prefix = '/project-mcp';
 
 export function createProjectMcpAccess(mcp: McpTools, origin: string, readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>) {
-  const host = new URL(origin).host, sessions = createProjectBrowserSessions();
+  const host = new URL(origin).host, sessions = createLocalBrowserSessions();
   async function link(workspace: string) {
     return { url: origin + prefix + '?open#' + sessions.ticket(await projectRoot(workspace)) };
   }
@@ -32,7 +32,7 @@ export function createProjectMcpAccess(mcp: McpTools, origin: string, readBody: 
       const token = sessions.exchange((await readBody(req)).ticket);
       return token ? send(200, { token }) : send(401, { error: 'Open the project tools again from Kada.' });
     }
-    const project = sessions.project(req.headers.authorization);
+    const project = sessions.scope(req.headers.authorization);
     if (!project) return send(401, { error: 'Open the project tools again from Kada.' });
     if (path === prefix + '/state' && req.method === 'GET') {
       const [tools, connections] = await Promise.all([mcp.projectTools(project), mcp.list()]);

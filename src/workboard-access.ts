@@ -2,14 +2,14 @@ import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { workboardPage } from './workboard-page.js';
 import { WorkItemError, type WorkItemRun, type WorkItems } from './work-items.js';
-import { createProjectBrowserSessions } from './project-browser-sessions.js';
+import { createLocalBrowserSessions } from './local-browser-sessions.js';
 
 const boardPrefix = '/workboard';
 
 export function createWorkboardAccess<T extends WorkItemRun>(items: WorkItems<T>, origin: string,
   readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>) {
   const host = new URL(origin).host;
-  const sessions = createProjectBrowserSessions();
+  const sessions = createLocalBrowserSessions();
   async function link(workspace: string) {
     const { project } = await items.board(workspace);
     // A new link must navigate even if the tab already shows the workboard.
@@ -37,7 +37,7 @@ export function createWorkboardAccess<T extends WorkItemRun>(items: WorkItems<T>
       if (!token) return send(401, { error: 'Open the workboard again from Kada.' });
       return send(200, { token });
     }
-    const project = sessions.project(req.headers.authorization);
+    const project = sessions.scope(req.headers.authorization);
     if (!project) return send(401, { error: 'Open the workboard again from Kada.' });
     if (path === boardPrefix + '/board') {
       if (req.method === 'GET') return send(200, await items.board(project, project));
