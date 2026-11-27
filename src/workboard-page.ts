@@ -24,6 +24,14 @@ export const workboardPage = String.raw`<!doctype html>
     #status { margin: 13px clamp(16px, 4vw, 48px) 0; min-height: 1.35em; color: #52615b; font-size: .875rem; }
     #status.error { color: #a32b28; }
     #board { display: flex; align-items: flex-start; gap: 14px; overflow-x: auto; padding: 12px clamp(16px, 4vw, 48px) 26px; }
+    #board.deadlines { display: block; max-width: 960px; }
+    #deadline-controls { margin: 10px clamp(16px, 4vw, 48px) 0; align-items: center; }
+    #deadline-controls[hidden] { display: none; }
+    #deadline-controls h2 { min-width: 7em; }
+    #deadlines[aria-pressed="true"] { border-color: #146857; color: #145d4b; background: #eaf0e9; }
+    .day { margin: 0 0 18px; }
+    .day h2 { margin: 0 0 8px; }
+    .day .cards { min-height: 0; padding: 0; }
     .column { min-width: min(290px, 84vw); max-width: 340px; flex: 1 0 290px; border-radius: 11px; background: #eaf0e9; border: 1px solid #dce4da; }
     .column.over { border-color: #146857; background: #dbeadf; }
     .column-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 12px 8px; }
@@ -54,10 +62,17 @@ export const workboardPage = String.raw`<!doctype html>
     <div id="toolbar" hidden>
       <button id="add-item" class="action primary" type="button">新建工作项</button>
       <button id="add-column" class="action" type="button">添加列</button>
+      <button id="deadlines" class="action" type="button" aria-pressed="false" aria-controls="board">截止日历</button>
       <button id="refresh" class="action" type="button">刷新</button>
     </div>
   </header>
   <p id="status" role="status" aria-live="polite">正在打开看板</p>
+  <div id="deadline-controls" class="actions" hidden>
+    <h2 id="deadline-month" aria-live="polite"></h2>
+    <button id="deadline-prev" class="action" type="button">上个月</button>
+    <button id="deadline-today" class="action" type="button">本月</button>
+    <button id="deadline-next" class="action" type="button">下个月</button>
+  </div>
   <main id="board" aria-label="项目工作项"></main>
   <dialog id="editor" aria-labelledby="editor-title">
     <div class="dialog-head"><h2 id="editor-title"></h2><button id="close-editor" class="action quiet" type="button">关闭</button></div>
@@ -71,6 +86,7 @@ export const workboardPage = String.raw`<!doctype html>
   const priorities = [['low','低'], ['normal','普通'], ['high','高'], ['urgent','紧急']];
   const statuses = [['open','待办'], ['parked','搁置'], ['done','已完成']];
   let token, board, busy = false, dragged;
+  let viewingDeadlines = false, agendaMonth = new Date();
   function element(parent, tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -206,8 +222,47 @@ export const workboardPage = String.raw`<!doctype html>
     }
     editor.showModal(); name.focus();
   }
+  function drawCard(row, item, column, includeZone = false) {
+    const card = element(row, 'button', undefined, 'card');
+    card.type = 'button';
+    card.addEventListener('click', () => itemEditor(item, column));
+    element(card, 'span', item.title, 'card-title');
+    const priority = priorities.find(pair => pair[0] === item.priority)?.[1];
+    const deadline = item.dueDate || (item.dueAt && new Intl.DateTimeFormat('zh-CN', {
+      dateStyle: 'short', timeStyle: 'short', timeZone: item.timeZone,
+    }).format(new Date(item.dueAt)));
+    const details = [item.priority !== 'normal' && priority && priority + '优先级', deadline,
+      includeZone && item.dueAt && item.timeZone].filter(Boolean);
+    if (details.length) element(card, 'span', details.join(' · '), 'meta');
+    return card;
+  }
+  function renderDeadlines() {
+    const month = String(agendaMonth.getFullYear()).padStart(4, '0') + '-' + String(agendaMonth.getMonth() + 1).padStart(2, '0');
+    get('deadline-month').textContent = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long' }).format(agendaMonth);
+    const entries = board.columns.flatMap(column => column.items.map(item => ({ item, column })))
+      .filter(({ item }) => item.dueDay?.startsWith(month + '-'))
+      .sort((a, b) => a.item.dueDay.localeCompare(b.item.dueDay) ||
+        (a.item.dueAt || '').localeCompare(b.item.dueAt || '') || a.item.title.localeCompare(b.item.title));
+    if (!entries.length) element(panel, 'p', '本月没有设定截止时间的工作项', 'empty');
+    let currentDay, cards;
+    for (const { item, column } of entries) {
+      if (item.dueDay !== currentDay) {
+        currentDay = item.dueDay;
+        const day = element(panel, 'section', undefined, 'day');
+        const title = element(day, 'h2', currentDay);
+        title.id = 'deadline-day-' + currentDay;
+        day.setAttribute('aria-labelledby', title.id);
+        cards = element(day, 'ol', undefined, 'cards');
+      }
+      drawCard(element(cards, 'li'), item, column, true);
+    }
+  }
   function render() {
     panel.replaceChildren();
+    panel.classList.toggle('deadlines', viewingDeadlines);
+    get('deadline-controls').hidden = !viewingDeadlines;
+    get('deadlines').setAttribute('aria-pressed', String(viewingDeadlines));
+    if (viewingDeadlines) { renderDeadlines(); return; }
     for (const column of board.columns) {
       const lane = element(panel, 'section', undefined, 'column');
       const head = element(lane, 'div', undefined, 'column-head');
@@ -220,15 +275,8 @@ export const workboardPage = String.raw`<!doctype html>
       if (!column.items.length) element(cards, 'li', '当前无工作项', 'empty');
       for (const item of column.items) {
         const row = element(cards, 'li'); row.dataset.item = item.id;
-        const card = element(row, 'button', undefined, 'card');
-        card.type = 'button'; card.draggable = true;
-        card.addEventListener('click', () => itemEditor(item, column));
-        element(card, 'span', item.title, 'card-title');
-        const priority = priorities.find(pair => pair[0] === item.priority)?.[1];
-        const deadline = item.dueDate || (item.dueAt && new Intl.DateTimeFormat('zh-CN', {
-          dateStyle: 'short', timeStyle: 'short', timeZone: item.timeZone,
-        }).format(new Date(item.dueAt)));
-        if (priority && item.priority !== 'normal' || deadline) element(card, 'span', [item.priority !== 'normal' && priority && priority + '优先级', deadline].filter(Boolean).join(' · '), 'meta');
+        const card = drawCard(row, item, column);
+        card.draggable = true;
         card.addEventListener('dragstart', event => {
           if (busy) { event.preventDefault(); return; }
           dragged = { itemId: item.id, itemRevision: item.revision, version: board.version };
@@ -255,6 +303,14 @@ export const workboardPage = String.raw`<!doctype html>
   }
   get('add-item').addEventListener('click', () => itemEditor());
   get('add-column').addEventListener('click', () => columnEditor());
+  get('deadlines').addEventListener('click', () => { viewingDeadlines = !viewingDeadlines; render(); });
+  function shiftMonth(offset) {
+    agendaMonth = new Date(agendaMonth.getFullYear(), agendaMonth.getMonth() + offset, 1);
+    render();
+  }
+  get('deadline-prev').addEventListener('click', () => shiftMonth(-1));
+  get('deadline-today').addEventListener('click', () => { agendaMonth = new Date(); render(); });
+  get('deadline-next').addEventListener('click', () => shiftMonth(1));
   get('refresh').addEventListener('click', () => void save(async () => {}, '已刷新', false));
   get('close-editor').addEventListener('click', () => editor.close());
   async function openBoard() {

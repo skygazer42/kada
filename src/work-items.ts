@@ -28,7 +28,8 @@ type StoredWorkItem = Omit<WorkItem, LegacyFields> & Partial<Pick<WorkItem, Lega
 };
 export type WorkItemRequest = { requestId: string; project: string };
 export type WorkBoardColumn = { id: string; title: string; status: WorkItemStatus };
-export type WorkBoard = { project: string; version: string; columns: Array<WorkBoardColumn & { items: WorkItem[] }> };
+type WorkBoardItem = WorkItem & { dueDay: string | null };
+export type WorkBoard = { project: string; version: string; columns: Array<WorkBoardColumn & { items: WorkBoardItem[] }> };
 type BoardReceipt = { version: string; columnId?: string; itemId?: string };
 type StoredBoard = { columns: WorkBoardColumn[]; order: Record<string, string[]>;
   operations: Array<{ requestId: string; fingerprint: string; receipt: BoardReceipt }> };
@@ -40,13 +41,14 @@ const defaultColumns: WorkBoardColumn[] = [
 
 function boardView(project: string, data: WorkItemData): WorkBoard {
   const saved = data.boards?.[project];
-  const columns = (saved?.columns ?? defaultColumns).map(column => ({ ...column, items: [] as WorkItem[] }));
+  const columns = (saved?.columns ?? defaultColumns).map(column => ({ ...column, items: [] as WorkBoardItem[] }));
   const byId = new Map(columns.map(column => [column.id, column]));
   for (const item of data.items) {
     if (item.project !== project || item.archived) continue;
     const card = view(item);
     const placed = item.boardColumn ? byId.get(item.boardColumn) : undefined;
-    (placed?.status === card.status ? placed : byId.get(card.status))?.items.push(card);
+    const dueDay = card.dueAt ? localCalendarDay(Date.parse(card.dueAt), card.timeZone) : card.dueDate;
+    (placed?.status === card.status ? placed : byId.get(card.status))?.items.push({ ...card, dueDay });
   }
   for (const column of columns) {
     const ranks = new Map((saved?.order[column.id] ?? []).map((id, rank) => [id, rank]));
@@ -139,12 +141,17 @@ function deadline(item: Pick<Planning, 'dueDate' | 'dueAt'>) {
   if (item.dueDate && item.dueAt) throw new WorkItemError(400, 'Choose a date-only or timed deadline; explicitly clear the previous kind when switching.');
 }
 
+function localCalendarDay(instant: number, timeZone: string) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(instant).map(part => [part.type, part.value]));
+  return `${parts.year!.padStart(4, '0')}-${parts.month}-${parts.day}`;
+}
+
 export function workItemOverdue(item: Pick<WorkItem, 'status' | 'archived' | 'dueDate' | 'dueAt' | 'timeZone'>, now = Date.now()): boolean {
   if (item.archived || item.status === 'done') return false;
   if (item.dueAt) return Date.parse(item.dueAt) < now;
   if (!item.dueDate) return false;
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone: item.timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now).map(part => [part.type, part.value]));
-  return item.dueDate < `${parts.year}-${parts.month}-${parts.day}`;
+  return item.dueDate < localCalendarDay(now, item.timeZone);
 }
 
 function revision(value: unknown): number {

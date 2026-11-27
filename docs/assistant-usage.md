@@ -138,6 +138,21 @@ npm run harness -- run "请研究员核对资料，再由主助手提交结果" 
 
 目前从本机终端和 owner API 操作。站立会话归属于原任务和来源会话，任务状态可查到原工作 ID、角色修订、用量和留下的文件。[协作契约与验收](specs/2026-11-26-assistant-collaboration.md)
 
+## 助手群组
+
+从项目的命名助手中选 2 到 8 位成员及修订。用成员 ID 点名答复。所有成员看到群组的近期公开消息，各自使用固定版本的指令、模型和 Pi 会话。回复期间可查看状态，新的消息等当前回复结清后发送。保存请求 ID 可查询或重试同一条消息。
+
+```powershell
+npm run harness -- rooms add "发布复核" 助手一ID@1 助手二ID@1 --workspace E:/project
+npm run harness -- rooms list
+npm run harness -- rooms send 群组ID 助手一ID "核对一下上一条发布说明" release-review-1
+npm run harness -- rooms show 群组ID
+```
+
+使用 `rooms edit 群组ID 修改.json` 改标题或成员。编辑文件带 `revision`，可附 `title` 或完整的 `members` 数组，每项为 `{ "id": "助手ID", "revision": 1 }`。旧修订请先重新读取。助手工具名单可选 `room_handoff`，让被点名的成员把本轮交给另一成员一次，原群组显示交棒和最终答复。
+
+本机通过 `rooms share 群组ID 账户ID 设备ID` 分享查看，通过 `rooms share-replies 群组ID 账户ID 设备ID` 授予发送权限。手机 Web 的 **Shared rooms** 打开同一群组。用 `rooms unshare-replies` 撤回发送权限，或用 `rooms unshare` 一并撤回查看和发送。 [源码与验收](superpowers/plans/2026-11-26-assistant-rooms.md)
+
 ## 应用 API 凭据
 
 新本机主会话可请求提供 API 凭据。卡片列出名称、用途、HTTPS 站点与认证方式；核对后输入 `/credential 问题ID`，再在终端的无回显提示中粘贴值。命令本身只填问题 ID。用 `/decline-credential 问题ID` 拒绝。macOS 已接入独立密码字段，编译与实机交互仍待验证。普通消息、选项答复和管道不能提供凭据；手机共享卡提示回本机处理。
@@ -224,6 +239,8 @@ npm run harness -- remote unshare-approval 任务ID 动作ID 账户ID 设备ID �
 配对手机连接或刷新后，在 **Action approvals** 查看脱敏参数和有效期，选择允许一次或拒绝。撤销分享会关闭该设备对这一项的审批权限。撤销设备配对后，重新配对须重新分享。
 
 ## 项目工作项
+
+项目看板的 **截止日历** 按月份展示已设日期的工作项。带时刻的卡片按其保存时区归到当天。点击同一张卡可编辑截止日期、时刻和时区，保存后日历随原工作项更新。 [截止日历验收](superpowers/plans/2026-11-26-project-workboard.md#截止日历增量)
 
 工作项保存项目范围、标题、目标和修订号。用一个工作项可以多次执行同一个项目任务，每次运行记录启动时采用的修订，原任务可以继续接回。`item.json` 包含 `workspace`、`title` 和 `objective`。编辑时用 `edit.json` 传入当前 `revision` 和要修改的字段。
 
