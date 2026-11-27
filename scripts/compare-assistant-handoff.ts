@@ -17,9 +17,12 @@ import { LocalRuntime } from '../src/runtime.js';
 
 const selfTest = process.argv.includes('--self-test');
 assert(selfTest !== process.argv.includes('--live'), 'Select --self-test or --live.');
-const selectedArm = process.argv.find(argument => /^--arm(?:=|$)/.test(argument))?.slice('--arm='.length);
-assert(selectedArm === undefined || selectedArm === 'pi' || selectedArm === 'kada', 'Select --arm=pi or --arm=kada.');
-const arms: readonly ('pi' | 'kada')[] = selectedArm ? [selectedArm] : ['pi', 'kada'];
+const armArgument = process.argv.find(argument => /^--arm(?:=|$)/.test(argument))?.slice('--arm='.length);
+const availableArms = ['pi', 'kada', 'kada-role'] as const;
+type ComparisonArm = typeof availableArms[number];
+const selectedArm = availableArms.find(arm => arm === armArgument);
+assert(armArgument === undefined || selectedArm, 'Select --arm=pi, --arm=kada or --arm=kada-role.');
+const arms: readonly ComparisonArm[] = selectedArm ? [selectedArm] : ['pi', 'kada'];
 const preference = 'For this project my daily report title preference is exactly "Daily brief | Iris-7391".';
 const question = 'Which release channel should I use?';
 const reply = 'Use the orchid release channel. Please finish the same report.';
@@ -71,7 +74,7 @@ function matchesJson(raw: string | null, expected: unknown): boolean {
   }
 }
 
-async function compare(arm: 'pi' | 'kada') {
+async function compare(arm: ComparisonArm) {
   const dataDir = join(directory, arm), workspace = join(dataDir, 'workspace'), home = join(dataDir, 'home');
   await Promise.all([mkdir(home, { recursive: true }), mkdir(workspace, { recursive: true })]);
   await Promise.all([...Object.entries(inputs), ['.kada-project', '']].map(([name, content]) => writeFile(join(workspace, name!), content!)));
@@ -168,6 +171,7 @@ async function compare(arm: 'pi' | 'kada') {
   const openKada = () => new LocalRuntime({ dataDir, port: 4317, model, maxSubagents: 1, maxDurationMs: limits.maxDurationMs,
     maxTotalTokens: limits.maxTotalTokens, review: false, web: false, discovery: true }, { models, discovery: { home }, extensions: [scope] });
   let pi: Harness | undefined, kada: LocalRuntime | undefined, draft: string | undefined;
+  let failure: { stage: string; reason: string } | undefined;
   let executionPassed = false;
   async function checkDraft() {
     stage = 'verify_draft_before_operator';
@@ -212,7 +216,10 @@ async function compare(arm: 'pi' | 'kada') {
       assert.equal(execution, 'done');
     } else {
       kada = openKada();
-      const task = await kada.create(objective, workspace, [{ type: 'file_exists', path: 'report.json' }], { skills: [] });
+      const role = arm === 'kada-role' ? await kada.assistants.create({ workspace, name: 'Report assistant',
+        instructions: 'Complete the original user request.', tools: ['read', 'write', 'task_blocked', 'task_submit'] }) : undefined;
+      const task = await kada.create(objective, workspace, [{ type: 'file_exists', path: 'report.json' }], { skills: [],
+        ...(role ? { assistant: { id: role.id, revision: role.revision } } : {}) });
       const first = await wait(task.id);
       execution = first.status;
       evidence.pausedForOperator = execution === 'waiting_user' && sawQuestion(first.goal?.question ?? undefined);
@@ -240,7 +247,10 @@ async function compare(arm: 'pi' | 'kada') {
     assert.equal(userContinuationMessages, 1);
     executionPassed = true;
   } catch (error) {
-    console.error(JSON.stringify({ arm, stage, failure: error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed',
+    const reason = deadline.aborted ? 'deadline_exceeded' : error instanceof assert.AssertionError ? 'independent_assertion_failed' : 'operation_failed';
+    failure = { stage, reason };
+    if (deadline.aborted) execution = 'timed_out';
+    console.error(JSON.stringify({ arm, stage, failure: reason,
       ...(selfTest && error instanceof Error ? { diagnostic: error.message } : {}) }));
   } finally {
     await pi?.close(ctx);
@@ -257,7 +267,7 @@ async function compare(arm: 'pi' | 'kada') {
   const draftMatches = matchesJson(finalDraft, expectedDraft);
   const reportMatches = matchesJson(finalReport, expectedReport);
   const verifiedResult = executionPassed && inputsPreserved && draftPreserved === true && reportMatches;
-  return { arm, execution, elapsedMs: Date.now() - startedAt, modelRequests, providerErrors, firstRequestTools, usage, estimatedCostUsd: null,
+  return { arm, execution, ...(failure ? { failure } : {}), elapsedMs: Date.now() - startedAt, modelRequests, providerErrors, firstRequestTools, usage, estimatedCostUsd: null,
     userContinuationMessages, reworks, nativeCalls, ...evidence, inputsPreserved, draftPreserved, draftMatches, reportMatches,
     verifiedResult, passed: verifiedResult };
 }
