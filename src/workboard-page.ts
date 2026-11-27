@@ -170,12 +170,20 @@ export const workboardPage = String.raw`<!doctype html>
     const title = field(form, '名称', item?.title || '', 120);
     const objective = field(form, '任务说明', item?.objective || '', 32000, 'textarea');
     const priority = selectField(form, '优先级', priorities, item?.priority || 'normal');
+    const key = assistant => assistant.id + '@' + assistant.revision;
+    const available = board.assistants || [];
+    const current = item?.assignee;
+    const candidates = current && !available.some(assistant => key(assistant) === key(current)) ? [current, ...available] : available;
+    const assignment = selectField(form, '分配助手', [['', '未分配'], ...candidates.map(assistant =>
+      [key(assistant), assistant.name + ' · 修订 ' + assistant.revision])], current ? key(current) : '');
     const date = field(form, '截止日期或时刻', item?.dueDate || item?.dueAt || '', 80, 'input', false);
     date.placeholder = 'YYYY-MM-DD 或带时区偏移的 ISO 时刻';
     const zone = field(form, '时区', item?.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', 128);
     formSubmit(form, '保存工作项', () => {
       const deadline = date.value.trim(), day = /^\d{4}-\d{2}-\d{2}$/.test(deadline);
+      const selected = candidates.find(assistant => key(assistant) === assignment.value);
       const details = { title: title.value, objective: objective.value, priority: priority.value,
+        assignee: selected ? { id: selected.id, revision: selected.revision } : null,
         dueDate: day ? deadline : null, dueAt: deadline && !day ? deadline : null, timeZone: zone.value,
         requestId, ...(item ? { revision: item.revision } : {}) };
       void save(() => request(item ? 'items/' + item.id : 'items', item ? 'PATCH' : 'POST', details), '已保存工作项');
@@ -232,7 +240,7 @@ export const workboardPage = String.raw`<!doctype html>
       dateStyle: 'short', timeStyle: 'short', timeZone: item.timeZone,
     }).format(new Date(item.dueAt)));
     const details = [item.priority !== 'normal' && priority && priority + '优先级', deadline,
-      includeZone && item.dueAt && item.timeZone].filter(Boolean);
+      includeZone && item.dueAt && item.timeZone, item.assignee?.name].filter(Boolean);
     if (details.length) element(card, 'span', details.join(' · '), 'meta');
     return card;
   }

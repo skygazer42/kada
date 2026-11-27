@@ -206,7 +206,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (typeof workspace !== 'string') throw new Error('Provide the project workspace.');
         return send(201, await workboard.link(workspace));
       }
-      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|share|unshare|share-replies|unshare-replies|share-controls|unshare-controls))?$/.exec(url.pathname);
+      const workItem = /^\/v1\/work-items\/([a-f0-9-]{36})(?:\/(runs|(?:un)?share(?:-(?:replies|controls|edits))?))?$/.exec(url.pathname);
       if (workItem) {
         const id = workItem[1]!;
         if (workItem[2] === 'runs') {
@@ -217,7 +217,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
           if (typeof accountId !== 'string' || typeof deviceId !== 'string') throw new Error('Provide accountId and deviceId.');
           const shared = workItem[2].startsWith('share');
           if (shared) await runtime.workItems.get(id);
-          const access = workItem[2].endsWith('-replies') ? 'replies' : workItem[2].endsWith('-controls') ? 'controls' : 'view';
+          const access = workItem[2].split('-')[1] as 'replies' | 'controls' | 'edits' | undefined;
           return send(200, await devices.setSharedWorkItem(accountId, deviceId, id, shared, access));
         } else if (!workItem[2] && req.method === 'PATCH') return send(200, await runtime.workItems.update(id, await body(req)));
       }

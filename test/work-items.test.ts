@@ -21,6 +21,51 @@ async function directories(t: TestContext) {
 
 type Run = WorkItemRun & { objective: string; workspace: string; confirmed: boolean };
 
+test("a paired editor updates one original work item with its revision and a durable receipt", async t => {
+  const { directory, workspace } = await directories(t);
+  const fixture = await scriptedFixture(() => fauxAssistantMessage('No work item run should start.'));
+  t.after(() => fixture.close());
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const server = await serve({ ...fixture.settings, port, dataDir: directory }, { models: fixture.models });
+  try {
+    const base = `http://127.0.0.1:${port}`, ownerToken = (await readFile(join(directory, "token"), "utf8")).trim();
+    const request = (path: string, bearer: string, method = 'GET', input?: unknown) => fetch(base + path, {
+      method, headers: { Authorization: 'Bearer ' + bearer, 'Content-Type': 'application/json' },
+      ...(input === undefined ? {} : { body: JSON.stringify(input) }),
+    });
+    const card = await server.runtime.workItems.create({ workspace, title: 'Original title', objective: 'Original work.' });
+    const pairing = { accountId: 'owner', deviceId: 'editor' };
+    const grant = (kind: string) => request('/v1/work-items/' + card.id + '/' + kind, ownerToken, 'POST', pairing);
+    const phone = await (await request('/v1/remote/devices', ownerToken, 'POST', pairing)).json();
+    const path = '/remote/api/work-items/' + card.id;
+    const edit = { revision: card.revision, requestId: 'mobile-update', title: 'Edited on phone', priority: 'urgent' };
+    assert.equal((await grant('share-edits')).status, 409);
+    assert.equal((await grant('share')).status, 200);
+    assert.equal((await request(path, phone.token, 'PATCH', edit)).status, 403);
+    assert.equal((await grant('share-edits')).status, 200);
+    assert.equal((await (await request(path, phone.token)).json()).canEdit, true);
+    assert.equal((await request(path, phone.token, 'PATCH', { ...edit, assignee: null })).status, 400);
+    assert.equal((await request(path, phone.token, 'PATCH', { ...edit, revision: 2 })).status, 409);
+    const changed = await (await request(path, phone.token, 'PATCH', edit)).json();
+    assert.equal(changed.id, card.id);
+    assert.equal(changed.title, edit.title);
+    assert.equal(changed.priority, edit.priority);
+    assert.equal(changed.revision, 2);
+    assert(!Object.hasOwn(changed, 'workspace'));
+    await server.runtime.workItems.update(card.id, { revision: 2, title: 'Later owner edit' });
+    assert.deepEqual(await (await request(path, phone.token, 'PATCH', edit)).json(), changed);
+    assert.equal((await server.runtime.workItems.get(card.id)).title, 'Later owner edit');
+    assert.deepEqual(await server.runtime.workItems.runs(card.id), []);
+    assert.equal((await grant('unshare')).status, 200);
+    assert.equal((await request(path, phone.token, 'PATCH', edit)).status, 404);
+    assert.equal((await grant('share')).status, 200);
+    assert.equal((await request(path, phone.token, 'PATCH', edit)).status, 403);
+  } finally { await server.close(); }
+});
+
 test("the authenticated work item API replays original tasks after editing and restarting", async t => {
   const { directory, project, workspace, other } = await directories(t);
   const fixture = await scriptedFixture(() => fauxAssistantMessage(

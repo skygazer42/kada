@@ -219,6 +219,7 @@ let selectedWorkItem = "";
 let selectedWorkItemRun = "";
 const workItemAnswerForms = new Map();
 const workItemControlRequests = new Set();
+const workItemEditForms = new Map();
 let sharedThreadListVersion = 0;
 let sharedThreadVersion = 0;
 let sharedThreadListSnapshot = "";
@@ -466,6 +467,7 @@ function clearWorkItems() {
   workItemsVersion++;
   workItemAnswerForms.clear();
   workItemControlRequests.clear();
+  workItemEditForms.clear();
   workItemList.replaceChildren();
   workItemsPanel.hidden = true;
   selectWorkItem("");
@@ -908,6 +910,8 @@ async function refreshWorkItems() {
     return;
   }
   if (!current()) return;
+  const allowed = new Set(rows.map(row => row.id));
+  for (const id of workItemEditForms.keys()) if (!allowed.has(id)) workItemEditForms.delete(id);
   const selected = rows.some(row => row.id === selectedWorkItem) ? selectedWorkItem : "";
   workItemList.replaceChildren();
   for (const row of rows) {
@@ -956,6 +960,10 @@ async function refreshWorkItem(id, device) {
   element("p", "Todo: " + workItemState(workItem), workItemDetail);
   element("p", workItemPlanning(workItem), workItemDetail);
   element("p", workItem.objective, workItemDetail);
+  if (workItem.canEdit) {
+    const edit = element("div", "", workItemDetail);
+    renderWorkItemEdit(edit, workItem, device);
+  } else workItemEditForms.delete(id);
   if (!workItem.runs.some(run => run.id === selectedWorkItemRun)) selectedWorkItemRun = "";
   if (!workItem.runs.length) {
     element("p", "No runs yet.", workItemDetail);
@@ -989,6 +997,91 @@ async function refreshWorkItem(id, device) {
     if (!panel.hidden) selectedPanel = panel;
   }
   if (selectedPanel) await refreshWorkItemRun(id, selectedWorkItemRun, selectedPanel, current);
+}
+
+function renderWorkItemEdit(host, item, device) {
+  const id = item.id;
+  const current = () => device === identity && id === selectedWorkItem && host.parentNode === workItemDetail;
+  let draft = workItemEditForms.get(id);
+  const open = () => {
+    draft = { revision: item.revision, title: item.title, objective: item.objective, status: item.status,
+      priority: item.priority, deadline: item.dueDate || item.dueAt || "", zone: item.timeZone };
+    workItemEditForms.set(id, draft);
+    renderWorkItemEdit(host, item, device);
+  };
+  host.replaceChildren();
+  if (!draft) { action("Edit work item", host, open); return; }
+  const form = element("form", "", host);
+  const controls = [];
+  const input = (key, label, tag, max) => {
+    const control = element(tag, "", element("label", label, form));
+    control.value = draft[key];
+    control.required = key !== "deadline";
+    control.maxLength = max;
+    controls.push(control);
+    control.addEventListener("input", () => { draft[key] = control.value; });
+  };
+  const select = (key, label, choices) => {
+    const control = element("select", "", element("label", label, form));
+    for (const [value, text] of choices) element("option", text, control).value = value;
+    control.value = draft[key];
+    controls.push(control);
+    control.addEventListener("change", () => { draft[key] = control.value; });
+  };
+  input("title", "Work item title", "input", 120);
+  input("objective", "Work item description", "textarea", 32000);
+  select("status", "Status", [["open", "Open"], ["parked", "Parked"], ["done", "Done"]]);
+  select("priority", "Priority", [["low", "Low"], ["normal", "Normal"], ["high", "High"], ["urgent", "Urgent"]]);
+  input("deadline", "Deadline (date or ISO time)", "input", 80);
+  input("zone", "Time zone", "input", 128);
+  const save = element("button", "Save work item", form);
+  save.type = "submit";
+  save.disabled = !!draft.saving;
+  action("Cancel edit", form, () => {
+    if (draft.saving) return;
+    workItemEditForms.delete(id);
+    renderWorkItemEdit(host, item, device);
+  });
+  if (draft.revision !== item.revision) action("Load current fields", form, () => { if (!draft.saving) open(); });
+  const setSaving = value => {
+    draft.saving = save.disabled = value;
+    for (const control of controls) control.disabled = value;
+  };
+  setSaving(!!draft.saving);
+  const feedback = element("p", draft.feedback || "", form);
+  feedback.setAttribute("role", "status");
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!current() || draft.saving) return;
+    const deadline = draft.deadline.trim(), dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(deadline);
+    const fields = { revision: draft.revision, title: draft.title, objective: draft.objective, status: draft.status,
+      priority: draft.priority, dueDate: dateOnly ? deadline : null, dueAt: deadline && !dateOnly ? deadline : null, timeZone: draft.zone };
+    const fingerprint = JSON.stringify(fields);
+    if (draft.fingerprint !== fingerprint) {
+      draft.fingerprint = fingerprint;
+      draft.requestId = crypto.randomUUID();
+    }
+    setSaving(true);
+    feedback.textContent = "Saving…";
+    let refresh = false;
+    try {
+      await request("/work-items/" + encodeURIComponent(id), {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...fields, requestId: draft.requestId }),
+      });
+      if (workItemEditForms.get(id) === draft) workItemEditForms.delete(id);
+      refresh = true;
+    } catch (error) {
+      if (current()) {
+        draft.feedback = error instanceof RequestError ? error.message : "Connection lost. Save again to check the original edit.";
+        feedback.textContent = draft.feedback;
+        refresh = error instanceof RequestError && [403, 404, 409].includes(error.status);
+      }
+    } finally {
+      setSaving(false);
+    }
+    if (current() && refresh) await refreshWorkItems();
+  });
 }
 
 async function refreshWorkItemRun(workItemId, runId, panel, currentWorkItem) {

@@ -16,7 +16,7 @@ import { QuestionError } from './questions.js';
 import { readJson, redactCredentials, SerialQueue } from "./util.js";
 import { RoomError } from './assistant-rooms.js';
 import { Workspace } from "./workspace.js";
-import { workItemOverdue, type WorkItem } from './work-items.js';
+import { WorkItemError, workItemOverdue, type WorkItem } from './work-items.js';
 
 function sharedWorkItem(item: WorkItem) {
   const { id, title, revision, updatedAt, status, archived, completedAt, priority, dueDate, dueAt, timeZone } = item;
@@ -31,6 +31,7 @@ export interface RemoteDevice {
   sharedWorkItems?: string[];
   sharedWorkItemReplies?: string[];
   sharedWorkItemControls?: string[];
+  sharedWorkItemEdits?: string[];
   sharedThreads?: { taskId: string; replies?: true; controls?: true }[];
 }
 
@@ -859,14 +860,29 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
         if (result !== true) send(response, 200, result);
       } else if (options.sharedDevices && workItem) {
         const [, id, runId, action] = workItem;
-        if (method !== (action ? "POST" : "GET")) throw new HttpError(405, "This method is unavailable for shared work items.");
-        const input = action ? await json(request) : undefined;
+        const editing = method === 'PATCH' && id !== undefined && !runId;
+        if (!editing && method !== (action ? "POST" : "GET")) throw new HttpError(405, "This method is unavailable for shared work items.");
+        const input = action || editing ? await json(request) : undefined;
         const result = await options.sharedDevices.withPairedDevice(tokenHash, async device => {
           const grants = device.sharedWorkItems ?? [];
           if (id === undefined) {
             return (await runtime.workItems.shared(grants)).map(sharedWorkItem);
           }
           if (!grants.includes(id)) throw new HttpError(404, "Shared work item not found.");
+          const canEdit = device.sharedWorkItemEdits?.includes(id);
+          if (editing && input) {
+            if (!canEdit) throw new HttpError(403, 'The host has not shared editing access to this work item.');
+            const { requestId, ...fields } = input;
+            const allowed = ['revision', 'title', 'objective', 'status', 'priority', 'dueDate', 'dueAt', 'timeZone'];
+            if (typeof requestId !== 'string' || !idPattern.test(requestId) || Object.keys(fields).some(key => !allowed.includes(key))) {
+              throw new HttpError(400, 'Provide a request ID and valid planning fields for this work item.');
+            }
+            const original = await runtime.workItems.get(id);
+            const receipt = await runtime.workItems.update(id, fields, {
+              project: original.project, requestId: digest(JSON.stringify(['shared-work-item-edit', pairingId, requestId])),
+            });
+            return { ...sharedWorkItem(receipt), objective: receipt.objective };
+          }
           if (runId) {
             const meta = await runtime.metadata(runId).catch(error => {
               if (isMissing(error)) throw new HttpError(404, "Shared work item run not found.");
@@ -928,7 +944,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
             };
           }));
           runs.sort((a, b) => Number(b.pending) - Number(a.pending) || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
-          return { ...sharedWorkItem(item), objective: item.objective, runs: runs.map(({ pending, createdAt, ...run }) => run) };
+          return { ...sharedWorkItem(item), objective: item.objective, ...(canEdit ? { canEdit: true } : {}),
+            runs: runs.map(({ pending, createdAt, ...run }) => run) };
         });
         if (!result) throw new HttpError(401, "Enter this device’s pairing token.");
         send(response, 200, result);
@@ -1060,7 +1077,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
     } catch (error) {
       if (response.destroyed) return true;
       if (response.headersSent) response.destroy();
-      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError || error instanceof RoomError) send(response, error.status, { error: error.message });
+      else if (error instanceof HttpError || error instanceof RemotePushError || error instanceof DelegationInputError || error instanceof ApprovalError || error instanceof TaskConflictError || error instanceof QuestionError || error instanceof RoomError || error instanceof WorkItemError) send(response, error.status, { error: error.message });
       else send(response, 500, { error: "The portal could not complete this request." });
     }
     return true;

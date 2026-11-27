@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { memoryProject } from "./memory-sources.js";
 import { atomicJson, readJson, SerialQueue } from "./util.js";
 import { explicitInstant } from './routine-schedule.js';
+import { assistantRef, type AssistantRef, type Assistants } from './assistants.js';
 
 export type WorkItemLink = { id: string; revision: number };
 export type WorkItemRun = { id: string; workItem?: WorkItemLink; preparation?: boolean };
 export type WorkItemStatus = 'open' | 'parked' | 'done';
 export type WorkItemPriority = 'low' | 'normal' | 'high' | 'urgent';
+type WorkItemAssignee = AssistantRef & { name: string };
 type Planning = { priority: WorkItemPriority; dueDate: string | null; dueAt: string | null; timeZone: string };
 export type WorkItem = WorkItemLink & {
   project: string;
@@ -18,6 +20,7 @@ export type WorkItem = WorkItemLink & {
   status: WorkItemStatus;
   archived: boolean;
   completedAt: number | null;
+  assignee?: WorkItemAssignee;
   createdAt: number;
   updatedAt: number;
 } & Planning;
@@ -62,9 +65,17 @@ function boardView(project: string, data: WorkItemData): WorkBoard {
 function view(item: StoredWorkItem): WorkItem {
   const { id, revision, project, workspace, title, objective, createdAt, updatedAt } = item;
   return { id, revision, project, workspace, title, objective, createdAt, updatedAt,
+    ...(item.assignee ? { assignee: item.assignee } : {}),
     priority: item.priority ?? 'normal', dueDate: item.dueDate ?? null, dueAt: item.dueAt ?? null, timeZone: item.timeZone ?? 'UTC',
     status: item.status ?? 'open', archived: item.archived ?? false, completedAt: item.completedAt ?? null };
 }
+
+function assignment(value: unknown): AssistantRef | null | undefined {
+  if (value === undefined || value === null) return value;
+  return assistantRef(value);
+}
+
+function assigneeView({ id, revision, name }: WorkItemAssignee): WorkItemAssignee { return { id, revision, name }; }
 
 function status(value: unknown): WorkItemStatus {
   if (value !== 'open' && value !== 'parked' && value !== 'done') throw new WorkItemError(400, 'Work item status must be open, parked or done.');
@@ -180,8 +191,13 @@ export class WorkItems<T extends WorkItemRun> {
   private readonly path: string;
   private readonly changes = new SerialQueue();
 
-  constructor(dataDir: string, private readonly runtime: RunAdapter<T>) {
+  constructor(dataDir: string, private readonly runtime: RunAdapter<T>, private readonly assistants?: Pick<Assistants, 'list' | 'select'>) {
     this.path = join(dataDir, "work-items.json");
+  }
+
+  private async pickAssignee(workspace: string, ref: AssistantRef) {
+    if (!this.assistants) throw new WorkItemError(400, 'The project assistant directory is unavailable.');
+    return assigneeView(await this.assistants.select(workspace, ref));
   }
 
   private async loadData(): Promise<WorkItemData> {
@@ -222,10 +238,11 @@ export class WorkItems<T extends WorkItemRun> {
     return (await this.load()).filter(item => ids.includes(item.id)).map(view);
   }
 
-  async board(workspace: string, expectedProject?: string): Promise<WorkBoard> {
-    const { project } = await projectFor(workspace);
+  async board(workspace: string, expectedProject?: string) {
+    const location = await projectFor(workspace), { project } = location;
     if (expectedProject !== undefined && expectedProject !== project) throw new WorkItemError(409, 'The original workboard project changed.');
-    return boardView(project, await this.loadData());
+    const [data, assistants] = await Promise.all([this.loadData(), this.assistants?.list(location.workspace, project)]);
+    return { ...boardView(project, data), assistants: assistants?.filter(assistant => !assistant.archived).map(assigneeView) ?? [] };
   }
 
   async editBoard(workspace: string, input: unknown, expectedProject?: string): Promise<BoardReceipt> {
@@ -302,22 +319,26 @@ export class WorkItems<T extends WorkItemRun> {
 
   async create(input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
     requestKey(request);
-    const value = fields(input, ["workspace", "title", "objective", "status", 'priority', 'dueDate', 'dueAt', 'timeZone']);
+    const value = fields(input, ["workspace", "title", "objective", "status", 'priority', 'dueDate', 'dueAt', 'timeZone', 'assignee']);
     const title = text(value.title, "title", 120);
     const objective = text(value.objective, "objective", 32_000);
     const workspace = text(value.workspace, 'workspace', 4096), state = value.status === undefined ? 'open' : status(value.status);
     const plan = planning(value);
+    const assigned = assignment(value.assignee);
     deadline({ dueDate: plan.dueDate ?? null, dueAt: plan.dueAt ?? null });
     // Keep the original digest when planning fields are absent, including pre-upgrade replays.
-    const fingerprint = createHash('sha256').update(JSON.stringify(['create', workspace, title, objective, state, request?.project, ...(Object.keys(plan).length ? [plan] : [])])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify(['create', workspace, title, objective, state, request?.project,
+      ...(Object.keys(plan).length ? [plan] : []), ...(assigned === undefined ? [] : [{ assignee: assigned }])])).digest('hex');
     return this.changes.run(async () => {
       const data = await this.loadData(), items = data.items;
       const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
       if (receipt) return receipt;
       const location = await projectFor(workspace);
       if (request && location.project !== request.project) throw new WorkItemError(409, 'The original work item project changed.');
+      const assignee = assigned ? await this.pickAssignee(location.workspace, assigned) : undefined;
       const now = Date.now();
       const item: WorkItem = { ...location, id: randomUUID(), title, objective, status: state, archived: false,
+        ...(assignee ? { assignee } : {}),
         priority: 'normal', dueDate: null, dueAt: null, timeZone: 'UTC', ...plan,
         completedAt: state === 'done' ? now : null, revision: 1, createdAt: now, updatedAt: now };
       await this.saveData({ ...data, items: [...items, { ...item, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: item }] } : {}) }] });
@@ -327,7 +348,7 @@ export class WorkItems<T extends WorkItemRun> {
 
   async update(id: string, input: unknown, request?: WorkItemRequest): Promise<WorkItem> {
     requestKey(request);
-    const value = fields(input, ["revision", "title", "objective", "status", "archived", 'priority', 'dueDate', 'dueAt', 'timeZone']);
+    const value = fields(input, ["revision", "title", "objective", "status", "archived", 'priority', 'dueDate', 'dueAt', 'timeZone', 'assignee']);
     const expected = revision(value.revision);
     const title = value.title === undefined ? undefined : text(value.title, "title", 120);
     const objective = value.objective === undefined ? undefined : text(value.objective, "objective", 32_000);
@@ -335,8 +356,10 @@ export class WorkItems<T extends WorkItemRun> {
     if (value.archived !== undefined && typeof value.archived !== 'boolean') throw new WorkItemError(400, 'The archived setting must be a boolean.');
     const archived = value.archived as boolean | undefined;
     const plan = planning(value);
-    if (title === undefined && objective === undefined && state === undefined && archived === undefined && !Object.keys(plan).length) throw new WorkItemError(400, "Provide work item fields to update.");
-    const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, title, objective, state, archived, request?.project, ...(Object.keys(plan).length ? [plan] : [])])).digest('hex');
+    const assigned = assignment(value.assignee);
+    if (title === undefined && objective === undefined && state === undefined && archived === undefined && assigned === undefined && !Object.keys(plan).length) throw new WorkItemError(400, "Provide work item fields to update.");
+    const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, title, objective, state, archived, request?.project,
+      ...(Object.keys(plan).length ? [plan] : []), ...(assigned === undefined ? [] : [{ assignee: assigned }])])).digest('hex');
     return this.changes.run(async () => {
       const data = await this.loadData(), items = data.items;
       const receipt = request ? replay(items, request.requestId, fingerprint) : undefined;
@@ -346,9 +369,14 @@ export class WorkItems<T extends WorkItemRun> {
       if (item.revision !== expected) throw new WorkItemError(409, "The work item changed. Read its latest revision.");
       const previous = view(item), next = { ...previous, title: title ?? previous.title, objective: objective ?? previous.objective,
         status: state ?? previous.status, archived: archived ?? previous.archived, ...plan };
+      if (assigned === null) delete next.assignee;
+      else if (assigned && (assigned.id !== previous.assignee?.id || assigned.revision !== previous.assignee.revision)) {
+        next.assignee = await this.pickAssignee(item.workspace, assigned);
+      }
       deadline(next);
       const changed = next.title !== previous.title || next.objective !== previous.objective || next.status !== previous.status || next.archived !== previous.archived ||
-        next.priority !== previous.priority || next.dueDate !== previous.dueDate || next.dueAt !== previous.dueAt || next.timeZone !== previous.timeZone;
+        next.priority !== previous.priority || next.dueDate !== previous.dueDate || next.dueAt !== previous.dueAt || next.timeZone !== previous.timeZone ||
+        next.assignee !== previous.assignee;
       if (!changed && !request) return previous;
       if (changed) {
         next.revision++; next.updatedAt = Date.now();

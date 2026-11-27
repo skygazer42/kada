@@ -228,8 +228,9 @@ export class LocalRuntime {
       }),
       start: (item, { id, confirmed, workItem }) => this.create(item.objective, item.workspace, [], {
         id, prepare: !confirmed, workItem,
+        ...(item.assignee ? { assistant: { id: item.assignee.id, revision: item.assignee.revision } } : {}),
       }),
-    });
+    }, this.assistants);
     this.inbox = new NotificationStore(config.dataDir);
     this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
       try { return await this.taskOverview(id); }

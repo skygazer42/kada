@@ -52,7 +52,7 @@ export class RemoteDevices {
     });
   }
 
-  async setSharedWorkItem(accountId: string, deviceId: string, id: string, shared: boolean, access: 'view' | 'replies' | 'controls' = 'view') {
+  async setSharedWorkItem(accountId: string, deviceId: string, id: string, shared: boolean, access: 'view' | 'replies' | 'controls' | 'edits' = 'view') {
     this.validate(accountId, deviceId);
     return this.changes.run(async () => {
       const devices = await this.credentials();
@@ -61,13 +61,15 @@ export class RemoteDevices {
       if (access !== 'view' && shared && !device.sharedWorkItems?.includes(id)) {
         throw Object.assign(new Error('Share this work item for viewing before granting interaction access.'), { status: 409 });
       }
-      const field = access === 'view' ? 'sharedWorkItems' : access === 'replies' ? 'sharedWorkItemReplies' : 'sharedWorkItemControls';
+      const field = ({ view: 'sharedWorkItems', replies: 'sharedWorkItemReplies', controls: 'sharedWorkItemControls',
+        edits: 'sharedWorkItemEdits' } as const)[access];
       const items = device[field] ?? [];
       if (items.includes(id) === shared) return { shared };
       device[field] = shared ? [...items, id] : items.filter(item => item !== id);
       if (access === 'view' && !shared) {
         device.sharedWorkItemReplies = device.sharedWorkItemReplies?.filter(item => item !== id);
         device.sharedWorkItemControls = device.sharedWorkItemControls?.filter(item => item !== id);
+        device.sharedWorkItemEdits = device.sharedWorkItemEdits?.filter(item => item !== id);
       }
       await atomicJson(this.path, devices);
       return { shared };

@@ -1,0 +1,17 @@
+# 工作项分配具名助手
+
+Suparagent 工作项保存独立的角色引用，新增或更换时核验原 owner。实际开工用工作项修订和一次请求生成原运行。Kada 将单一角色限定在同项目的命名助手，并在开工时沿原 Pi 任务入口固定指令、模型和工具权限。 [分配字段](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/db/models/work_item.py#L42) · [原 owner 校验](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_planner.py#L59) · [原工作项启动](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/routers/work_planner.py#L37)
+
+- 工作项保存助手 ID、修订和当时的名称。选择、改派和清空沿同一个保存入口和原修订。用户可用本机看板、工作项 API 或普通聊天更新。保存分配后由用户从原工作项发起运行。
+- 新运行验证当前角色可用，并固定当时选定的原版本。配置变更后可重新分配。已有运行及其明确重试沿原任务保存的版本和确认。
+- 验证跨项目拒绝、改派/清空、重启后原收据、角色修订冲突与看板实际选择。 [计划回归](../../../test/work-item-assignee.test.ts)
+
+## 配对手机编辑
+
+本机对每个配对设备单独授予原工作项的编辑权。手机可以保存名称、说明、状态、优先级、日期或时刻及其时区。原工作项 ID、当前修订和这台设备的请求 ID 一起校验，保存走原工作项的原子回执。编辑权限沿查看撤回，助手选择与运行确认沿各自入口。 [Suparagent 原编辑表单](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/frontend/components/chat/WorkItemEditor.tsx#L46) · [并发修订检查](https://github.com/Anil-matcha/suparagent/blob/f2ae9d0f5cc4/backend/app/services/work_planner.py#L96)
+
+## 验收
+
+- 本机验证同项目助手目录、固定修订、重启接回原工作及档案变更后的重放。Chromium 验证看板分配、重载和清空原卡片。[工作项回归](../../../test/work-item-assignee.test.ts)
+- 硅基流动 DeepSeek V3.2 先保存并分配一张待办，用户启动原卡后，所选助手生成待确认方案。首次准备因夹具缺文件与格式要求进入澄清，补齐合成 `sample.json` 后通路通过。 [实测记录](../../experiments/2026-11-26-work-item-assignee-siliconflow.json)
+- 手机接口验证不同授权、同一请求重试、旧修订和撤回。Chromium 验证本机并发修改后保留手机草稿，再显式加载原卡片的最新字段。 [手机接口回归](../../../test/work-items.test.ts) · [浏览器验收](../../experiments/2026-11-26-work-item-mobile-edit-browser.json)

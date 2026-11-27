@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "environment": "Windows, local Chromium, agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "checks": {
+    "viewOnlyDeviceHadNoEditor": true,
+    "editGrantOpenedTheOriginalCard": true,
+    "phoneUpdatedTitlePriorityAndZonedDeadlineOnSameId": true,
+    "revisionConflictKeptMobileDraft": true,
+    "explicitReloadLoadedTheOwnerRevision": true,
+    "revokingEditLeftViewAndHidTheForm": true,
+    "boardAssigneeSurvivedReloadAndClearedOnOriginalCard": true
+  }
+}
