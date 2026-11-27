@@ -202,6 +202,13 @@ export class ProviderSettings {
     });
   }
 
+  async projectDefault(workspace: string, fallback?: ModelRef) {
+    const project = await projectKey(workspace);
+    const settings = await this.read();
+    const override = settings.projectModels?.[project] ?? null;
+    return { project, override, selected: override ?? settings.model ?? fallback ?? null };
+  }
+
   async list(defaultModel?: ModelRef, workspace?: string) {
     const project = workspace === undefined ? undefined : await projectKey(workspace);
     const settings = await this.read();

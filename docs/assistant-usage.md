@@ -190,6 +190,8 @@ npm run harness -- credentials remove reports 1 --workspace E:/project
 
 ## 模型与方法
 
+`model browser --workspace 路径` 生成该项目的本机模型设置链接。浏览器显示当前生效模型，支持检查连接、保存项目覆盖和恢复全局值。 [验收](superpowers/plans/2026-11-26-project-model-page.md)
+
 从当前工作区导入自写或已核对的原生 Skill，用 `skills import 目录 --workspace 路径`。更新既有包时在目录后提供展示的当前版本。用 `skills export 名称 版本 目标目录 --workspace 路径` 导出指定版本。导入进入现有本机 managed 目录，项目 Skill 的同名优先级保留。 [实现与验收](superpowers/plans/2026-11-26-skill-authoring.md)
 
 在本机普通聊天中，可以请助手为当前项目建议一个默认模型。用 `/model-proposals` 核对原值、所提型号及理由，再输入 `/apply-model 建议ID` 检查连通性并应用，或用 `/decline-model 建议ID` 拒绝。应用后的项目默认值供新任务选择，已接回的对话沿自己的模型继续。[设置契约与测试](superpowers/plans/2026-11-26-chat-model-proposals.md)

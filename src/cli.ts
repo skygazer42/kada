@@ -52,6 +52,7 @@ try {
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
     console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
+    console.log('model browser --workspace 路径　生成本机项目模型设置链接。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
@@ -217,7 +218,11 @@ try {
       } else if (action === 'clear') {
         if (!project) throw new Error('Provide --workspace to clear a project default.');
         result = await request(scopedPath, 'DELETE');
-      } else throw new Error('Use model list, check, select or clear.');
+      } else if (action === 'browser') {
+        if (!project) throw new Error('Provide --workspace for local project model settings.');
+        if (!await client.healthy('project-model-page')) throw new Error('请重启到支持项目模型设置页的后台版本。');
+        result = await request(modelsPath + '/link', 'POST', { workspace: project });
+      } else throw new Error('Use model list, check, select, clear or browser.');
     } else if (command === 'skills') {
       if (action === 'list') result = await request('/v1/settings/skills?workspace='+encodeURIComponent(workspace));
       else if (action === 'enable' || action === 'disable') {

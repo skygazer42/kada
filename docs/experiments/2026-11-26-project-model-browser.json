@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "environment": "Windows, local Chromium, agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "openedThroughCli": true,
+  "providerCheck": "SiliconFlow Qwen/Qwen2.5-7B-Instruct",
+  "projectModelSaved": true,
+  "reloadPreservedSelection": true,
+  "globalRestored": true
+}
