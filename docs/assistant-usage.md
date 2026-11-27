@@ -322,6 +322,23 @@ npm run harness -- gmail clear --workspace E:/project
 
 想在本机普通聊天里搜索和阅读这个邮箱时，在同一配置里加上 `"allowAssistant": true`，重新运行 `gmail source`，再打开新聊天。助手读取的搜索结果和邮件正文会发给该聊天使用的模型。用 `false` 或 `gmail clear` 可撤回后续调用。账号、连接修订或项目许可变化也会停止已有聊天的读取。
 
+### 按 Gmail 搜索触发例行规则
+
+用 `routines add` 保存以下规则。第一次成功检查只登记已有邮件。后续发现新的匹配 ID 时，收件箱会收到一条带匹配数量的通知。每个规则修订对同一邮件只触发一次。
+
+```json
+{
+  "id": "invoices",
+  "action": "notify",
+  "objective": "检查新收到的发票",
+  "workspace": "E:/project",
+  "schedule": { "kind": "interval", "everyMinutes": 5, "anchorAt": "2026-11-27T00:00:00Z" },
+  "precheck": { "gmail": { "query": "in:inbox from:receipts@example.com newer_than:7d" } }
+}
+```
+
+将 `action` 改为 `task` 可运行助手。该任务用 `project_gmail_read` 获取本次匹配的邮件正文，并将读取结果交给所选模型。规则保存时固定当前邮箱和连接修订。换绑后编辑规则可建立新基线。每次采样最多读五页，每次触发最多包含 100 个新 ID。用 `routines history invoices` 查看基线、匹配与失败记录。 [源码与验收](superpowers/plans/2026-11-27-project-gmail.md)
+
 在看板的 **分配助手** 选择同项目助手与修订。终端工作项 JSON 可带 `"assignee": { "id": "助手ID", "revision": 1 }`，用 `null` 清空。由用户发起工作项运行后，Pi 使用所选角色准备并等待原确认。角色更新后，新运行需要重新选择当前版本，已有运行按原版本处理。
 
 配对手机获得查看后，本机可用 `work-items share-edits 工作项ID 账户ID 设备ID` 开启该卡的 **Edit work item**。手机保存名称、说明、状态、优先级、截止日期或时刻及其时区。旧修订出现冲突时可保留草稿，选择 **Load current fields** 读取最新字段。用 `work-items unshare-edits` 撤回编辑。 [分配与手机编辑验收](superpowers/plans/2026-11-26-work-item-assignees.md)

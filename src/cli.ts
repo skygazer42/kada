@@ -57,7 +57,7 @@ try {
     console.log('mcp browser --workspace 路径　生成本机项目 MCP 工具设置链接。');
     console.log('mcp connections　生成本机 MCP 连接管理链接。');
     console.log('snapshots browser 任务ID　生成对应工作区的本机快照链接。');
-    console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
+    console.log("\n例行任务 precheck 支持 command 参数数组、mcp: { id, revision, tool, arguments } 和 gmail: { query }。Gmail 规则按消息 ID 去重，可触发本机通知或任务。应用预检要求项目已启用、声明只读且无需单次审批。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
     console.log("循环项目任务可选 accountBackoff: true；明确的模型账户拒绝后，按 5 分钟倍增至 24 小时跳过自动运行。routines list/history 可查 accountCooldown。手动运行仍遵守原预检、预算和防重叠，原任务完成后下一次检查清除降频；Pi 保留单次请求重试。");
     console.log("\nMCP 账户登录（HTTP 定义中设置 oauth: true）\n  mcp login 连接ID\n打开返回的 authorizationUrl，完成后运行 mcp test，再按返回修订 enable 工具。mcp logout 连接ID 清除本机凭据并停用工具；服务端授权需在对应应用撤销。");

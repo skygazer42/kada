@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { awaitWithContext, BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTask, Harness, type ConversationId, type Cursor, type Tx } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, Harness, type ConversationId, type Cursor, type Tx } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { acceptanceChecks, type AcceptanceCheck } from "./checks.js";
 import { localEnvironment, shellEnvironment } from "./execution.js";
@@ -12,6 +12,7 @@ import type { LocalRuntime } from "./runtime.js";
 import { normalizeMcpPrecheck, type McpPrecheck, type McpTools } from "./mcp-tools.js";
 import { githubIssueTarget, githubPullRequestEvents, githubPullRequestTarget, type GithubIssue, type GithubPullRequest } from "./github-routine-events.js";
 import type { AccountRefusal } from './routine-account-backoff.js';
+import { gmailSearchQuery, type ProjectGmail, type RoutineGmailBinding, type RoutineGmailMatch } from './project-gmail.js';
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -36,7 +37,7 @@ export type RoutineInput = {
   overlapPolicy?: "skip";
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
-  precheck?: { command: string[] } | { mcp: McpPrecheck };
+  precheck?: { command: string[] } | { mcp: McpPrecheck } | { gmail: { query: string } };
   activity?: { withinMinutes: number; minIntervalMinutes: number };
   accountBackoff?: true;
   event?: RoutineEvent;
@@ -58,6 +59,8 @@ export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPoli
   trigger?: "manual" | "event";
   event?: EventIdentity;
   timing?: RoutineTiming;
+  gmailMailbox?: RoutineGmailBinding;
+  gmail?: RoutineGmailMatch;
 };
 
 export type RoutineExecution =
@@ -65,7 +68,7 @@ export type RoutineExecution =
   | { status: "notified" | "budget_exhausted" };
 
 type PrecheckResult =
-  | { status: "changed" | "unchanged" | "pending"; sha256: string }
+  | { status: "baseline" | "changed" | "unchanged" | "pending"; sha256: string }
   | { status: "failed" | "interrupted"; detail: string };
 type ActivityResult = { status: "allowed" | "inactive" | "cooldown" | "failed"; checkedAt: number; lastUserAt?: number; lastStartedAt?: number };
 type AccountCooldown = { failures: number; until: number; code: AccountRefusal };
@@ -80,6 +83,7 @@ type Receipt = Pick<RoutineOccurrence, "id" | "scheduledAt" | "trigger" | "event
   detail?: string;
   timing?: RoutineTiming;
   precheck?: PrecheckResult;
+  gmail?: { messageIds: string[] };
   activity?: ActivityResult;
   startedAt?: number;
   accountCooldown?: AccountCooldown;
@@ -138,9 +142,23 @@ async function interruptManual(tx: Tx, conversationId: ConversationId, rule: Sto
     ...(manual.accepted.event ? { event: manual.accepted.event } : {}),
     ...(admissionPossible && manual.accepted.taskId ? { taskId: manual.accepted.taskId } : {}),
     ...(precheck ? { precheck } : {}),
+    ...(claim?.gmail ? { gmail: { messageIds: claim.gmail.messageIds } } : {}),
     detail: !claim ? "The rule changed before this run could begin."
       : admissionPossible ? "The run was interrupted during admission. Its task may already have started."
       : "The run was interrupted during precheck. The check may have had effects.",
+  }, now);
+}
+
+async function interruptGmailClaim(tx: Tx, conversationId: ConversationId, rule: StoredRoutine, now: number) {
+  const claim = rule.claim;
+  if (!claim?.gmail) return;
+  await recordOccurrence(tx, conversationId, rule, {
+    id: claim.id, scheduledAt: claim.scheduledAt, status: 'interrupted',
+    gmail: { messageIds: claim.gmail.messageIds },
+    ...(claim.precheckResult ? { precheck: claim.precheckResult } : {}),
+    ...(claim.action === 'task' ? { taskId: claim.taskId } : {}),
+    ...(claim.timing ? { timing: claim.timing } : {}),
+    detail: 'The Gmail matches were saved before the rule was interrupted during delivery.',
   }, now);
 }
 
@@ -190,6 +208,8 @@ type StoredRoutine = Routine & {
   manual?: { timerId: TimerId; accepted: Receipt; claim?: Claim; budgetSettled?: true };
   lastPrecheckSha256?: string;
   lastPrecheckScheduledAt?: string;
+  gmailMailbox?: RoutineGmailBinding;
+  gmailBaseline?: true;
   lastStarted?: StartedOccurrence;
   lastStartedAt?: number;
   lastAccountResult?: string;
@@ -201,6 +221,7 @@ export interface LocalRoutineOptions {
   execute(occurrence: RoutineOccurrence, signal: AbortSignal): Promise<RoutineExecution>;
   taskOverview?(taskId: string): Promise<TaskOverview | undefined>;
   mcp?: Pick<McpTools, "validatePrecheck" | "samplePrecheck">;
+  gmail?: Pick<ProjectGmail, "watchMailbox" | "watchMessageIds">;
   lastUserActivity?(workspace: string): Promise<number | undefined>;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
@@ -220,6 +241,11 @@ const routinesDoc = defineDoc({
   checkpointWhen: () => true,
 });
 
+const observedGmail = defineDocFamily<{ seen: boolean }, null>({
+  scope: 'session', family: true, kind: 'local.routine.gmail-observed', version: 1,
+  initial: () => ({ seen: false }), checkpointWhen: () => true,
+});
+
 type TimerInput = { routineId: string; revision: number; firstAt: number; manual?: RoutineOccurrence };
 type TimerCheckpoint = { phase: "wait"; at: number } | { phase: "deliver"; at: number };
 type Session = { harness: Harness; conversationId: ConversationId; timer: ReturnType<typeof makeTimer> };
@@ -231,7 +257,9 @@ function snapshot<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
-function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt, lastAccountResult: _accountResult, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
+function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample,
+  gmailMailbox: _mailbox, gmailBaseline: _gmailBaseline, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt,
+  lastAccountResult: _accountResult, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
@@ -315,9 +343,17 @@ function definition(input: RoutineInput): RoutineDefinition {
   }
   let precheck = input.precheck;
   if (precheck !== undefined) {
-    if (!precheck || typeof precheck !== "object" || Array.isArray(precheck) || input.action !== "task" || !input.workspace ||
-      Object.keys(precheck).length !== 1) throw new RoutineError(400, "A precheck requires a task workspace and exactly one command or MCP check.");
-    if ("mcp" in precheck) precheck = { mcp: normalizeMcpPrecheck(precheck.mcp) };
+    if (!precheck || typeof precheck !== "object" || Array.isArray(precheck) || !input.workspace ||
+      Object.keys(precheck).length !== 1) throw new RoutineError(400, "A precheck requires a workspace and exactly one check.");
+    if ("gmail" in precheck) {
+      const value = precheck.gmail;
+      if (schedule.kind === 'once' || schedule.kind === 'event' || input.event !== undefined ||
+        !value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value,'query')) {
+        throw new RoutineError(400, 'A Gmail precheck requires a recurring project rule and a search query.');
+      }
+      precheck = { gmail: { query: gmailSearchQuery(value.query) } };
+    } else if (input.action !== 'task') throw new RoutineError(400, 'Command and MCP prechecks require a task.');
+    else if ("mcp" in precheck) precheck = { mcp: normalizeMcpPrecheck(precheck.mcp) };
     else if ("command" in precheck && Array.isArray(precheck.command) && precheck.command.length <= 64 &&
       typeof precheck.command[0] === "string" && precheck.command[0].trim() &&
       precheck.command.every(arg => typeof arg === "string" && !arg.includes("\0")) && precheck.command.join("").length <= 16_000) {
@@ -387,6 +423,7 @@ function occurrenceFor(rule: StoredRoutine, at: number, requestKey?: string): Ro
     ...(budget ? { budget } : {}),
     ...(precheck ? { precheck } : {}),
     ...(activity ? { activity } : {}),
+    ...(rule.gmailMailbox ? { gmailMailbox: rule.gmailMailbox } : {}),
   };
 }
 
@@ -425,12 +462,24 @@ function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
   };
 }
 
-async function samplePrecheck(workspace: string, precheck: NonNullable<RoutineInput["precheck"]>, ctx: typeof context, mcp: LocalRoutineOptions["mcp"]) {
+async function samplePrecheck(due: RoutineOccurrence, precheck: NonNullable<RoutineInput["precheck"]>, ctx: typeof context,
+  options: LocalRoutineOptions): Promise<{ sha256: string; messageIds?: string[] } | { detail: string }> {
+  const workspace = due.workspace!;
+  const signal = () => AbortSignal.any([AbortSignal.timeout(30_000), ...(ctx.abortSignal ? [ctx.abortSignal] : [])]);
+  if ("gmail" in precheck) {
+    try {
+      if (!options.gmail || !due.gmailMailbox) throw new Error('Gmail prechecks are unavailable.');
+      const messageIds = await options.gmail.watchMessageIds(workspace, precheck.gmail.query, due.gmailMailbox.fingerprint, signal());
+      return { messageIds, sha256: createHash('sha256').update(JSON.stringify(messageIds)).digest('hex') };
+    } catch {
+      ctx.abortSignal?.throwIfAborted();
+      return { detail: 'Gmail precheck failed. Check the pinned mailbox, search range and read permission.' };
+    }
+  }
   if ("mcp" in precheck) {
     try {
-      if (!mcp) throw new Error("MCP prechecks are unavailable.");
-      return await mcp.samplePrecheck(workspace, precheck.mcp,
-        AbortSignal.any([AbortSignal.timeout(30_000), ...(ctx.abortSignal ? [ctx.abortSignal] : [])]));
+      if (!options.mcp) throw new Error("MCP prechecks are unavailable.");
+      return await options.mcp.samplePrecheck(workspace, precheck.mcp, signal());
     } catch {
       ctx.abortSignal?.throwIfAborted();
       return { detail: "MCP precheck failed. Check its connection, permissions and read-only tool." };
@@ -444,6 +493,21 @@ async function samplePrecheck(workspace: string, precheck: NonNullable<RoutineIn
   if (!result.ok) return { detail: result.error.code === "timeout" ? "Precheck timed out." : "Precheck execution failed." };
   if (result.value.exitCode !== 0) return { detail: `Precheck exited with code ${result.value.exitCode}.` };
   return { sha256: output.digest("hex") };
+}
+
+async function observeGmail(tx: Tx, rule: StoredRoutine, ids: string[]) {
+  const added: string[] = [];
+  for (const id of ids) {
+    const key = createHash('sha256').update(JSON.stringify([rule.id, rule.revision, id])).digest('hex');
+    const observation = await tx.doc(observedGmail, key, null);
+    if (observation.seen) continue;
+    observation.seen = true;
+    if (rule.gmailBaseline) {
+      added.push(id);
+      if (added.length === 100) break;
+    }
+  }
+  return added;
 }
 
 function makeTimer(options: LocalRoutineOptions, openedAt: number) {
@@ -603,8 +667,8 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
 
         const due = occurrence;
         const { id, scheduledAt } = due;
-        if (due.precheck && newClaim) {
-          const sample = await samplePrecheck(due.workspace!, due.precheck, ctx, options.mcp);
+        if (due.precheck && (newClaim || ("gmail" in due.precheck && !precheck))) {
+          const sample = await samplePrecheck(due, due.precheck, ctx, options);
           if (runtime.signal.aborted) return;
           await runtime.commit(async (tx) => {
             const { rules } = await tx.doc(routinesDoc);
@@ -614,13 +678,25 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             if (claim?.id !== id) return completed;
             if ("detail" in sample) {
               precheck = { status: "failed", detail: sample.detail };
+            } else if (sample.messageIds) {
+              const ids = await observeGmail(tx, rule, sample.messageIds);
+              const status = !rule.gmailBaseline ? 'baseline' : ids.length ? 'changed' : 'unchanged';
+              precheck = { status, sha256: sample.sha256 };
+              rule.gmailBaseline = true;
+              if (ids.length) {
+                due.gmail = { ...due.gmailMailbox!, messageIds: ids };
+                await recordOccurrence(tx, runtime.conversationId, rule, { id, scheduledAt, status:'claimed', precheck,
+                  ...(due.trigger ? { trigger: due.trigger } : {}), ...(due.action === 'task' ? { taskId: due.taskId } : {}),
+                  gmail: { messageIds: ids },
+                }, runtime.now());
+              }
             } else {
               const other = (manual ? rule.claim : rule.manual?.claim)?.precheckResult;
               const status = sample.sha256 === rule.lastPrecheckSha256 ? "unchanged"
                 : other?.status === "changed" && other.sha256 === sample.sha256 ? "pending" : "changed";
               precheck = { status, sha256: sample.sha256 };
             }
-            rules[key] = storeClaim(rule, { ...claim, precheckResult: precheck });
+            rules[key] = storeClaim(rule, { ...claim, precheckResult: precheck, ...(due.gmail ? { gmail: due.gmail } : {}) });
           }, ctx);
           if (!precheck || runtime.signal.aborted) return;
         } else if (due.precheck && !precheck) {
@@ -628,11 +704,12 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
         }
         const timing=occurrence.timing ? {timing:occurrence.timing} : {};
         const evidence = { id, scheduledAt, ...timing, ...(due.trigger ? { trigger: due.trigger } : {}),
-          ...(due.event ? { event: due.event } : {}), ...(precheck ? { precheck } : {}), ...(activity ? { activity } : {}) };
+          ...(due.event ? { event: due.event } : {}), ...(precheck ? { precheck } : {}), ...(activity ? { activity } : {}),
+          ...(due.gmail ? { gmail: { messageIds: due.gmail.messageIds } } : {}) };
         let receipt: Receipt;
         try {
           if (precheck && precheck.status !== "changed") {
-            receipt = { ...evidence, status: precheck.status === "unchanged" || precheck.status === "pending" ? "skipped" : "failed" };
+            receipt = { ...evidence, status: precheck.status === "failed" || precheck.status === "interrupted" ? "failed" : "skipped" };
           } else {
             const result = await awaitWithContext(options.execute(due, runtime.signal), ctx);
             receipt = { ...evidence, status: result.status ?? "started", ...("taskId" in result ? { taskId: result.taskId } : {}) };
@@ -712,15 +789,22 @@ export class LocalRoutines {
   }
 
   private async validatePrecheck(details: RoutineDefinition) {
-    if (!details.precheck || !("mcp" in details.precheck)) return;
-    if (!this.options.mcp) throw new RoutineError(400, "MCP prechecks are unavailable.");
-    try { await this.options.mcp.validatePrecheck(details.workspace!, details.precheck.mcp); }
+    const check = details.precheck;
+    if (!check || "command" in check) return;
+    try {
+      if ("gmail" in check) {
+        if (!this.options.gmail) throw new Error("Gmail prechecks are unavailable.");
+        return await this.options.gmail.watchMailbox(details.workspace!, details.action === 'task');
+      }
+      if (!this.options.mcp) throw new Error("MCP prechecks are unavailable.");
+      await this.options.mcp.validatePrecheck(details.workspace!, check.mcp);
+    }
     catch (error) { throw new RoutineError(400, (error as Error).message); }
   }
 
   async create(input: RoutineInput): Promise<Routine> {
     const details = definition(input);
-    await this.validatePrecheck(details);
+    const gmailMailbox = await this.validatePrecheck(details);
     const id = input.id === undefined ? randomUUID() : inputId(input.id);
     const { harness, conversationId, timer } = await this.open();
     const routine = await harness.commit(async (tx) => {
@@ -733,7 +817,7 @@ export class LocalRoutines {
         }
         return toRoutine(previous);
       }
-      const next: StoredRoutine = { ...details, id, revision: 1, status: "scheduled" };
+      const next: StoredRoutine = { ...details, id, revision: 1, status: "scheduled", ...(gmailMailbox ? { gmailMailbox } : {}) };
       if (details.schedule.kind !== "event") {
         const firstAt = firstTime(details.schedule, this.now());
         next.nextRunAt = new Date(firstAt).toISOString();
@@ -875,7 +959,7 @@ export class LocalRoutines {
       typeof request.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(request.requestId))) throw new RoutineError(400, 'Provide an expected revision and valid update request ID.');
     const details = definition(input);
     const fingerprint = request ? createHash('sha256').update(JSON.stringify([request.expectedRevision, details])).digest('hex') : undefined;
-    await this.validatePrecheck(details);
+    const gmailMailbox = await this.validatePrecheck(details);
     const { harness, conversationId, timer } = await this.open();
     const result = await harness.commit(async (tx) => {
       const { rules } = await tx.doc(routinesDoc);
@@ -898,13 +982,15 @@ export class LocalRoutines {
         } });
         return routine;
       };
-      if (previous.status === "scheduled" && JSON.stringify(definition(previous)) === JSON.stringify(details)) {
+      if (previous.status === "scheduled" && previous.gmailMailbox?.fingerprint === gmailMailbox?.fingerprint &&
+        JSON.stringify(definition(previous)) === JSON.stringify(details)) {
         return { routine: await receipt(toRoutine(previous)) };
       }
       const revision = previous.revision + 1;
       const priorClaim = previous.claim ?? previous.manual?.claim;
       const next: StoredRoutine = {
         ...details, id, revision, status: keepPaused ? 'paused' : 'scheduled',
+        ...(gmailMailbox ? { gmailMailbox } : {}),
         ...(previous.lastOccurrence ? { lastOccurrence: previous.lastOccurrence } : {}),
         ...(previous.lastStartedAt === undefined ? {} : { lastStartedAt: previous.lastStartedAt }),
         ...(previous.accountCooldown ? { accountCooldown: previous.accountCooldown } : {}),
@@ -923,6 +1009,7 @@ export class LocalRoutines {
         }
       }
       await interruptManual(tx, conversationId, previous, this.now());
+      await interruptGmailClaim(tx, conversationId, previous, this.now());
       rules[key] = next;
       return { routine: await receipt(toRoutine(next)), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
     }, context);
@@ -943,6 +1030,7 @@ export class LocalRoutines {
       if (previous.status === "cancelled") return { routine: toRoutine(previous) };
       const next = endSchedule(previous, "cancelled");
       await interruptManual(tx, conversationId, previous, this.now());
+      await interruptGmailClaim(tx, conversationId, previous, this.now());
       delete next.manual;
       rules[key] = next;
       return { routine: toRoutine(next), previousTimer: previous.timerId, manualTimer: previous.manual?.timerId };
@@ -980,6 +1068,7 @@ export class LocalRoutines {
           next.lastStarted = { occurrenceId: claim.id, taskId: claim.taskId };
         }
         await interruptManual(tx, conversationId, rule, this.now());
+        await interruptGmailClaim(tx, conversationId, rule, this.now());
         delete next.manual;
         rules[key] = next;
         return { routine: toRoutine(next), previousTimer: rule.timerId, manualTimer: rule.manual?.timerId };
@@ -1027,7 +1116,8 @@ export class LocalRoutines {
       const { scheduledAt } = origin;
       const claim = manual ? rule?.manual?.claim : rule?.claim;
       const precheck = origin.precheck ?? (claim?.id === occurrenceId ? claim.precheckResult : undefined);
-      const lastOccurrence:Receipt={id:occurrenceId,scheduledAt,status:'budget_exhausted',taskId:origin.taskId ?? taskIdFor(occurrenceId),...(origin.timing ? {timing:origin.timing} : {}),...(precheck ? {precheck} : {})};
+      const lastOccurrence:Receipt={id:occurrenceId,scheduledAt,status:'budget_exhausted',taskId:origin.taskId ?? taskIdFor(occurrenceId),
+        ...(origin.timing ? {timing:origin.timing} : {}),...(precheck ? {precheck} : {}),...(origin.gmail ? {gmail:origin.gmail} : {})};
       await tx.appendEntry(conversationId,{kind:occurrenceEntryKind,data:{...origin,...lastOccurrence,recordedAt:this.now()}});
       if (manual) {
         if (rule?.manual && claim?.id === occurrenceId) {
