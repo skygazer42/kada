@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import test from 'node:test';
-import { fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { createClient } from '../src/client.js';
 import { serve } from '../src/server.js';
 import { scriptedFixture, until } from './helpers.js';
@@ -12,8 +12,17 @@ test('a paired device sees only granted original rooms and sends once under its 
   const firstReply = Promise.withResolvers<void>();
   const originalText = 'the original mobile input';
   const fixture = await scriptedFixture(async context => {
-    const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
+    const last = context.messages.findLastIndex(message => message.role === 'user');
+    const input = JSON.parse(String(context.messages[last]?.content));
     if (input.message === originalText) await firstReply.promise;
+    if (input.attachments?.length) {
+      const file = context.messages.slice(last).find(message => message.role === 'toolResult' && message.toolName === 'room_read_file');
+      if (!file) return fauxAssistantMessage(fauxToolCall('room_read_file', { id: 1 }), { stopReason: 'toolUse' });
+      assert.match(JSON.stringify(file), /Original attached file content/);
+    }
+    if (input.message === 'Ask about shared history') {
+      assert.doesNotMatch(JSON.stringify(context.messages), /Original attached file content/);
+    }
     return fauxAssistantMessage('Original reply for ' + input.message);
   });
   await fixture.runtime.close();
@@ -25,8 +34,8 @@ test('a paired device sees only granted original rooms and sends once under its 
   const server = await serve(config, { models: fixture.models });
   t.after(async () => { firstReply.resolve(); await server.close(); await fixture.close(); });
   const client = createClient(config);
-  const define = (name: string) => server.runtime.assistants.create({ workspace: fixture.workspace, name, instructions: 'Reply in the original room.', tools: [] });
-  const lead = await define('Lead'), review = await define('Reviewer');
+  const define = (name: string, tools: string[] = []) => server.runtime.assistants.create({ workspace: fixture.workspace, name, instructions: 'Reply in the original room.', tools });
+  const lead = await define('Lead'), review = await define('Reviewer', ['room_read_file']);
   const members = [lead, review].map(({ id, revision }) => ({ id, revision }));
   const room = await server.runtime.createRoom({ workspace: fixture.workspace, title: 'Original room', members });
   const other = await server.runtime.createRoom({ workspace: fixture.workspace, title: 'Private room', members });
@@ -79,6 +88,10 @@ test('a paired device sees only granted original rooms and sends once under its 
   assert(!JSON.stringify(sharedFile).includes(fixture.workspace));
   const download = path + '/attachments/' + fileMessage.id + '/1';
   assert.equal((await remote(download)).status, 403);
+  const historyReply = await remote(path + '/messages', 0, { ...input, requestId: 'shared-after-file', message: 'Ask about shared history' });
+  assert.equal(historyReply.status, 200);
+  const afterHistory = await until(() => server.runtime.roomDetails(room.id), view => view.active === null);
+  assert.equal(afterHistory.messages.at(-1)?.text, 'Original reply for Ask about shared history');
   await grant('share-files', 'one');
   assert.equal((await remote(download, 1)).status, 403);
   const authorized = await (await remote(path)).json();

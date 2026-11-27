@@ -782,7 +782,7 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
               throw new HttpError(400, 'Provide the displayed room revision and a request ID.');
             }
             const receipt = await runtime.sendRoomMessage(id, { memberId, message, roomRevision,
-              requestId: digest(JSON.stringify(['shared-room', pairingId, requestId])) });
+              requestId: digest(JSON.stringify(['shared-room', pairingId, requestId])) }, 'paired');
             return { ...receipt, requestId };
           }
           const before = url.searchParams.get('before');

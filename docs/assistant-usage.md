@@ -170,7 +170,7 @@ npm run harness -- run "请报告项目的审核员核对附件" --workspace E:/
 
 ## 助手群组
 
-从项目的命名助手中选 2 到 8 位成员及修订。用成员 ID 点名答复。成员使用固定版本的指令、模型和 Pi 会话，并读取已经发生的近期群组消息。回复期间可从终端或已授权的手机继续发送，每个群组最多保留八条等待消息，按接收顺序处理。保存请求 ID 可查询或重试同一条消息。 [排队验收](superpowers/plans/2026-11-26-assistant-room-queue.md)
+从命名助手中选 2 到 8 位成员及修订。用成员 ID 点名答复。成员使用固定版本的指令、模型和 Pi 会话，并读取已经发生的近期群组消息。回复期间可从终端或已授权的手机继续发送，每个群组最多保留八条等待消息，按接收顺序处理。保存请求 ID 可查询或重试同一条消息。 [排队验收](superpowers/plans/2026-11-26-assistant-room-queue.md)
 
 ```powershell
 npm run harness -- rooms add "发布复核" 助手一ID@1 助手二ID@1 --workspace E:/project
@@ -181,7 +181,9 @@ npm run harness -- rooms show 群组ID
 
 使用 `rooms edit 群组ID 修改.json` 改标题或成员。编辑文件带 `revision`，可附 `title` 或完整的 `members` 数组，每项为 `{ "id": "助手ID", "revision": 1 }`。旧修订请先重新读取。助手工具名单可选 `room_handoff`，让成员把本轮依次交给尚未参与的成员。原群组显示交棒过程与最终答复。
 
-发言可重复加 `--room-file 相对路径` 附带工作区里的文本文件。发言后修改原文件时，群组仍保留选定版本。角色可按配置使用 `room_attach_text` 保存本轮产出，以及用 `room_read_file` 按原编号读取。用 `rooms show` 查附件消息与编号，再用 `rooms file 群组ID 消息ID 附件编号` 找到固定副本。 [原附件与回交验收](superpowers/plans/2026-11-26-room-attachments.md)
+跨项目成员用 `"助手ID@修订=成员项目目录"` 加入群组。编辑群组时可在成员对象中填写 `workspace`。本机发送的群组消息可使用角色获准的 Pi 文件工具和 `room_attach_file`、`room_save_file`。成员可发布或保存至多 1 MiB 的原始文件。群组改变成员工作目录后，旧回合及排队请求保留中断回执。配对手机仍可读写授权的公开群组内容，文件发布和保存发生在本机授权的回合。 [跨项目群组验收](superpowers/plans/2026-11-26-assistant-rooms.md#跨项目群组)
+
+发言可重复加 `--room-file 相对路径` 附带群组工作区里的文本文件。群组成员获准在选定项目使用 `room_save_file` 时也支持二进制文件。发言后修改原文件时，群组仍保留选定版本。角色可按配置使用 `room_attach_text` 保存本轮产出，以及用 `room_read_file` 按原编号读取文本。用 `rooms show` 查附件消息与编号，再用 `rooms file 群组ID 消息ID 附件编号` 找到固定副本。 [原附件与回交验收](superpowers/plans/2026-11-26-room-attachments.md)
 
 本机通过 `rooms share 群组ID 账户ID 设备ID` 分享查看，通过 `rooms share-replies 群组ID 账户ID 设备ID` 授予发送权限。手机 Web 的 **Shared rooms** 打开同一群组。用 `rooms unshare-replies` 撤回发送权限，或用 `rooms unshare` 一并撤回查看和发送。 [源码与验收](superpowers/plans/2026-11-26-assistant-rooms.md)
 

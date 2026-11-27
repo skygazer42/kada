@@ -82,7 +82,7 @@ export interface TaskMeta {
   assistant?: AssistantPin;
   collaborators?: AssistantCollaboratorPin[];
   collaborationProject?: string;
-  room?: AssistantPin[];
+  room?: AssistantCollaboratorPin[];
   roomRevision?: number;
   chartDelivery?: true;
   objective: string;
@@ -173,17 +173,17 @@ function publicTaskMeta({ threadEditReceipts: _receipts, room: _room, roomRevisi
   browserDriver: _browserDriver,
   routineGmail: _routineGmail, chatCalendar: _chatCalendar, calendarWrite: _calendarWrite, calendarAvailability: _calendarAvailability, ...meta }: TaskMeta) { return meta; }
 
-function roomSummary(meta: TaskMeta & { room: AssistantPin[] }) {
+function roomSummary(meta: TaskMeta & { room: AssistantCollaboratorPin[] }) {
   return { id: meta.id, title: meta.objective, workspace: meta.workspace, control: meta.control, createdAt: meta.createdAt, revision: meta.roomRevision ?? 1,
-    members: meta.room.map(({ id, revision, name, model }) => ({ id, revision, name, model })) };
+    members: meta.room.map(({ id, revision, name, model, workspace }) => ({ id, revision, name, model, ...(workspace ? { workspace } : {}) })) };
 }
 
-function isRoom(meta: TaskMeta): meta is TaskMeta & { room: AssistantPin[] } { return meta.room !== undefined; }
+function isRoom(meta: TaskMeta): meta is TaskMeta & { room: AssistantCollaboratorPin[] } { return meta.room !== undefined; }
 function memoryOwner(meta: TaskMeta) { return meta.assistant?.memoryScope === 'isolated' ? meta.assistant.id : undefined; }
 
 function roomMemberRefs(input: unknown) {
   if (!Array.isArray(input) || input.length < 2 || input.length > 8) throw new RoomError(400, 'Choose two to eight room members.');
-  const refs = input.map(assistantRef);
+  const refs = input.map(assistantCollaboratorRef);
   if (new Set(refs.map(ref => ref.id)).size !== refs.length) throw new RoomError(400, 'Choose distinct room members.');
   return refs;
 }
@@ -612,7 +612,19 @@ export class LocalRuntime {
     return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback), ...(memoryScope ? { memoryScope } : {}) };
   }
 
-  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[]; room?: AssistantRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; routineGmail?:RoutineGmailMatch; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;requireRoutineAdmission?:()=>Promise<void>;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
+  private async pinParticipant(workspace: string, { workspace: target, ...ref }: AssistantCollaboratorRef,
+    fallback: ModelRef | undefined): Promise<AssistantCollaboratorPin> {
+    if (!target) return this.pinAssistant(workspace, ref, fallback);
+    const destination = await Workspace.open(target, { create: false }).catch(error => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') throw new AssistantError(400, 'Choose an existing collaborator workspace.');
+      throw error;
+    });
+    const model = await this.providers.selected(this.config.model, destination.root);
+    return { ...await this.pinAssistant(destination.root, ref, model), workspace: destination.root };
+  }
+
+  async create(objective: string, workspace?: string, acceptance: unknown = [], options: { prepare?: boolean; chat?: boolean; id?: string; budget?: TaskBudget; skills?:SkillSelection[]; assistant?: AssistantRef; collaborators?: AssistantCollaboratorRef[]; room?: AssistantCollaboratorRef[]; routineOccurrenceId?:string; routineIssue?:GithubIssue; routinePullRequest?:GithubPullRequest; routineGmail?:RoutineGmailMatch; notifyOnChange?:boolean;remote?:boolean;signal?:AbortSignal;requireRoutineAdmission?:()=>Promise<void>;images?:InputImage[];workItem?:WorkItemLink; openedThread?: ThreadOrigin; sourceInput?: SubmissionId } = {}): Promise<TaskMeta> {
     return this.changes.run(async () => {
       options.signal?.throwIfAborted();
       if (this.closing) throw new Error("Runtime is shutting down");
@@ -667,22 +679,13 @@ export class LocalRuntime {
       const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : inherited?.assistant;
       const projectModel = (!selectedModel && !role?.model) || collaboratorRefs
         ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
-      const pin = (ref: AssistantRef) => this.pinAssistant(requestedWorkspace, ref, projectModel);
+      const pin = (ref: AssistantCollaboratorRef) => this.pinParticipant(requestedWorkspace, ref, projectModel);
       const room = options.room ? await Promise.all(options.room.map(pin)) : undefined;
       const model = selectedModel ? await selectThreadModel(this.options.models, selectedModel)
         : room?.[0]?.model ?? validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
       const collaborationProject = collaboratorRefs?.some(ref => ref.workspace !== undefined)
         ? await assistantProject(requestedWorkspace) : undefined;
-      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(async ({ workspace: target, ...ref }) => {
-        if (!target) return pin(ref);
-        const destination = await Workspace.open(target, { create: false }).catch(error => {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (code === 'ENOENT' || code === 'ENOTDIR') throw new AssistantError(400, 'Choose an existing collaborator workspace.');
-          throw error;
-        });
-        const fallback = await this.providers.selected(this.config.model, destination.root);
-        return { ...await this.pinAssistant(destination.root, ref, fallback), workspace: destination.root };
-      })) : undefined;
+      const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(pin)) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const files = await Workspace.open(requestedWorkspace, { create: !thread && !room });
       const localChat = !options.remote && !room;
@@ -808,12 +811,14 @@ export class LocalRuntime {
       if (revision !== (meta.roomRevision ?? 1)) throw new RoomError(409, 'The room changed. Read its current revision before editing.');
       const fallback = refs ? await this.providers.selected(this.config.model, meta.workspace) : undefined;
       const room = refs ? await Promise.all(refs.map(ref =>
-        meta.room.find(pin => pin.id === ref.id && pin.revision === ref.revision) ?? this.pinAssistant(meta.workspace, ref, fallback))) : meta.room;
+        meta.room.find(pin => pin.id === ref.id && pin.revision === ref.revision && pin.workspace === ref.workspace) ??
+        this.pinParticipant(meta.workspace, ref, fallback))) : meta.room;
       const objective = name ?? meta.objective;
       if (objective === meta.objective && room.length === meta.room.length && room.every((pin, index) => pin === meta.room[index])) return roomSummary(meta);
       const active = await this.open(meta, false);
       const turn = await pendingRoomTurn(active.harness, ctx);
-      if (turn && [turn, ...turn.candidates].some(member => !room.some(pin => pin.id === member.memberId && pin.revision === member.revision))) {
+      if (turn && [turn, ...turn.candidates].some(member => !room.some(pin => pin.id === member.memberId && pin.revision === member.revision &&
+        pin.workspace === member.workspace))) {
         await this.abortAll(active);
       }
       const updated = { ...meta, objective, room, roomRevision: revision + 1 };
@@ -848,13 +853,13 @@ export class LocalRuntime {
     });
   }
 
-  private roomExecution(meta: TaskMeta & { room: AssistantPin[] }) {
+  private roomExecution(meta: TaskMeta & { room: AssistantCollaboratorPin[] }) {
     return { members: meta.room, title: meta.objective, durationMs: meta.maxDurationMs ?? this.config.maxDurationMs,
       limits: { tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
         costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 } };
   }
 
-  async sendRoomMessage(id: string, raw: Record<string, unknown>) {
+  async sendRoomMessage(id: string, raw: Record<string, unknown>, origin: 'owner' | 'paired' = 'owner') {
     const input = roomMessageInput(raw);
     return this.changes.run(async () => {
       const meta = await this.metadata(id);
@@ -864,7 +869,7 @@ export class LocalRuntime {
       if (meta.control !== 'active') blocked = `The assistant room is ${meta.control}.`;
       else if (input.roomRevision !== undefined && input.roomRevision !== (meta.roomRevision ?? 1)) blocked = 'The room changed. Review the current members before sending.';
       else blocked = await this.budgetReason(active);
-      const turn = await sendRoomMessage(active.root, { id, workspace: active.workspace, ...this.roomExecution(meta) }, input, blocked, ctx);
+      const turn = await sendRoomMessage(active.root, { id, workspace: active.workspace, ...this.roomExecution(meta) }, input, blocked, ctx, origin === 'owner');
       if (meta.control === 'active' && (turn.status === 'running' || turn.status === 'queued')) {
         active.enabled = true;
         active.harness.resume();
@@ -1279,8 +1284,9 @@ export class LocalRuntime {
     if (this.closing) throw new Error("Runtime is shutting down");
     let active = this.active.get(meta.id);
     if (!active) {
-      const workspace = await Workspace.open(meta.workspace, { create: !meta.collaborationProject });
-      if (meta.collaborationProject && workspace.root !== meta.workspace) {
+      const pinnedWorkspace = !!meta.collaborationProject || meta.room?.some(member => member.workspace !== undefined);
+      const workspace = await Workspace.open(meta.workspace, { create: !pinnedWorkspace });
+      if (pinnedWorkspace && workspace.root !== meta.workspace) {
         throw new AssistantPeerError(409, 'The original coordinator workspace changed.');
       }
       const registry = createRegistry();

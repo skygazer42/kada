@@ -13,14 +13,22 @@
 
 ## 契约
 
-- 本机 owner 选同一项目的 2 到 8 个当前助手版本创建群组。群组保存选定版本及实际模型。每条新消息显式指定一个成员 ID。只有一条成员回复可以执行，忙时返回冲突，用户可重试。
+- 本机 owner 选 2 到 8 个助手版本创建群组，跨项目成员指定其项目工作目录。群组保存选定版本及实际模型。每条新消息显式指定一个成员 ID。群组按接收顺序处理，每次有一个原回复在执行。
 - 在同一 Pi 事务中保存用户消息、投递任务和请求回执。重发同一个请求 ID 和正文获得原回执。改投其他成员或改变正文时冲突。答复保存群组成员 ID、修订及原 Pi 答复条目，失败或中止给出原回执状态。
 - 成员保留自己的会话及配置，共享上下文来自群组有限的近期公开正文。首版成员执行文本会话。会话列表、查看和定向发送通过本机 owner API 与终端。每个群组累积模型预算，每个已受理回合保留原截止时间。
-- 本机 owner 可以按当前群组修订改名、调整成员或选择新助手版本。移除正在答复的成员版本时，先确认原回合已停止，再保存群组设置。已写入的公开记录随原群组保存，保存过的原消息可用请求 ID 查询。旧修订更新冲突，新增成员仍须属于原项目。
+- 本机 owner 可以按当前群组修订改名、调整成员或选择新助手版本。移除正在答复的成员版本或改变其工作目录时，先停止原回合，再保存群组设置。已写入的公开记录随原群组保存，保存过的原消息可用请求 ID 查询。旧修订更新冲突。
 - 助手的固定工具名单包含 `room_handoff` 时，答复者可把同一轮依次交给尚未参与的原群组成员。目标接收原用户要求、近期群组背景及交棒说明，公开事件显示谁交给谁。每个成员版本在一轮内参与一次，共用原截止时间和模型预算。移除可接棒的版本会先停掉原回合。[Rakazo 原群内阶段、去重和投递](https://github.com/elie222/rakazo/blob/e64d73292179/packages/adapters/src/bots/group-handoff.ts#L98)
 - 配对手机获得 owner 授予的本群组查看权限后可读取同一段历史。发言使用独立授权，并绑定当前群组修订、接收成员和设备配对下的请求 ID。撤回查看会同时撤回发言。工作区路径、成员私有配置和其他群组只留在本机。 [Rakazo 移动群组入口](https://github.com/elie222/rakazo/blob/e64d73292179/apps/mobile/app/group-thread.tsx) · [原会话选择与展示](https://github.com/elie222/rakazo/blob/e64d73292179/apps/mobile/components/thread/thread-screen.tsx#L137) · [Codync 原任务入口](https://github.com/leepokai/Codync/blob/9dae3e2bec9b/apps/android/app/src/main/kotlin/com/codync/android/WorkThreadView.kt#L143)
 
 ## 实施与验证
+
+### 跨项目群组
+
+本机用户可为群组成员指定其项目的工作目录。成员按已选修订和工作目录使用原 Pi 会话。由本机 owner 发出的群组消息可调用成员已有的文件工具名单。配对设备的发言继续使用原群组权限。改绑目录使使用旧目录的原回合和排队消息退出，旧消息保留原回执。 [OpenMausBot 目标会话目录](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/handoff-files.ts#L71) · [Rakazo 成员更新](https://github.com/elie222/rakazo/blob/e64d73292179/packages/db/src/spaces/groups.ts#L440)
+
+有授权的成员可从自己的工作目录发布原文件。发布版本进入群组的固定附件，收件成员可在自己目录保存原字节。群组主目录继续保管原附件与可下载版本。 [OpenMausBot 文件落点](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/server/host/handoff-files.ts#L269)
+
+测试从终端创建群组，经 owner API 发送包含二进制文件的原消息。验证成员目录外的读取被拒绝，交棒后保留用户附件和成员发布文件的字节，改绑后旧回合与队列保留中断回执。能读取本机文件的成员为配对手机回复使用独立 Pi 会话，向手机保留近期公开群组记录。回归覆盖原项目内的旧角色和跨项目成员。 [跨项目测试](../../../test/assistant-room-project.test.ts) · [配对和历史](../../../test/shared-assistant-rooms.test.ts)
 
 - [x] 新增 `test/assistant-rooms.test.ts`，覆盖只唤醒指定成员、陌生成员、忙时冲突、原回执、超时和终端入口。两次 SIGKILL 分别在首位成员和接棒成员模型请求在途时终止进程，原 Pi 提交编号保持一致。
 - [x] 在 `src/assistant-rooms.ts` 接入 Pi 持久投递、成员会话和共享历史，在 `src/runtime.ts` 复用原工作区、生命周期和预算。
