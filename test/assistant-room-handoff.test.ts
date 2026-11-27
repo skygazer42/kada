@@ -47,25 +47,32 @@ test('the authorized room speaker hands off to one original member and only that
   assert.deepEqual(models, ['lead', 'reviewer']);
 });
 
-test('an original speaker cannot use a handoff to receive a fresh token budget', async t => {
+test('an exhausted room budget settles queued messages and prevents another speaker', async t => {
+  const originalMayFinish = Promise.withResolvers<void>();
   let calls = 0;
-  const f = await scriptedFixture(context => {
+  const f = await scriptedFixture(async context => {
     calls++;
     const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
     assert.equal(calls, 1);
+    await originalMayFinish.promise;
     return fauxAssistantMessage(fauxToolCall('room_handoff', { member_id: input.handoffMembers[0].id, message: 'Try to continue' }), { stopReason: 'toolUse' });
   }, { maxTotalTokens: 1 });
-  t.after(() => f.close());
+  t.after(() => { originalMayFinish.resolve(); return f.close(); });
   const members = await Promise.all(['First', 'Second'].map(name => f.runtime.assistants.create({
     workspace: f.workspace, name, instructions: 'Budget test member', tools: ['room_handoff'],
   })));
   const room = await f.runtime.createRoom({ workspace: f.workspace, title: 'Limited room', members: members.map(({ id, revision }) => ({ id, revision })) });
   const input = { memberId: members[0]!.id, message: 'Use the original budget', requestId: 'budget' };
   await f.runtime.sendRoomMessage(room.id, input);
-  const view = await until(() => f.runtime.roomDetails(room.id), value => value.active === null);
+  const waiting = { memberId: members[1]!.id, message: 'Wait for the first member', requestId: 'waiting-budget' };
+  const queued = await f.runtime.sendRoomMessage(room.id, waiting);
+  assert.equal(queued.status, 'queued');
+  originalMayFinish.resolve();
+  const view = await until(() => f.runtime.roomDetails(room.id), value => value.active === null && value.messages[1]?.status === 'interrupted');
   assert.equal(view.messages[0]?.status, 'interrupted');
-  assert.equal(view.messages.length, 1);
+  assert.equal(view.messages.length, 2);
   assert.equal(calls, 1);
+  assert.deepEqual(await f.runtime.sendRoomMessage(room.id, waiting), { ...queued, status: 'interrupted' });
   await assert.rejects(f.runtime.sendRoomMessage(room.id, { ...input, requestId: 'new-budget' }), /token budget/i);
 });
 

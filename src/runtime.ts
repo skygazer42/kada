@@ -56,7 +56,8 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
-import { RoomError, assistantRooms, pendingRoomTurn, readRoomAttachment, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
+import { RoomError, advanceRoomQueue, assistantRooms, interruptRoomQueue, pendingRoomTurn, readRoomAttachment,
+  roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
 import { VoiceNoteError, VoiceNotes, readVoiceClip, saveVoiceReply, siliconFlowVoiceSynthesizer, siliconFlowVoiceTranscriber,
   transcriptionText, verifyVoiceReply, voiceNoteKey, type VoiceSynthesizer, type VoiceTranscriber } from './voice-notes.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
@@ -702,6 +703,12 @@ export class LocalRuntime {
     });
   }
 
+  private roomExecution(meta: TaskMeta & { room: AssistantPin[] }) {
+    return { members: meta.room, title: meta.objective, durationMs: meta.maxDurationMs ?? this.config.maxDurationMs,
+      limits: { tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
+        costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 } };
+  }
+
   async sendRoomMessage(id: string, raw: Record<string, unknown>) {
     const input = roomMessageInput(raw);
     return this.changes.run(async () => {
@@ -711,13 +718,9 @@ export class LocalRuntime {
       let blocked: string | undefined;
       if (meta.control !== 'active') blocked = `The assistant room is ${meta.control}.`;
       else if (input.roomRevision !== undefined && input.roomRevision !== (meta.roomRevision ?? 1)) blocked = 'The room changed. Review the current members before sending.';
-      else if (await pendingRoomTurn(active.harness, ctx)) blocked = 'A room member is already answering.';
       else blocked = await this.budgetReason(active);
-      const limits = { tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
-        costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
-      const turn = await sendRoomMessage(active.root, { id, workspace: active.workspace, members: meta.room, title: meta.objective },
-        input, blocked, limits, meta.maxDurationMs ?? this.config.maxDurationMs, ctx);
-      if (meta.control === 'active' && turn.status === 'running') {
+      const turn = await sendRoomMessage(active.root, { id, workspace: active.workspace, ...this.roomExecution(meta) }, input, blocked, ctx);
+      if (meta.control === 'active' && (turn.status === 'running' || turn.status === 'queued')) {
         active.enabled = true;
         active.harness.resume();
       }
@@ -1621,13 +1624,12 @@ export class LocalRuntime {
   }
   private async supervise(active: Active): Promise<void> {
     if (active.meta.control !== "active") return;
-    if (active.meta.room) {
+    if (isRoom(active.meta)) {
       const turn = await pendingRoomTurn(active.harness, ctx);
-      if (!turn) active.enabled = false;
-      else if (Date.now() >= turn.deadlineAt || await this.budgetReason(active)) {
-        await this.abortAll(active);
-        active.enabled = false;
-      }
+      if (turn && Date.now() < turn.deadlineAt && !await this.budgetReason(active)) return;
+      if (turn) await this.abortAll(active);
+      active.enabled = await advanceRoomQueue(active.root, this.roomExecution(active.meta), ctx);
+      if (active.enabled) active.harness.resume();
       return;
     }
     let { tasks, submissions } = await active.harness.inspect(ctx);
@@ -2559,6 +2561,7 @@ export class LocalRuntime {
       for (const { record } of tasks) await active.harness.abortTask(record.id, ctx);
     }
     await this.abortAll(active);
+    if (meta.room) await interruptRoomQueue(active.root, ctx);
     await this.closeTask(meta.id);
   }
   private async abortAll(active: Active): Promise<void> {

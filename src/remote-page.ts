@@ -653,7 +653,7 @@ async function refreshSharedRoom() {
         });
         else element("p", label, item);
       }
-      if (["unanswered", "interrupted", "failed"].includes(message.status)) element("small", taskStatusLabel(message.status), item);
+      if (["queued", "unanswered", "interrupted", "failed"].includes(message.status)) element("small", taskStatusLabel(message.status), item);
     }
   }
   const memberSnapshot = JSON.stringify(view.members);
@@ -669,7 +669,7 @@ async function refreshSharedRoom() {
   roomOlder.hidden = !view.nextBefore;
   roomLatest.hidden = !before;
   roomComposer.hidden = !view.canSend;
-  roomSend.disabled = !!view.active || !!roomDrafts.get(id)?.sending;
+  roomSend.disabled = !view.canSend || !!roomDrafts.get(id)?.sending;
 }
 
 roomPicker.addEventListener("change", async () => {
@@ -699,7 +699,7 @@ roomMember.addEventListener("change", saveRoomDraft);
 roomComposer.addEventListener("submit", async event => {
   event.preventDefault();
   const device = identity, id = selectedRoom, view = roomView;
-  if (!device || !id || !view?.canSend || view.active) return;
+  if (!device || !id || !view?.canSend) return;
   const draft = saveRoomDraft();
   if (draft.sending || !draft.text.trim() || !view.members.some(member => member.id === draft.memberId)) return;
   const { text, memberId } = draft;
@@ -724,7 +724,7 @@ roomComposer.addEventListener("submit", async event => {
     if (current()) roomFeedback.textContent = error instanceof RequestError ? error.message : "Connection lost. Send again to check the original message.";
   } finally {
     draft.sending = false;
-    if (current()) roomSend.disabled = !!roomView?.active;
+    if (current()) roomSend.disabled = !roomView?.canSend;
   }
 });
 
@@ -1463,7 +1463,7 @@ function presentAttachments(attachments, article) {
 
 function taskStatusLabel(status) {
   const labels = {
-    pending: "Pending", running: "Running", working: "Working", clarifying: "Clarifying", awaiting_confirmation: "Ready for confirmation",
+    pending: "Pending", queued: "Queued", running: "Running", working: "Working", clarifying: "Clarifying", awaiting_confirmation: "Ready for confirmation",
     submitted: "Submitted", verifying: "Verifying", completed: "Completed",
     waiting_user: "Waiting for you", blocked: "Blocked", needs_attention: "Needs attention",
     failed: "Failed", paused: "Paused", cancelled: "Cancelled", budget_limited: "Budget limit reached", answered: "Answered",

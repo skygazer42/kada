@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "environment": "Windows, Chromium, agent-browser 0.38.1",
+  "viewport": { "width": 390, "height": 844 },
+  "model": "scripted Pi provider",
+  "pairedWebSentDuringOriginalReply": true,
+  "queuedMessageVisibleAfterReload": true,
+  "originalReplyPublishedFirst": true,
+  "queuedReplyUsedPreviousAnswer": true,
+  "originalPhoneMessageOccurredOnce": true
+}

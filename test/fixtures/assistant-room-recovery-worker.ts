@@ -14,11 +14,19 @@ const model = { provider: 'room-recovery', modelId: 'scripted' };
 const provider = fauxProvider({ provider: model.provider, models: [{ id: model.modelId }] });
 const generated = Promise.withResolvers<void>();
 const originalMessage = 'Original topic', handoffMessage = 'Handle the original room topic';
-const finalMessage = 'Finish the room chain', delegated = mode !== 'direct', chained = mode === 'chain';
+const finalMessage = 'Finish the room chain', queue = mode === 'queue', delegated = mode !== 'direct' && !queue, chained = mode === 'chain';
+const waiting = { message: 'Queued topic', requestId: 'queued-room-message' };
 let requests = 0;
 provider.setResponses(Array.from({ length: 4 }, () => async (context, options) => {
   const message = context.messages.findLast(item => item.role === 'user');
   const input = JSON.parse(String(message?.content));
+  if (queue && input.message === waiting.message) {
+    assert.equal(phase, 'recover');
+    assert(input.recent.some((entry: { text: string }) => entry.text === 'Original room answer after restart'));
+    requests++;
+    return fauxAssistantMessage('Queued room answer after restart');
+  }
+  if (queue) assert(!JSON.stringify(input).includes(waiting.message));
   if (delegated && input.message === originalMessage) {
     assert.equal(phase, 'create', 'Recovery must continue from the original recipient.');
     return fauxAssistantMessage(fauxToolCall('room_handoff', { member_id: input.handoffMembers[0].id, message: handoffMessage }), { stopReason: 'toolUse' });
@@ -58,6 +66,8 @@ try {
     const room = await runtime.createRoom({ title: 'Recovery', workspace, members });
     const receipt = await runtime.sendRoomMessage(room.id, { memberId: read.id, message: originalMessage, requestId });
     await generated.promise;
+    const queued = queue ? await runtime.sendRoomMessage(room.id, { memberId: write.id, ...waiting }) : undefined;
+    if (queued) assert.equal(queued.status, 'queued');
     if (mode === 'legacy') {
       type Speaker = { target: ConversationId; memberId: string; revision: number; name: string };
       const LegacyRoom = defineDoc<{ turns: Record<string, { current: Speaker; stage?: number; handoff?: { receiver: Speaker; message: string } }> }>({
@@ -69,15 +79,17 @@ try {
         delete turn.stage;
       }, ctx);
     }
-    console.log(JSON.stringify({ type: 'ready', submissionId: await nativeSubmission(room.id), messageEntryId: receipt.messageEntryId }));
+    console.log(JSON.stringify({ type: 'ready', submissionId: await nativeSubmission(room.id), messageEntryId: receipt.messageEntryId,
+      queuedEntryId: queued?.messageEntryId }));
     await setTimeout(60_000);
   } else {
     await runtime.recover();
     const [room] = await runtime.listRooms();
     assert(room);
-    const view = await until(() => runtime.roomDetails(room.id), state => state.messages.length === (chained ? 4 : delegated ? 3 : 2));
+    const view = await until(() => runtime.roomDetails(room.id), state => state.messages.length === (queue || chained ? 4 : delegated ? 3 : 2));
     const submissionId = await nativeSubmission(room.id);
     const receipt = await runtime.sendRoomMessage(room.id, { memberId: room.members[0]!.id, message: originalMessage, requestId });
-    console.log(JSON.stringify({ submissionId, receipt, messages: view.messages, requests }));
+    const queued = queue ? await runtime.sendRoomMessage(room.id, { memberId: room.members[1]!.id, ...waiting }) : undefined;
+    console.log(JSON.stringify({ submissionId, receipt, queued, messages: view.messages, requests }));
   }
 } finally { await runtime.close(); }

@@ -31,6 +31,9 @@ test('removing a group member stops its original turn while preserving the trans
   const input = { memberId: first.id, message: 'Hold the original room turn', requestId: 'stop-original' };
   const firstReceipt = await runtime.sendRoomMessage(room.id, input);
   await entered.promise;
+  const waiting = { memberId: first.id, message: 'Request again after the current turn', requestId: 'waiting-member' };
+  const queued = await runtime.sendRoomMessage(room.id, waiting);
+  assert.equal(queued.status, 'queued');
   await assert.rejects(runtime.updateRoom(room.id, { revision: 99, members: [ref(second), ref(third)] }), /revision|changed/i);
   assert.equal((await runtime.roomDetails(room.id)).active?.requestId, input.requestId);
   const replacement = await runtime.updateRoom(room.id, { revision: 1, title: 'New room name', members: [ref(second), ref(third)] });
@@ -40,7 +43,9 @@ test('removing a group member stops its original turn while preserving the trans
   assert.equal(stopped, true);
   await assert.rejects(runtime.sendRoomMessage(room.id, { ...input, requestId: 'new-work' }), /member/i);
   assert.deepEqual(await runtime.sendRoomMessage(room.id, input), { ...firstReceipt, status: 'interrupted' });
-  assert.deepEqual((await runtime.roomDetails(room.id)).messages.map(message => message.text), [input.message]);
+  const afterRemoval = await until(() => runtime.roomDetails(room.id), view => view.messages[1]?.status === 'interrupted');
+  assert.deepEqual(afterRemoval.messages.map(message => message.text), [input.message, waiting.message]);
+  assert.deepEqual(await runtime.sendRoomMessage(room.id, waiting), { ...queued, status: 'interrupted' });
 
   const revised = await runtime.assistants.update(first.id, { revision: first.revision, instructions: 'REVISED_MEMBER_INSTRUCTIONS' });
   const restored = await runtime.updateRoom(room.id, { revision: replacement.revision, members: [ref(revised), ref(second)] });
@@ -52,7 +57,7 @@ test('removing a group member stops its original turn while preserving the trans
   assert.equal(reloaded.members[0]!.revision, first.revision + 1);
   assert.equal(reloaded.title, 'New room name');
   await runtime.sendRoomMessage(room.id, { memberId: first.id, message: 'Check the new member', requestId: 'pin-revised-role' });
-  const checked = await until(() => runtime.roomDetails(room.id), selected => selected.messages.length === 3);
-  assert.equal(checked.messages[2]!.revision, revised.revision);
-  assert.equal(checked.messages[2]!.text, 'Updated member reply');
+  const checked = await until(() => runtime.roomDetails(room.id), selected => selected.messages.length === 4);
+  assert.equal(checked.messages[3]!.revision, revised.revision);
+  assert.equal(checked.messages[3]!.text, 'Updated member reply');
 });

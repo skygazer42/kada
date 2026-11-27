@@ -37,6 +37,11 @@ test('a local room routes an addressed message, preserves its receipt and shares
     assert(transcript.includes('WRITER_ROLE_MARKER'));
     assert(!transcript.includes('READER_ROLE_MARKER'));
     assert(input.includes('Public first answer'));
+    if (roomInput.message === 'Third topic') {
+      assert(input.includes('Public second answer'));
+      return fauxAssistantMessage('Public third answer');
+    }
+    assert(!input.includes('Third topic'));
     return fauxAssistantMessage('Public second answer');
   });
   let runtime = f.runtime;
@@ -62,27 +67,33 @@ test('a local room routes an addressed message, preserves its receipt and shares
   await until(async () => started, Boolean);
   assert.deepEqual(await runtime.sendRoomMessage(room.id, first), accepted);
   await assert.rejects(runtime.sendRoomMessage(room.id, { ...first, message: 'Different' }), /request ID/i);
-  await assert.rejects(runtime.sendRoomMessage(room.id, { ...first, memberId: writer.id, requestId: 'concurrent' }), /already answering/i);
+  const second = { memberId: writer.id, message: 'Second topic', requestId: 'second' };
+  const queued = await runtime.sendRoomMessage(room.id, second);
+  assert.equal(queued.status, 'queued');
+  assert.deepEqual(await runtime.sendRoomMessage(room.id, second), queued);
+  const third = { ...second, message: 'Third topic', requestId: 'third' };
+  assert.equal((await runtime.sendRoomMessage(room.id, third)).status, 'queued');
+  assert.deepEqual((await runtime.roomDetails(room.id)).messages.map(message => message.status), ['running', 'queued', 'queued']);
+  assert.equal(requests.length, 1);
+  await runtime.assistants.update(writer.id, { revision: writer.revision, instructions: 'CHANGED_ROLE_MARKER' });
   releaseFirst();
-  const initial = await until(() => runtime.roomDetails(room.id), value => value.messages.length === 2);
-  assert.equal(initial.messages[1]!.text, 'Public first answer');
-  assert.equal(initial.messages[1]!.memberId, reader.id);
+  const continued = await until(() => runtime.roomDetails(room.id), value => value.messages.length === 6);
+  assert.equal(continued.messages[3]!.text, 'Public first answer');
+  assert.equal(continued.messages[3]!.memberId, reader.id);
   const settled = await runtime.sendRoomMessage(room.id, first);
   assert.equal(settled.status, 'answered');
-  assert.equal(settled.answerEntryId, initial.messages[1]!.id);
+  assert.equal(settled.answerEntryId, continued.messages[3]!.id);
+  assert.deepEqual(await runtime.sendRoomMessage(room.id, second), { ...queued, status: 'answered', answerEntryId: continued.messages[4]!.id });
 
-  await runtime.assistants.update(writer.id, { revision: writer.revision, instructions: 'CHANGED_ROLE_MARKER' });
   await runtime.close();
   runtime = new LocalRuntime(f.settings, { models: f.models });
   await runtime.recover();
   assert.deepEqual(await runtime.sendRoomMessage(room.id, first), settled);
-  assert.equal(requests.length, 1);
-  await runtime.sendRoomMessage(room.id, { memberId: writer.id, message: 'Second topic', requestId: 'second' });
-  const continued = await until(() => runtime.roomDetails(room.id), value => value.messages.length === 4);
-  assert.equal(requests.length, 2);
-  assert.equal(continued.messages[3]!.text, 'Public second answer');
-  assert.equal(continued.messages[3]!.revision, writer.revision);
-  assert.deepEqual((await runtime.roomDetails(room.id, continued.messages[2]!.id)).messages, initial.messages);
+  assert.equal(requests.length, 3);
+  assert.equal(continued.messages[4]!.text, 'Public second answer');
+  assert.equal(continued.messages[4]!.revision, writer.revision);
+  assert.equal(continued.messages[5]!.text, 'Public third answer');
+  assert.deepEqual((await runtime.roomDetails(room.id, continued.messages[5]!.id)).messages, continued.messages.slice(0, 5));
 });
 
 test('the terminal and authenticated API use the original room, outside its ordinary thread list', async t => {
@@ -128,8 +139,8 @@ test('the terminal and authenticated API use the original room, outside its ordi
   assert.deepEqual(duplicate, { ...send, status: 'answered', answerEntryId: view.messages[1]?.id });
 });
 
-for (const mode of ['direct', 'handoff', 'chain', 'legacy'] as const) {
-  test(`SIGKILL during a ${mode} room reply preserves its native submission and one answer`, { timeout: recoveryTestTimeoutMs }, async () => {
+for (const mode of ['direct', 'handoff', 'chain', 'legacy', 'queue'] as const) {
+  test(`SIGKILL during a ${mode} room reply preserves its native submission and original messages`, { timeout: recoveryTestTimeoutMs }, async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), 'kada-assistant-room-')));
     const fixture = new URL('./fixtures/assistant-room-recovery-worker.ts', import.meta.url);
     let worker = startRecoveryWorker(fixture, 'create', directory, mode);
@@ -141,11 +152,21 @@ for (const mode of ['direct', 'handoff', 'chain', 'legacy'] as const) {
       assert.equal(recovered.submissionId, started.submissionId);
       assert.equal(recovered.receipt.messageEntryId, started.messageEntryId);
       assert.equal(recovered.receipt.status, 'answered');
-      assert.equal(recovered.receipt.answerEntryId, recovered.messages.at(-1).id);
-      assert.deepEqual(recovered.messages.map((message: { role: string }) => message.role),
-        ['user', ...Array.from({ length: { direct: 0, handoff: 1, chain: 2, legacy: 1 }[mode] }, () => 'handoff'), 'assistant']);
-      assert.equal(recovered.messages.at(-1).text, 'Original room answer after restart');
-      assert.equal(recovered.requests, 1);
+      if (mode === 'queue') {
+        assert.equal(recovered.receipt.answerEntryId, recovered.messages[2].id);
+        assert.equal(recovered.queued?.messageEntryId, started.queuedEntryId);
+        assert.equal(recovered.queued?.status, 'answered');
+        assert.equal(recovered.queued?.answerEntryId, recovered.messages[3].id);
+        assert.deepEqual(recovered.messages.map((message: { role: string }) => message.role), ['user', 'user', 'assistant', 'assistant']);
+        assert.equal(recovered.messages[3].text, 'Queued room answer after restart');
+        assert.equal(recovered.requests, 2);
+      } else {
+        assert.equal(recovered.receipt.answerEntryId, recovered.messages.at(-1).id);
+        assert.deepEqual(recovered.messages.map((message: { role: string }) => message.role),
+          ['user', ...Array.from({ length: { direct: 0, handoff: 1, chain: 2, legacy: 1 }[mode] }, () => 'handoff'), 'assistant']);
+        assert.equal(recovered.messages.at(-1).text, 'Original room answer after restart');
+        assert.equal(recovered.requests, 1);
+      }
     } finally { await worker.stop(); await rm(directory, { recursive: true, force: true, maxRetries: 5 }); }
   });
 }
@@ -168,11 +189,41 @@ test('a timed-out room answer settles before another member can start', async t 
     members: [first, second].map(({ id, revision }) => ({ id, revision })) });
   const input = { memberId: first.id, message: 'Slow room turn', requestId: 'original-timeout' };
   const original = await r.sendRoomMessage(room.id, input);
-  const stopped = await until(() => r.roomDetails(room.id), value => value.active === null);
-  assert.equal(interrupted, true);
-  assert.equal(stopped.messages[0]?.status, 'interrupted');
-  assert.deepEqual(await r.sendRoomMessage(room.id, input), { ...original, status: 'interrupted' });
-  await r.sendRoomMessage(room.id, { memberId: second.id, message: 'Continue after timeout', requestId: 'next-turn' });
+  const next = await r.sendRoomMessage(room.id, { memberId: second.id, message: 'Continue after timeout', requestId: 'next-turn' });
+  assert.equal(next.status, 'queued');
   const later = await until(() => r.roomDetails(room.id), value => value.messages.length === 3);
+  assert.equal(interrupted, true);
+  assert.equal(later.messages[0]?.status, 'interrupted');
+  assert.deepEqual(await r.sendRoomMessage(room.id, input), { ...original, status: 'interrupted' });
   assert.equal(later.messages[2]?.text, 'Next member answered');
+});
+
+test('a room bounds its waiting messages and cancellation settles them without starting the model', async t => {
+  const entered = Promise.withResolvers<void>();
+  let requests = 0;
+  const f = await scriptedFixture(async (_context, signal) => {
+    requests++;
+    entered.resolve();
+    await setTimeout(60_000, undefined, { signal });
+    return fauxAssistantMessage('Unexpected answer');
+  });
+  t.after(() => f.close());
+  const r = f.runtime;
+  const members = [];
+  for (const name of ['First', 'Second']) {
+    const { id, revision } = await r.assistants.create({ workspace: f.workspace, name, instructions: name, tools: [] });
+    members.push({ id, revision });
+  }
+  const room = await r.createRoom({ workspace: f.workspace, title: 'Queue limit', members });
+  const send = (position: number) => r.sendRoomMessage(room.id, { memberId: members[0]!.id, message: `Message ${position}`, requestId: `queue-${position}` });
+  assert.equal((await send(0)).status, 'running');
+  await entered.promise;
+  for (let position = 1; position <= 8; position++) assert.equal((await send(position)).status, 'queued');
+  await assert.rejects(send(9), /eight waiting messages/i);
+  await r.cancel(room.id);
+  assert.equal(requests, 1);
+  const stopped = await r.roomDetails(room.id);
+  assert.equal(stopped.messages.length, 9);
+  assert(stopped.messages.every(message => message.status === 'interrupted'));
+  assert.equal((await send(8)).status, 'interrupted');
 });

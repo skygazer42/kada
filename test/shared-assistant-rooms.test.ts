@@ -9,8 +9,11 @@ import { serve } from '../src/server.js';
 import { scriptedFixture, until } from './helpers.js';
 
 test('a paired device sees only granted original rooms and sends once under its independent reply grant', async t => {
-  const fixture = await scriptedFixture(context => {
+  const firstReply = Promise.withResolvers<void>();
+  const originalText = 'the original mobile input';
+  const fixture = await scriptedFixture(async context => {
     const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
+    if (input.message === originalText) await firstReply.promise;
     return fauxAssistantMessage('Original reply for ' + input.message);
   });
   await fixture.runtime.close();
@@ -20,7 +23,7 @@ test('a paired device sees only granted original rooms and sends once under its 
   await new Promise<void>(resolve => socket.close(() => resolve()));
   const config = { ...fixture.settings, port };
   const server = await serve(config, { models: fixture.models });
-  t.after(async () => { await server.close(); await fixture.close(); });
+  t.after(async () => { firstReply.resolve(); await server.close(); await fixture.close(); });
   const client = createClient(config);
   const define = (name: string) => server.runtime.assistants.create({ workspace: fixture.workspace, name, instructions: 'Reply in the original room.', tools: [] });
   const lead = await define('Lead'), review = await define('Reviewer');
@@ -46,7 +49,7 @@ test('a paired device sees only granted original rooms and sends once under its 
   assert.equal(readOnly.canSend, false);
   assert(!JSON.stringify(readOnly).includes(fixture.workspace));
   assert(!JSON.stringify(readOnly).includes('Reply in the original room.'));
-  const input = { memberId: review.id, message: 'the original mobile input', requestId: 'stable-phone-id', roomRevision: readOnly.revision };
+  const input = { memberId: review.id, message: originalText, requestId: 'stable-phone-id', roomRevision: readOnly.revision };
   assert.equal((await remote(path + '/messages', 0, input)).status, 403);
   await grant('share-replies', 'one');
   await grant('share', 'two');
@@ -54,12 +57,16 @@ test('a paired device sees only granted original rooms and sends once under its 
   assert.equal((await remote(path + '/messages', 0, { ...input, roomRevision: 99 })).status, 409);
   const accepted = await remote(path + '/messages', 0, input);
   assert.equal(accepted.status, 200);
-  const view = await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 2);
-  assert.equal(view.messages[1]?.text, 'Original reply for ' + input.message);
-  const duplicated = await (await remote(path + '/messages', 0, input)).json();
-  assert.equal(duplicated.answerEntryId, view.messages[1]?.id);
-  assert.equal((await remote(path + '/messages', 1, { ...input, message: 'a second phone with the same request ID' })).status, 200);
+  const second = { ...input, message: 'a second phone with the same request ID' };
+  const queued = await remote(path + '/messages', 1, second);
+  assert.equal(queued.status, 200);
+  assert.equal((await queued.json()).status, 'queued');
+  assert.deepEqual((await (await remote(path)).json()).messages.map((message: { status: string }) => message.status), ['running', 'queued']);
+  firstReply.resolve();
   const continued = await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 4);
+  assert.equal(continued.messages[2]?.text, 'Original reply for ' + input.message);
+  const duplicated = await (await remote(path + '/messages', 0, input)).json();
+  assert.equal(duplicated.answerEntryId, continued.messages[2]?.id);
   assert.equal(continued.messages[3]?.text, 'Original reply for a second phone with the same request ID');
   assert.equal((await remote(path + '/messages', 1, { ...input, requestId: 'phone-file', files: ['private.txt'] })).status, 400);
   await writeFile(join(fixture.workspace, 'private.txt'), 'Original attached file content.');

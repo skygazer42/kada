@@ -20,12 +20,14 @@ type Speaker = { target: ConversationId; memberId: string; revision: number; nam
 type Attachment = { id: number; name: string; bytes: number };
 type Handoff = { receiver: Speaker; message: string };
 type Forwarded = Handoff & { stage?: number; from?: string; handoffMembers?: { id: string; name: string }[]; attachments?: Attachment[] };
-type Turn = { current: Speaker; memberId: string; candidates: Speaker[]; messageEntryId: EntryId; fingerprint: string; deadlineAt: number;
-  taskId: TaskId; stage?: number; fileWorkId?: string; attachments?: AssistantFile[]; publications?: Record<string, Attachment>;
+type Turn = { current: Speaker; memberId: string; candidates: Speaker[]; messageEntryId: EntryId; fingerprint: string; deadlineAt?: number;
+  taskId?: TaskId; stage?: number; fileWorkId?: string; attachments?: AssistantFile[]; publications?: Record<string, Attachment>;
   handoff?: Handoff; outcome?: Outcome; answerEntryId?: EntryId };
 type Limits = { tokenLimit: number | null; costLimit: number };
+type RoomExecution = { members: AssistantPin[]; title: string; limits: Limits; durationMs: number };
 
-const RoomState = defineDoc<{ seats: Record<string, ConversationId>; turns: Record<string, Turn>; active?: string }>({
+const roomQueueLimit = 8;
+const RoomState = defineDoc<{ seats: Record<string, ConversationId>; turns: Record<string, Turn>; active?: string; queued?: string[] }>({
   scope: 'session', kind: 'local.assistant_room', version: 1,
   initial: () => ({ seats: {}, turns: {} }), checkpointWhen: () => true,
 });
@@ -130,7 +132,9 @@ const Deliver = defineTask<Delivery, { phase: 'deliver'; forwarded?: Forwarded }
 async function currentStage(tx: Tx, conversation: ConversationId, now: number) {
   const state = await tx.doc(RoomState), key = state.active;
   const turn = key ? state.turns[key] : undefined;
-  if (!key || !turn || turn.current.target !== conversation || now >= turn.deadlineAt) throw new Error('The original room stage is no longer active.');
+  if (!key || !turn || turn.current.target !== conversation || turn.deadlineAt === undefined || now >= turn.deadlineAt) {
+    throw new Error('The original room stage is no longer active.');
+  }
   const input = await tx.submissionByRequest(conversation, stageRequest(key, turn.stage ?? 0)), live = await tx.doc(LiveDoc, conversation);
   if (input?.status !== 'placed' || !live.run?.inputs.includes(input.id)) throw new Error('This tool belongs to the active original room reply.');
   return { turn, key };
@@ -258,12 +262,13 @@ export async function readRoomAttachment(root: Conversation, workspace: Workspac
 
 export const assistantRooms = defineExtension({ name: 'local_assistant_rooms', tasks: [Anchor, Deliver], tools: [RoomHandoff, RoomReadFile, RoomAttachText] });
 
-function receipt(requestId: string, turn: Turn, status: Outcome | 'failed' | 'running') {
+function receipt(requestId: string, turn: Turn, status: Outcome | 'failed' | 'running' | 'queued') {
   return { requestId, memberId: turn.memberId, status, messageEntryId: turn.messageEntryId, answerEntryId: turn.answerEntryId ?? null };
 }
 
 async function turnStatus(tx: Tx, turn: Turn) {
   if (turn.outcome) return turn.outcome;
+  if (turn.taskId === undefined) return 'queued' as const;
   const delivery = await tx.task(turn.taskId);
   return !delivery || delivery.state.status === 'terminal' ? 'failed' as const : 'running' as const;
 }
@@ -272,13 +277,68 @@ async function activeRoomTurn(tx: Tx) {
   const state = await tx.doc(RoomState);
   if (!state.active) return;
   const turn = state.turns[state.active]!;
-  if (await turnStatus(tx, turn) === 'running') {
+  if (turn.deadlineAt !== undefined && await turnStatus(tx, turn) === 'running') {
     return { ...receipt(state.active.slice('room:'.length), turn, 'running'), memberId: turn.current.memberId,
       revision: turn.current.revision, candidates: turn.candidates.map(({ memberId, revision }) => ({ memberId, revision })), deadlineAt: turn.deadlineAt };
   }
 }
 
 export function pendingRoomTurn(harness: Harness, context: Context) { return harness.commit(activeRoomTurn, context); }
+
+async function interruptWaitingTurns(tx: Tx) {
+  const state = await tx.doc(RoomState);
+  for (const key of state.queued ?? []) state.turns[key]!.outcome = 'interrupted';
+  delete state.queued;
+}
+
+async function dispatchNextRoomTurn(tx: Tx, root: ConversationId, room: RoomExecution) {
+  const state = await tx.doc(RoomState);
+  if (await activeRoomTurn(tx)) return state.active;
+  if (!state.queued?.length) return;
+  if (!await canContinue(tx, Object.values(state.seats), room.limits)) {
+    await interruptWaitingTurns(tx);
+    return;
+  }
+  const members = new Set(room.members.map(pin => `${pin.id}@${pin.revision}`));
+  const available = (speaker: Speaker) => members.has(`${speaker.memberId}@${speaker.revision}`);
+  while (state.queued.length) {
+    const key = state.queued.shift()!;
+    const turn = state.turns[key]!;
+    if (!available(turn.current) || !turn.candidates.every(available)) {
+      turn.outcome = 'interrupted';
+      continue;
+    }
+    const { data } = (await tx.entry(RoomMessage, turn.messageEntryId))!;
+    const history = (await tx.scanEntries({ conversationId: root }, 16 + roomQueueLimit + 1)).items.filter(RoomMessage.is);
+    const recent: Delivery['content']['recent'] = [];
+    let remaining = 16_000;
+    for (const { data: prior } of history) {
+      if (remaining <= 0 || recent.length === 16) break;
+      const earlier = state.turns[`room:${prior.requestId}`];
+      if (prior.role === 'user' && earlier && earlier.taskId === undefined) continue;
+      recent.unshift({ role: prior.role, member: prior.name, text: prior.text.slice(0, remaining) });
+      remaining -= prior.text.length;
+    }
+    const speaker = turn.current;
+    const content = { room: room.title, recent, message: data.text,
+      handoffMembers: turn.candidates.map(candidate => ({ id: candidate.memberId, name: candidate.name })),
+      ...(data.attachments?.length ? { attachments: data.attachments } : {}) };
+    await configure(tx, speaker.target, { tools: speakerTools(speaker, turn.candidates, turn.attachments ?? []) });
+    turn.deadlineAt = Date.now() + room.durationMs;
+    turn.taskId = await tx.createTask(Deliver, { speaker, key, requestId: data.requestId, content,
+      deadlineAt: turn.deadlineAt, limits: room.limits }, { ownership: { kind: 'conversation' } });
+    state.active = key;
+    return key;
+  }
+}
+
+export function advanceRoomQueue(root: Conversation, room: RoomExecution, context: Context) {
+  return root.commit(async tx => Boolean(await dispatchNextRoomTurn(tx, root.id, room)), context);
+}
+
+export function interruptRoomQueue(root: Conversation, context: Context) {
+  return root.commit(interruptWaitingTurns, context);
+}
 
 export function roomMessageInput(input: Record<string, unknown>) {
   const { memberId, message, requestId, roomRevision, files = [] } = input;
@@ -295,12 +355,12 @@ export function roomMessageInput(input: Record<string, unknown>) {
   return { memberId, message, requestId, roomRevision, files: files as string[] };
 }
 
-export function sendRoomMessage(root: Conversation, room: { id: string; workspace: Workspace; members: AssistantPin[]; title: string },
-  input: ReturnType<typeof roomMessageInput>, blocked: string | undefined, limits: Limits, durationMs: number, context: Context) {
-  const { workspace, members, title } = room;
+export async function sendRoomMessage(root: Conversation, room: RoomExecution & { id: string; workspace: Workspace },
+  input: ReturnType<typeof roomMessageInput>, blocked: string | undefined, context: Context) {
+  const { workspace, members } = room;
   const { message, requestId } = input, key = `room:${requestId}`;
   const fingerprint = createHash('sha256').update(JSON.stringify([input.memberId, message, ...(input.files.length ? [input.files] : [])])).digest('hex');
-  return root.commit(async tx => {
+  const admitted = await root.commit(async tx => {
     const state = await tx.doc(RoomState), original = state.turns[key];
     if (original) {
       if (original.fingerprint !== fingerprint) throw new RoomError(409, 'This room request ID already has different content.');
@@ -308,9 +368,8 @@ export function sendRoomMessage(root: Conversation, room: { id: string; workspac
     }
     const member = members.find(pin => pin.id === input.memberId);
     if (!member) throw new RoomError(404, 'Choose a member of this assistant room.');
-    const current = state.active ? state.turns[state.active] : undefined;
-    if (current && await turnStatus(tx, current) === 'running') throw new RoomError(409, 'A room member is already answering.');
     if (blocked) throw new RoomError(409, blocked);
+    if ((state.queued?.length ?? 0) >= roomQueueLimit) throw new RoomError(409, 'This room already has eight waiting messages.');
     const fileWorkId = 'room-' + createHash('sha256').update(JSON.stringify([room.id, requestId])).digest('hex');
     const attachments = input.files.length ? await prepareAssistantFiles(workspace, fileWorkId, input.files) : [];
     for (const original of attachments) {
@@ -319,15 +378,7 @@ export function sendRoomMessage(root: Conversation, room: { id: string; workspac
     }
     await copyAssistantFiles(workspace, attachments);
     const attachmentList = describeAttachments(attachments);
-    const history = (await tx.scanEntries({ conversationId: root.id }, 16)).items.filter(RoomMessage.is);
-    const recent: Delivery['content']['recent'] = [];
-    let remaining = 16_000;
-    for (const { data } of history) {
-      if (remaining <= 0) break;
-      recent.unshift({ role: data.role, member: data.name, text: data.text.slice(0, remaining) });
-      remaining -= data.text.length;
-    }
-    const now = Date.now(), deadlineAt = now + durationMs;
+    const now = Date.now();
     const seatFor = async (pin: AssistantPin): Promise<Speaker> => {
       const seat = `${pin.id}@${pin.revision}`;
       let target = state.seats[seat];
@@ -347,17 +398,21 @@ export function sendRoomMessage(root: Conversation, room: { id: string; workspac
     if (member.tools.includes(RoomHandoff.name)) {
       for (const pin of members) if (pin.id !== member.id) candidates.push(await seatFor(pin));
     }
-    await configure(tx, speaker.target, { tools: speakerTools(speaker, candidates, attachments) });
     const userEntry = await tx.appendEntry(RoomMessage, root.id, { data: { role: 'user', text: message, requestId,
       memberId: member.id, revision: member.revision, name: member.name, at: now, ...(attachmentList.length ? { attachments: attachmentList } : {}) } });
-    const content = { room: title, recent, message, handoffMembers: candidates.map(candidate => ({ id: candidate.memberId, name: candidate.name })),
-      ...(attachmentList.length ? { attachments: attachmentList } : {}) };
-    const taskId = await tx.createTask(Deliver, { speaker, key, requestId, content, deadlineAt, limits }, { ownership: { kind: 'conversation' } });
-    const turn = { current: speaker, memberId: member.id, candidates, messageEntryId: userEntry.id, fingerprint, deadlineAt, taskId, fileWorkId,
+    const turn = { current: speaker, memberId: member.id, candidates, messageEntryId: userEntry.id, fingerprint, fileWorkId,
       ...(attachments.length ? { attachments } : {}) };
     state.turns[key] = turn;
-    state.active = key;
-    return receipt(requestId, turn, 'running');
+    state.queued = [...(state.queued ?? []), key];
+    return receipt(requestId, turn, 'queued');
+  }, context);
+  if (admitted.status !== 'queued' || blocked) return admitted;
+  // Pi requires transcript reads before table writes, so dispatch reads the committed message.
+  return root.commit(async tx => {
+    const turn = (await tx.doc(RoomState)).turns[key]!;
+    if (turn.taskId !== undefined || turn.outcome) return receipt(requestId, turn, await turnStatus(tx, turn));
+    const active = await dispatchNextRoomTurn(tx, root.id, room);
+    return receipt(requestId, turn, turn.outcome ?? (active === key ? 'running' : 'queued'));
   }, context);
 }
 
