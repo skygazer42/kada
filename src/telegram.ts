@@ -76,7 +76,7 @@ export async function runTelegram(config: Config, signal: AbortSignal, options: 
     pairingToken, file, prefix, log,
     initial: peer => ({ userId, peer, current: prefix + "initial", open: [], outbox: {} }),
     transport: {
-      name: "Telegram", secret: botToken, commandPrefix: "/", textLimit: 3900,
+      name: "Telegram", secrets: [botToken], commandPrefix: "/", textLimit: 3900,
       sendText(text, action) {
         const reply_markup = action === "confirm"
           ? { inline_keyboard: [[{ text: "Confirm this brief", callback_data: "confirm" }]] }

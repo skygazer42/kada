@@ -201,8 +201,13 @@ test("Telegram private chat confirms the original brief, resumes its question an
   const [upload] = await readdir(attachmentDir);
   assert(upload);
   assert.deepEqual(await readFile(join(attachmentDir, upload, "input.csv")), originalInput);
-  await stop();
   const stateFile = join(config.dataDir, "telegram", "60001.json");
+  const sent = (id: number) => until(async () => {
+    const persisted = JSON.parse(await readFile(stateFile, "utf8")) as { outbox: Record<string, { messageId?: number }> };
+    return Object.values(persisted.outbox).some(post => post.messageId === id);
+  }, Boolean);
+  await sent(brief.id);
+  await stop();
   const firstState = JSON.parse(await readFile(stateFile, "utf8"));
   const firstPollCount = offsets.length;
   await writeFile(stateFile, JSON.stringify({ ...firstState, offset: 3 }));
@@ -220,6 +225,7 @@ test("Telegram private chat confirms the original brief, resumes its question an
   updates.push(confirm(6, restoredBrief.id));
   const question = await published("Which format?");
   assert.match(question.text, /CSV/);
+  await sent(question.id);
   await stop();
   await daemon.close();
   daemon = await open();
@@ -230,6 +236,7 @@ test("Telegram private chat confirms the original brief, resumes its question an
   updates.push(message(8, "Use blue.", telegramConfig.userId, "private", childQuestion.id));
   const original = await until(async () => posts.find(post => post.document), Boolean);
   assert.deepEqual(original?.document, Buffer.from("Kada telegram proof\r\n"));
+  await until(async () => logs.some(line => line.includes("Send outcome unresolved")), Boolean);
   await stop();
   start();
   updates.push(message(9, "/status"));

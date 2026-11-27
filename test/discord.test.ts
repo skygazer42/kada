@@ -202,6 +202,11 @@ test("Discord preserves the original private task across REST backfill, confirma
   phase = "question";
   history.push(message("!confirm", userId, brief.id));
   const question = await seen("Which report format?");
+  const stateFile = join(config.dataDir, "discord", botId + ".json");
+  await until(async () => {
+    const persisted = JSON.parse(await readFile(stateFile, "utf8")) as { outbox: Record<string, { messageId?: string }> };
+    return Object.values(persisted.outbox).some(post => post.messageId === question.id);
+  }, Boolean);
   await stop();
   await daemon.close();
   daemon = await open();
@@ -211,6 +216,7 @@ test("Discord preserves the original private task across REST backfill, confirma
   start();
   const delivered = await until(async () => sends.find(post => post.bytes) ?? null, Boolean);
   assert.deepEqual(delivered?.bytes, Buffer.from("Verified Discord report.\r\n"));
+  await until(async () => logs.some(line => line.includes("Send outcome unresolved")), Boolean);
   await stop();
   start();
   history.push(message("!status"));

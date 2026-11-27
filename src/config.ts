@@ -6,6 +6,7 @@ export interface RemoteComputer { name: string; origin: string }
 export type GithubWebhookConfig = { routineId: string; secretEnv: string };
 export interface TelegramConfig { userId: number; botTokenEnv: string; pairingTokenEnv: string }
 export interface DiscordConfig { userId: string; botTokenEnv: string; pairingTokenEnv: string }
+export interface SlackConfig { userId: string; appTokenEnv: string; botTokenEnv: string; pairingTokenEnv: string }
 
 export function discordSnowflake(value: unknown): value is string {
   return typeof value === "string" && /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 0xffff_ffff_ffff_ffffn;
@@ -47,6 +48,7 @@ export interface Config {
   remotePush?: boolean;
   telegram?: TelegramConfig;
   discord?: DiscordConfig;
+  slack?: SlackConfig;
   githubIssuePolling?: string[];
   githubIssueTokenEnv?: string;
   githubWebhooks?: GithubWebhookConfig[];
@@ -171,6 +173,19 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     }
     discord = { userId: input.userId, botTokenEnv: input.botTokenEnv, pairingTokenEnv: input.pairingTokenEnv };
   }
+  let slack: SlackConfig | undefined;
+  if (raw.slack !== undefined) {
+    const input = raw.slack as Partial<SlackConfig> | null;
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+      Object.keys(input).some(key => !["userId", "appTokenEnv", "botTokenEnv", "pairingTokenEnv"].includes(key)) ||
+      typeof input.userId !== "string" || !/^[UW][A-Z0-9]{2,31}$/.test(input.userId) ||
+      typeof input.appTokenEnv !== "string" || !envName.test(input.appTokenEnv) ||
+      typeof input.botTokenEnv !== "string" || !envName.test(input.botTokenEnv) ||
+      typeof input.pairingTokenEnv !== "string" || !envName.test(input.pairingTokenEnv)) {
+      throw new Error("slack requires a private userId and appTokenEnv, botTokenEnv and pairingTokenEnv variable names.");
+    }
+    slack = { userId: input.userId, appTokenEnv: input.appTokenEnv, botTokenEnv: input.botTokenEnv, pairingTokenEnv: input.pairingTokenEnv };
+  }
   const maxEstimatedCostUsd = raw.maxEstimatedCostUsd ?? 1;
   if (typeof maxEstimatedCostUsd !== "number" || !Number.isFinite(maxEstimatedCostUsd) || maxEstimatedCostUsd <= 0) throw new Error("maxEstimatedCostUsd must be a positive number");
   return {
@@ -192,6 +207,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     ...(remoteComputers?.length ? { remoteComputers } : {}),
     ...(telegram ? { telegram } : {}),
     ...(discord ? { discord } : {}),
+    ...(slack ? { slack } : {}),
     ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
     ...(githubIssueTokenEnv ? { githubIssueTokenEnv } : {}),
     ...(githubWebhooks ? { githubWebhooks: githubWebhooks.map(({ routineId, secretEnv }) => ({ routineId, secretEnv })) } : {}),

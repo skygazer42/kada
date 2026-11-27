@@ -636,6 +636,35 @@ npm run harness -- discord
 
 `!new` 新开会话。回复旧 Bot 消息可接回原任务。用 `!status` 查看状态和未取得回执的发送，或重新显示当前待确认、待回答内容。`!delivery` 可以重新请求核验产物。断开期间收到的消息会在连接后按原顺序补读。 [实现与测试](superpowers/plans/2026-11-27-discord.md)
 
+## Slack 私聊入口
+
+给专用 Slack App 开启 Socket Mode。创建带 `connections:write` 的 App 级令牌，给 Bot 配置 `chat:write`、`im:write`、`im:history`、`files:read` 和 `files:write`。订阅 Bot 事件 `message.im`，安装应用并开启 App Home 的私聊入口。 [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)
+
+```powershell
+npm run harness -- remote pair slack bot
+```
+
+在运行 daemon 的配置中添加以下内容，把你的 Slack 用户 ID 填入 `userId`。将 App 令牌、Bot 令牌和 Kada 配对令牌放入对应环境变量。
+
+```json
+{
+  "slack": {
+    "userId": "U0123456789",
+    "appTokenEnv": "KADA_SLACK_APP_TOKEN",
+    "botTokenEnv": "KADA_SLACK_BOT_TOKEN",
+    "pairingTokenEnv": "KADA_SLACK_PAIRING_TOKEN"
+  }
+}
+```
+
+```powershell
+npm run harness -- slack
+```
+
+启动后在 Bot 一对一私聊发文字或文档。每条消息可附 4 份文档，每份最多 5 MiB。在线程里回复原任务说明并输入 `!confirm`。答复主任务或子任务时，在线程里回复它当时发出的原问题。报告作为 Slack 文件发回。
+
+`!new` 开新聊天。`!status` 查看当前任务并重新显示待确认或待答内容。`!delivery` 明确请求再发核验产物。重连时补读原私聊和任务相关线程，已经受理的事件保留原回执。 [实现与测试](superpowers/plans/2026-11-27-slack.md)
+
 ## 电脑接管与分工
 
 ```powershell

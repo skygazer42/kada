@@ -6,11 +6,11 @@ import lockfile from "proper-lockfile";
 import type { Config } from "./config.js";
 import type { TaskBrief } from "./preparation.js";
 import { attachmentLimit, maxAttachments, supportedTypes } from "./remote.js";
-import { atomicJson, readJson, redactCredentials } from "./util.js";
+import { atomicJson, readJson, redactCredentials, SerialQueue } from "./util.js";
 
 type Peer = { accountId: string; deviceId: string };
 type MessageId = number | string;
-type ChannelName = "Telegram" | "Discord";
+type ChannelName = "Telegram" | "Discord" | "Slack";
 type Action = { kind: "confirm"; revision: number; digest: string } |
   { kind: "answer"; questionId?: string; cursor: number | null; childId?: number };
 type Outbox = { conversation: string; action?: Action; messageId?: MessageId };
@@ -25,7 +25,7 @@ export type ChannelMessage = {
 };
 type ChannelTransport = {
   name: ChannelName;
-  secret: string;
+  secrets: readonly string[];
   commandPrefix: "/" | "!";
   textLimit: number;
   sendText(text: string, action: Action["kind"] | undefined, sendId: string): Promise<MessageId>;
@@ -36,6 +36,7 @@ type Relay = {
   confirm(replyTo?: MessageId): Promise<boolean>;
   sync(): Promise<void>;
   save(): Promise<void>;
+  restore(sendId: string, messageId: string): Promise<void>;
 };
 type Artifact = { href: string; name: string; kind?: "file" | "directory" };
 type PortalView = {
@@ -136,7 +137,14 @@ export async function withPairedChannel<State extends PairedState>(
     });
   }
   let state: State;
-  const save = () => atomicJson(file, state);
+  const writes = new SerialQueue();
+  const save = () => writes.run(() => atomicJson(file, state));
+  async function restore(sendId: string, messageId: string) {
+    const existing = state.outbox[sendId];
+    if (!existing || existing.messageId !== undefined) return;
+    existing.messageId = messageId;
+    await save();
+  }
   const view = async (conversation: string) => (await (await portal(route(conversation))).json()) as PortalView;
   const anchor = (id?: MessageId) => id === undefined ? undefined : Object.values(state.outbox).find(post => post.messageId === id);
   const keepOpen = (conversation: string) => { if (!state.open.includes(conversation)) state.open.push(conversation); };
@@ -165,7 +173,8 @@ export async function withPairedChannel<State extends PairedState>(
       post.messageId = await send(key);
     } catch (error) {
       if (!(error instanceof TransportError)) throw error;
-      if (error.service === "Discord" && error.status === 429) {
+      if (post.messageId !== undefined) return;
+      if ((error.service === "Discord" || error.service === "Slack") && error.status === 429) {
         delete state.outbox[key];
         await save();
         throw error;
@@ -177,7 +186,8 @@ export async function withPairedChannel<State extends PairedState>(
   }
 
   async function say(conversation: string, source: string, text: string, action?: Action) {
-    const parts = textParts(text.replaceAll(transport.secret, "[credential]").replaceAll(pairingToken, "[credential]"), transport.textLimit);
+    const redacted = [...transport.secrets, pairingToken].reduce((value, secret) => value.replaceAll(secret, "[credential]"), text);
+    const parts = textParts(redacted, transport.textLimit);
     for (const [index, part] of parts.entries()) {
       const target = index === parts.length - 1 ? action : undefined;
       await publish(conversation, source + ":" + index, key => transport.sendText(part, target?.kind, key), target);
@@ -374,7 +384,7 @@ export async function withPairedChannel<State extends PairedState>(
     if (state.peer.accountId !== peer.accountId || state.peer.deviceId !== peer.deviceId) {
       throw new Error("The " + transport.name + " relay is already bound to another paired device.");
     }
-    await run(state, { consume, confirm, save, async sync() {
+    await run(state, { consume, confirm, save, restore, async sync() {
       for (const conversation of state.open) await sync(conversation);
     } });
   } finally { await release(); }

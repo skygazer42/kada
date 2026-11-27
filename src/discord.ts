@@ -100,7 +100,7 @@ export async function runDiscord(config: Config, signal: AbortSignal, options: {
       return { userId, channelId, after: latest?.id ?? "0", peer, current: prefix + "initial", open: [], outbox: {} };
     },
     transport: {
-      name: "Discord", secret: botToken, commandPrefix: "!", textLimit: 1900,
+      name: "Discord", secrets: [botToken], commandPrefix: "!", textLimit: 1900,
       sendText(text, action, sendId) {
         const content = action === "confirm" ? text + "\n\nReply !confirm to this message." : text;
         return send({ content, ...receipt(sendId) });
