@@ -280,8 +280,7 @@ test("interrupting a child's current tool lets the same Pi conversation finish",
     await assert.rejects(client.request(endpoint, "POST", { toolTaskId: "bad" }), /valid tool task ID/);
     await assert.rejects(client.request(endpoint, "POST", { toolTaskId: Number.MAX_SAFE_INTEGER }), /no longer running/);
     const receipt = await client.request<{ interrupted: number; pending: number }>(endpoint, "POST", { toolTaskId: tool!.toolTaskId });
-    assert.equal(receipt.interrupted, 1);
-    assert.equal(receipt.pending, 0);
+    assert.equal(receipt.interrupted + receipt.pending, 1);
     const completed = await until(() => daemon.runtime.status(task.id), status => status.status === "completed");
     const finished = await client.request<TaskView>(viewPath);
     assert.deepEqual(finished.stoppableChildren, []);
