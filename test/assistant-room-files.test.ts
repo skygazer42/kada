@@ -51,3 +51,38 @@ test('a room transfer keeps the owner-selected file bytes and restricts reads to
   assert.equal((await f.runtime.sendRoomMessage(room.id, input)).answerEntryId, last.messages[2]?.id);
   assert.equal(await readFile(source, 'utf8'), 'Later changed data.');
 });
+
+test('a role can publish a text attachment to the original room and hand its bytes to the next speaker', async t => {
+  let reviewerId = '';
+  const f = await scriptedFixture(context => {
+    const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
+    const outputs = context.messages.filter(message => message.role === 'toolResult' && !message.isError);
+    if (input.message === 'Produce the room findings') {
+      assert(hasTool(context, 'room_attach_text'));
+      return fauxAssistantMessage(outputs.some(message => message.toolName === 'room_attach_text')
+        ? fauxToolCall('room_handoff', { member_id: reviewerId, message: 'Review the published attachment.' })
+        : fauxToolCall('room_attach_text', { name: 'findings.txt', text: 'Exact published result.' }), { stopReason: 'toolUse' });
+    }
+    assert.equal(input.attachments[0].name, 'findings.txt');
+    assert(!hasTool(context, 'room_attach_text'));
+    const read = outputs.find(message => message.toolName === 'room_read_file');
+    if (!read) return fauxAssistantMessage(fauxToolCall('room_read_file', { id: 1 }), { stopReason: 'toolUse' });
+    assert(JSON.stringify(read.content).includes('Exact published result.'));
+    return fauxAssistantMessage('Reviewed the published artifact.');
+  });
+  t.after(() => f.close());
+  const lead = await f.runtime.assistants.create({ workspace: f.workspace, name: 'Author', instructions: 'Publish the attachment.', tools: ['room_attach_text', 'room_handoff'] });
+  const reviewer = await f.runtime.assistants.create({ workspace: f.workspace, name: 'Reader', instructions: 'Inspect the artifact.', tools: ['room_read_file'] });
+  reviewerId = reviewer.id;
+  const room = await f.runtime.createRoom({ workspace: f.workspace, title: 'Room outputs',
+    members: [lead, reviewer].map(({ id, revision }) => ({ id, revision })) });
+  const input = { memberId: lead.id, requestId: 'room-output', message: 'Produce the room findings' };
+  await f.runtime.sendRoomMessage(room.id, input);
+  const view = await until(() => f.runtime.roomDetails(room.id), row => row.active === null);
+  assert.deepEqual(view.messages.map(message => message.role), ['user', 'attachment', 'handoff', 'assistant']);
+  assert.equal(view.messages[1]?.memberId, lead.id);
+  assert.equal(view.messages[3]?.text, 'Reviewed the published artifact.');
+  const saved = await f.runtime.roomAttachment(room.id, view.messages[1]!.id, 1);
+  assert.equal(await readFile(saved.path, 'utf8'), 'Exact published result.');
+  await assert.rejects(f.runtime.roomAttachment(room.id, view.messages[0]!.id, 1), /not found/i);
+});

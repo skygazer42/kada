@@ -645,7 +645,7 @@ async function refreshSharedRoom() {
       const label = message.role === "user" ? "User to " + message.name :
         message.role === "handoff" ? message.name + " handed off to " + message.toName : message.name;
       element("strong", label, item);
-      element("p", message.text, item);
+      if (message.text) element("p", message.text, item);
       for (const attachment of message.attachments ?? []) element("p", attachment.name + " · " + attachment.bytes + " bytes", item);
       if (["unanswered", "interrupted", "failed"].includes(message.status)) element("small", taskStatusLabel(message.status), item);
     }

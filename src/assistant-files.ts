@@ -8,6 +8,25 @@ export type AssistantFile = FileSnapshot & { sourcePath: string };
 const maxBytes = 5 * 1024 * 1024;
 const matches = (a: FileSnapshot, b: FileSnapshot) => a.bytes === b.bytes && a.sha256 === b.sha256;
 
+export async function publishAssistantBytes(workspace: Workspace, path: string, bytes: Buffer): Promise<FileSnapshot> {
+  const target = await workspace.path(path);
+  const expected = { path: target, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+  await workspace.path(target);
+  const temporary = await workspace.path(target + '.' + randomUUID() + '.tmp'), staging = await open(temporary, 'wx', 0o600);
+  try {
+    try { await staging.writeFile(bytes); await staging.sync(); } finally { await staging.close(); }
+    await workspace.path(target);
+    try { await link(temporary, target); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (!matches(await workspace.inspect(target), expected)) throw new Error('A different assistant input already exists; it was not overwritten.');
+    }
+  } finally { await rm(temporary, { force: true }); }
+  if (!matches(await workspace.inspect(target), expected)) throw new Error('The fixed assistant input changed during publication.');
+  return expected;
+}
+
 export async function prepareAssistantFiles(workspace: Workspace, id: string, paths: string[], direction: 'inputs' | 'outputs' = 'inputs'): Promise<AssistantFile[]> {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(id) || paths.length > 5) throw new Error('Provide an original work ID and up to five input files.');
   const files: AssistantFile[] = [];
@@ -47,17 +66,6 @@ export async function copyAssistantFiles(workspace: Workspace, files: AssistantF
         throw new Error('The original assistant input changed while copying.');
       }
     } finally { await opened.close(); }
-    await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await workspace.path(target);
-    const temporary = await workspace.path(target + '.' + randomUUID() + '.tmp'), staging = await open(temporary, 'wx', 0o600);
-    try {
-      try { await staging.writeFile(bytes); await staging.sync(); } finally { await staging.close(); }
-      await workspace.path(target);
-      try { await link(temporary, target); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (!matches(await workspace.inspect(target), file)) throw new Error('A different assistant input already exists; it was not overwritten.');
-      }
-    } finally { await rm(temporary, { force: true }); }
-    if (!matches(await workspace.inspect(target), file)) throw new Error('The fixed assistant input changed during publication.');
+    await publishAssistantBytes(workspace, target, bytes);
   }
 }

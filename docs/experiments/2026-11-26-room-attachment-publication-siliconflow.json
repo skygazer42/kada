@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "provider": "siliconflow",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "speakers": ["Lead", "Reader"],
+  "originalHandoffs": 1,
+  "replayUsedAdditionalTokens": false,
+  "createdAndReadSameAttachment": true,
+  "ownerReadSameBytes": true,
+  "finalText": "The marker read from the findings.txt file is: **QUARTZ-196**",
+  "totalTokens": 2857,
+  "money": null
+}
