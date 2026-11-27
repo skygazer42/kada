@@ -169,6 +169,8 @@ npm run harness -- rooms show 群组ID
 
 使用 `rooms edit 群组ID 修改.json` 改标题或成员。编辑文件带 `revision`，可附 `title` 或完整的 `members` 数组，每项为 `{ "id": "助手ID", "revision": 1 }`。旧修订请先重新读取。助手工具名单可选 `room_handoff`，让成员把本轮依次交给尚未参与的成员。原群组显示交棒过程与最终答复。
 
+发言可重复加 `--room-file 相对路径` 附带工作区里的文本文件。角色用 `room_read_file` 按原编号读取。发言后修改原文件时，群组仍保留选定版本。用 `rooms show` 查消息和附件编号，再用 `rooms file 群组ID 消息ID 附件编号` 读取固定副本路径。 [原附件验收](superpowers/plans/2026-11-26-room-attachments.md)
+
 本机通过 `rooms share 群组ID 账户ID 设备ID` 分享查看，通过 `rooms share-replies 群组ID 账户ID 设备ID` 授予发送权限。手机 Web 的 **Shared rooms** 打开同一群组。用 `rooms unshare-replies` 撤回发送权限，或用 `rooms unshare` 一并撤回查看和发送。 [源码与验收](superpowers/plans/2026-11-26-assistant-rooms.md)
 
 ## 应用 API 凭据

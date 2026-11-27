@@ -56,7 +56,7 @@ import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssis
   type AssistantPeerEpoch, type AssistantRetirement, type AssistantWork } from './assistant-peer-state.js';
 import { assistantPeersExtension, restoreAssistantStopBoundaries, settleAssistantStops, stopAssistantWork } from './assistant-peers.js';
 import { answerAssistantWork, guideAssistantWork, type AssistantInputRequest, type AssistantPeerControlRunner } from './assistant-peer-inputs.js';
-import { RoomError, assistantRooms, pendingRoomTurn, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
+import { RoomError, assistantRooms, pendingRoomTurn, roomAttachment, roomMessageInput, roomTranscript, sendRoomMessage } from './assistant-rooms.js';
 import { VoiceNoteError, VoiceNotes, readVoiceClip, saveVoiceReply, siliconFlowVoiceSynthesizer, siliconFlowVoiceTranscriber,
   transcriptionText, verifyVoiceReply, voiceNoteKey, type VoiceSynthesizer, type VoiceTranscriber } from './voice-notes.js';
 import { ThreadReports, selectThreadModel, threadReportRequestPrefix, threadTaskId, threadTitle, threadTools,
@@ -689,6 +689,15 @@ export class LocalRuntime {
     });
   }
 
+  async roomAttachment(id: string, entryId: number, attachmentId: number) {
+    return this.changes.run(async () => {
+      const meta = await this.metadata(id);
+      if (!isRoom(meta)) throw new RoomError(404, 'Assistant room not found.');
+      const active = await this.open(meta, false);
+      return roomAttachment(active.root, active.workspace, entryId, attachmentId, ctx);
+    });
+  }
+
   async sendRoomMessage(id: string, raw: Record<string, unknown>) {
     const input = roomMessageInput(raw);
     return this.changes.run(async () => {
@@ -702,7 +711,8 @@ export class LocalRuntime {
       else blocked = await this.budgetReason(active);
       const limits = { tokenLimit: meta.chatBudget?.tokenLimit ?? meta.maxTotalTokens ?? null,
         costLimit: meta.chatBudget?.costLimit ?? meta.maxEstimatedCostUsd ?? 1 };
-      const turn = await sendRoomMessage(active.root, meta.room, meta.objective, input, blocked, limits, meta.maxDurationMs ?? this.config.maxDurationMs, ctx);
+      const turn = await sendRoomMessage(active.root, { id, workspace: active.workspace, members: meta.room, title: meta.objective },
+        input, blocked, limits, meta.maxDurationMs ?? this.config.maxDurationMs, ctx);
       if (meta.control === 'active' && turn.status === 'running') {
         active.enabled = true;
         active.harness.resume();

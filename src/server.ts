@@ -345,6 +345,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         if (req.method === 'POST') return send(201, await runtime.createRoom(await body(req)));
         return send(405, { error: 'Method not allowed' });
       }
+      const roomFile = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})\/messages\/(\d+)\/attachments\/(\d+)$/.exec(url.pathname);
+      if (roomFile && req.method === 'GET') {
+        return send(200, await runtime.roomAttachment(roomFile[1]!, Number(roomFile[2]), Number(roomFile[3])));
+      }
       const room = /^\/v1\/assistant-rooms\/([a-f0-9-]{36})(?:\/(messages|(?:un)?share(?:-replies)?))?$/.exec(url.pathname);
       if (room) {
         const [, id, action] = room;

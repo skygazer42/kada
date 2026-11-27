@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -110,15 +110,21 @@ test('the terminal and authenticated API use the original room, outside its ordi
   const phone = await client.request<{ token: string }>('/v1/remote/devices', 'POST', { accountId: 'owner', deviceId: 'phone' });
   assert.equal((await fetch(`http://127.0.0.1:${port}${path}/${room.id}`, { headers: { Authorization: `Bearer ${phone.token}` } })).status, 401);
   await assert.rejects(client.request(`/v1/tasks/${room.id}/share-thread`, 'POST', { accountId: 'owner', deviceId: 'phone' }), /local host/i);
-  const send = await command('send', room.id, build.id, 'Addressed by terminal', 'original-terminal');
+  await writeFile(join(f.workspace, 'terminal-note.txt'), 'Another room file');
+  const send = await command('send', room.id, build.id, 'Addressed by terminal', 'original-terminal', '--room-file', 'terminal-note.txt');
   assert.equal(send.memberId, build.id);
   const view = await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 2);
   assert.equal(view.messages[1]?.text, 'Terminal group answer');
+  assert.deepEqual(view.messages[0]?.attachments, [{ id: 1, name: 'terminal-note.txt', bytes: 17 }]);
+  const fixed = await command('file', room.id, String(view.messages[0]!.id), '1');
+  assert.equal(await readFile(fixed.path, 'utf8'), 'Another room file');
   assert.deepEqual((await command('show', room.id)).messages, view.messages);
   const edit = join(f.directory, 'room-edit.json');
   await writeFile(edit, JSON.stringify({ revision: room.revision, title: 'Renamed terminal room' }));
   assert.equal((await command('edit', room.id, edit)).title, 'Renamed terminal room');
-  const duplicate = await client.request(`${path}/${room.id}/messages`, 'POST', { memberId: build.id, message: 'Addressed by terminal', requestId: 'original-terminal' });
+  const duplicate = await client.request(`${path}/${room.id}/messages`, 'POST', {
+    memberId: build.id, message: 'Addressed by terminal', requestId: 'original-terminal', files: ['terminal-note.txt'],
+  });
   assert.deepEqual(duplicate, { ...send, status: 'answered', answerEntryId: view.messages[1]?.id });
 });
 

@@ -16,9 +16,10 @@ try { loadEnvFile(".env"); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 
 const args = parseArgs({ allowPositionals: true, options: {
-  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, assistant:{type:'string'}, collaborator:{type:'string',multiple:true}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
+  config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, assistant:{type:'string'}, collaborator:{type:'string',multiple:true}, "room-file":{type:'string',multiple:true}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
 } });
 const [command = "chat", id, ...rest] = args.positionals;
+if (args.values['room-file'] && (command !== 'rooms' || id !== 'send')) throw new Error('Use --room-file with rooms send.');
 const config = await loadConfig(args.values.config);
 const client = createClient(config);
 const { request } = client;
@@ -45,8 +46,9 @@ try {
     console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
     console.log('\n工作区快照（本机）\n  snapshots save 任务ID "快照名称"\n  snapshots list 任务ID\n  snapshots preview 任务ID 快照ID\n  snapshots restore 任务ID 快照ID 预览版本');
     console.log('\nrun 或 chat 接受可重复的 --collaborator ID@修订。确认任务后，主助手可向选定的同事派活。用 /assistant-work 查看工作，/reply-assistant 答复，/guide-assistant 补充说明，/stop-assistant 停止原工作。');
-    console.log('\n本机助手群组\n  rooms list | rooms show 群组ID [历史游标]\n  rooms add "群组名称" 助手ID@修订 助手ID@修订 […] --workspace 路径\n  rooms edit 群组ID 修改.json\n  rooms send 群组ID 助手ID "消息" [请求ID]');
+    console.log('\n本机助手群组\n  rooms list | rooms show 群组ID [历史游标]\n  rooms add "群组名称" 助手ID@修订 助手ID@修订 […] --workspace 路径\n  rooms edit 群组ID 修改.json\n  rooms send 群组ID 助手ID "消息" [请求ID] [--room-file 路径]');
     console.log('  rooms share|unshare 群组ID 账户ID 设备ID\n  rooms share-replies|unshare-replies 群组ID 账户ID 设备ID');
+    console.log('  rooms file 群组ID 消息ID 附件编号');
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
     console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
@@ -140,10 +142,13 @@ try {
       } else if (action === 'edit' && roomOrTitle && rest.length === 2) {
         result = await request(path + '/' + segment(roomOrTitle), 'PATCH', await json(memberId));
       } else if (action === 'send' && roomOrTitle && memberId && message && rest.length <= 4) {
-        result = await request(path + '/' + segment(roomOrTitle) + '/messages', 'POST', { memberId, message, requestId: requestId ?? randomUUID() });
+        result = await request(path + '/' + segment(roomOrTitle) + '/messages', 'POST', { memberId, message,
+          requestId: requestId ?? randomUUID(), files: args.values['room-file'] });
+      } else if (action === 'file' && rest.length === 3) {
+        result = await request(path + '/' + segment(roomOrTitle) + '/messages/' + segment(memberId) + '/attachments/' + segment(message));
       } else if (/^(?:un)?share(?:-replies)?$/.test(action) && rest.length === 3) {
         result = await request(path + '/' + segment(roomOrTitle) + '/' + action, 'POST', { accountId: memberId, deviceId: message });
-      } else throw new Error('Use rooms list, add, show, edit, send, share or unshare. See help for arguments.');
+      } else throw new Error('Use rooms list, add, show, edit, send, file, share or unshare. See help for arguments.');
     }
     else if (command === 'voice') {
       if (!await client.healthy('voice-notes')) throw new Error('请重启到支持录音转写的后台版本。');

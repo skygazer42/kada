@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fauxAssistantMessage } from '@earendil-works/pi-ai';
 import { createClient } from '../src/client.js';
@@ -59,6 +61,15 @@ test('a paired device sees only granted original rooms and sends once under its 
   assert.equal((await remote(path + '/messages', 1, { ...input, message: 'a second phone with the same request ID' })).status, 200);
   const continued = await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 4);
   assert.equal(continued.messages[3]?.text, 'Original reply for a second phone with the same request ID');
+  assert.equal((await remote(path + '/messages', 1, { ...input, requestId: 'phone-file', files: ['private.txt'] })).status, 400);
+  await writeFile(join(fixture.workspace, 'private.txt'), 'Original attached file content.');
+  await server.runtime.sendRoomMessage(room.id, { ...input, requestId: 'owner-file', files: ['private.txt'] });
+  await until(() => server.runtime.roomDetails(room.id), value => value.messages.length === 6);
+  const sharedFile = await (await remote(path)).json();
+  assert.deepEqual(sharedFile.messages.find((message: { attachments?: unknown[] }) => message.attachments)?.attachments,
+    [{ id: 1, name: 'private.txt', bytes: 31 }]);
+  assert(!JSON.stringify(sharedFile).includes('Original attached file content.'));
+  assert(!JSON.stringify(sharedFile).includes(fixture.workspace));
   await grant('unshare', 'one');
   assert.equal((await remote(path)).status, 404);
   assert.equal((await remote(path + '/messages', 0, input)).status, 404);

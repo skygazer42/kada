@@ -757,7 +757,8 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
           if (input) {
             if (!grant.replies) throw new HttpError(403, 'The host has not shared reply access to this room.');
             const { memberId, requestId, message, roomRevision } = input;
-            if (typeof requestId !== 'string' || !idPattern.test(requestId) || typeof roomRevision !== 'number') {
+            if (typeof requestId !== 'string' || !idPattern.test(requestId) || typeof roomRevision !== 'number' ||
+              Object.keys(input).some(key => !['memberId', 'requestId', 'message', 'roomRevision'].includes(key))) {
               throw new HttpError(400, 'Provide the displayed room revision and a request ID.');
             }
             const receipt = await runtime.sendRoomMessage(id, { memberId, message, roomRevision,
@@ -769,8 +770,9 @@ export function createRemoteHandler(runtime: LocalRuntime, options: RemoteOption
           return { id, title: redactCredentials(view.title), revision: view.revision, control: view.control,
             canSend: !!grant.replies && view.control === 'active',
             members: view.members.map(({ id, name, revision }) => ({ id, name: redactCredentials(name), revision })),
-            messages: view.messages.map(({ requestId: _request, originalAnswerId: _answer, text, name, toName, ...message }) =>
-              ({ ...message, text: redactCredentials(text), name: redactCredentials(name), ...(toName === undefined ? {} : { toName: redactCredentials(toName) }) })),
+            messages: view.messages.map(({ requestId: _request, originalAnswerId: _answer, text, name, toName, attachments, ...message }) =>
+              ({ ...message, text: redactCredentials(text), name: redactCredentials(name), ...(toName === undefined ? {} : { toName: redactCredentials(toName) }),
+                ...(attachments ? { attachments: attachments.map(file => ({ ...file, name: redactCredentials(file.name) })) } : {}) })),
             active: view.active ? { memberId: view.active.memberId } : null, nextBefore: view.nextBefore,
           };
         });
