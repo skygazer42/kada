@@ -16,6 +16,12 @@ Suparagent 工作项保存独立的角色引用，新增或更换时核验原 ow
 
 终端授权测试在重启后配对新设备，验证回答原子任务、原预算和回执、降级后分别判断答复与执行控制，以及撤回账户后仍按已有的设备授权访问。另验证独立编辑权、其他账户隔离和 owner 身份校验。Chromium 的 390 × 844 视口用合成工作项验证编辑原卡片、降级后只读、撤回后移出列表。 [工作项回归](../../../test/work-items.test.ts)
 
+### 看板账户管理
+
+本机 owner 用 `work-items board-link --manage-sharing --workspace 路径` 打开授权管理看板。卡片的账户区域展示当前角色和独立权限，保存及撤回复用账户授权的存储。授权管理会话绑定原项目，普通看板会话仍只具备项目看板权限。 [OpenMausBot 本机授权保存与撤回](https://github.com/milind-soni/OpenMausBot/blob/3aec210054cd/src/components/ComputerSharingSettings.tsx#L84)
+
+接口回归验证普通看板拒绝授权写入，授权管理链接拒绝其他项目和 owner API，配对设备沿原账户获得权限并随着撤回失去权限。Chromium 的 390 × 844 视口通过终端生成链接，验证原卡片授权、重载、降级和撤回，也验证未保存的卡片名称在操作权限时保留。 [看板回归](../../../test/workboard.test.ts)
+
 ## 验收
 
 - 本机验证同项目助手目录、固定修订、重启接回原工作及档案变更后的重放。Chromium 验证看板分配、重载和清空原卡片。[工作项回归](../../../test/work-item-assignee.test.ts)

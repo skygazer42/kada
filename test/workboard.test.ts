@@ -68,14 +68,14 @@ test('a browser workboard ticket grants only the original project and only board
   const client = createClient(settings);
   const { url } = await client.request<{ url: string }>('/v1/work-items/board-link', 'POST', { workspace: f.workspace });
   const ticket = new URL(url).hash.slice(1);
-  const session = (authorizationOrigin = origin) => fetch(origin + '/workboard/session', { method: 'POST',
-    headers: { origin: authorizationOrigin, 'content-type': 'application/json' }, body: JSON.stringify({ ticket }) });
+  const session = (authorizationOrigin = origin, boardTicket = ticket) => fetch(origin + '/workboard/session', { method: 'POST',
+    headers: { origin: authorizationOrigin, 'content-type': 'application/json' }, body: JSON.stringify({ ticket: boardTicket }) });
   assert.equal((await session('https://example.invalid')).status, 403);
   assert.equal((await fetch(origin + '/workboard/board')).status, 401);
   const { token } = await (await session()).json();
   assert.equal((await session()).status, 401);
-  const use = (path: string, method = 'GET', body?: unknown) => fetch(origin + path, { method,
-    headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const use = (path: string, method = 'GET', body?: unknown, bearer = token) => fetch(origin + path, { method,
+    headers: { authorization: 'Bearer ' + bearer, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   assert.equal((await use('/v1/work-items?workspace=' + encodeURIComponent(foreign))).status, 401);
   assert.equal((await use('/workboard/items/' + outside.id, 'PATCH', { requestId: 'foreign-edit', title: 'Foreign edit', revision: outside.revision })).status, 404);
   const input = { requestId: 'owner-create', workspace: foreign, title: 'Here', objective: 'Same project.' };
@@ -87,6 +87,23 @@ test('a browser workboard ticket grants only the original project and only board
   assert.equal((await use('/workboard/items', 'POST', { ...input, title: 'Conflicting retry' })).status, 409);
   const board = await (await use('/workboard/board?workspace=' + encodeURIComponent(foreign))).json();
   assert.deepEqual(board.columns[0].items.map((row: { id: string }) => row.id), [item.id]);
+  const accounts = '/workboard/items/' + item.id + '/accounts';
+  const grantPath = accounts + '/research';
+  assert.equal(board.manageSharing, undefined);
+  assert.equal((await use(grantPath, 'PUT', { role: 'viewer' })).status, 403);
+  const sharing = await client.request<{ url: string }>('/v1/work-items/board-link', 'POST', { workspace: f.workspace, manageSharing: true });
+  const { token: manager } = await (await session(origin, new URL(sharing.url).hash.slice(1))).json();
+  assert.equal((await (await use('/workboard/board', 'GET', undefined, manager)).json()).manageSharing, true);
+  assert.equal((await use('/workboard/items/' + outside.id + '/accounts/research', 'PUT', { role: 'viewer' }, manager)).status, 404);
+  assert.equal((await use('/v1/work-items/' + item.id + '/accounts', 'GET', undefined, manager)).status, 401);
+  const grant = { role: 'participant', controls: true, edits: false };
+  assert.equal((await use(grantPath, 'PUT', grant, manager)).status, 200);
+  assert.deepEqual(await (await use(accounts, 'GET', undefined, manager)).json(), [{ workItemId: item.id, accountId: 'research', ...grant }]);
+  const phone = await client.request<{ token: string }>('/v1/remote/devices', 'POST', { accountId: 'research', deviceId: 'test-phone' });
+  const remote = '/remote/api/work-items/' + item.id;
+  assert.equal((await use(remote, 'GET', undefined, phone.token)).status, 200);
+  assert.equal((await use(grantPath, 'DELETE', undefined, manager)).status, 200);
+  assert.equal((await use(remote, 'GET', undefined, phone.token)).status, 404);
   const page = await fetch(origin + '/workboard');
   assert.equal(page.status, 200);
   assert.match(page.headers.get('content-security-policy') ?? '', /script-src 'nonce-/);

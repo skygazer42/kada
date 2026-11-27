@@ -17,6 +17,7 @@ catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw er
 
 const args = parseArgs({ allowPositionals: true, options: {
   'browser-profile': { type: 'string' },
+  'manage-sharing': { type: 'boolean' },
   config: { type: "string" }, workspace: { type: "string" }, acceptance: { type: "string" }, skills:{type:'string'}, assistant:{type:'string'}, collaborator:{type:'string',multiple:true}, "room-file":{type:'string',multiple:true}, filter:{type:'string'}, detach: { type: "boolean", default: false }, yes: { type: "boolean", default: false }, refresh: { type: "boolean", default: false }, help: { type: "boolean" }, "task-status": { type: "boolean" },
 } });
 const [command = "chat", id, ...rest] = args.positionals;
@@ -25,6 +26,9 @@ if (browserProfile !== undefined && (!browserProfilePattern.test(browserProfile)
   throw new Error('Use --browser-profile with run, chat or computer and a configured profile name.');
 }
 if (args.values['room-file'] && (command !== 'rooms' || id !== 'send')) throw new Error('Use --room-file with rooms send.');
+if (args.values['manage-sharing'] && (command !== 'work-items' || id !== 'board-link')) {
+  throw new Error('Use --manage-sharing with work-items board-link.');
+}
 const config = await loadConfig(args.values.config);
 const client = createClient(config);
 const { request } = client;
@@ -55,7 +59,7 @@ try {
     console.log("\n手机共享会话（本机授权）\n  remote share-thread|unshare-thread 会话ID 账户ID 设备ID\n  remote share-thread-replies|unshare-thread-replies 会话ID 账户ID 设备ID\n  remote share-thread-controls|unshare-thread-controls 会话ID 账户ID 设备ID");
     console.log('  remote thread-accounts 会话ID\n  remote grant-thread-account 会话ID 账户ID viewer|participant [files] [controls]\n  remote revoke-thread-account 会话ID 账户ID');
     console.log('work-items edit 的 JSON 可带 revision、title/objective、status（open/parked/done）、archived（布尔值）、priority（low/normal/high/urgent）、dueDate（YYYY-MM-DD）或 dueAt（带 UTC 偏移的 ISO 时刻）及 timeZone（IANA）。截止用 null 清空，切换种类须清空旧字段。保存、完成或设截止不启动/取消原运行，也不创建提醒。');
-    console.log('work-items board-link --workspace 路径获取本机浏览器看板链接。board 查看 JSON，edit-board 编辑.json 使用原看板版本。');
+    console.log('work-items board-link --workspace 路径获取本机浏览器看板链接，--manage-sharing 打开账户授权管理。board 查看 JSON，edit-board 编辑.json 使用原看板版本。');
     console.log('\n应用 API 凭据（仅本机 owner）\n  credentials list --workspace 路径\n  credentials remove 名称 修订 --workspace 路径\n在 chat 中按原问题用 /credential 问题ID 无回显输入，或 /decline-credential 问题ID 拒绝；不要在聊天或命令参数中填写值。');
     console.log('\n命名助手（仅本机 owner，npm run harness -- …）\n  assistants list --workspace 路径\n  assistants add 定义.json | assistants show ID | assistants edit ID 修改.json\n  chat --assistant ID@修订 [--workspace 路径]\n  run "目标" --assistant ID@修订 [--workspace 路径]\n角色工具名单仅收窄原权限；新工作选明确版本，接回已有任务保留原角色。');
     console.log('\n工作区快照（本机）\n  snapshots save 任务ID "快照名称"\n  snapshots list 任务ID\n  snapshots preview 任务ID 快照ID\n  snapshots restore 任务ID 快照ID 预览版本');
@@ -227,7 +231,9 @@ try {
       const path = '/v1/work-items';
       if (action === 'list') result = await request(path + '?workspace=' + encodeURIComponent(workspace));
       else if (action === 'board') result = await request(path + '/board?workspace=' + encodeURIComponent(workspace));
-      else if (action === 'board-link') result = await request(path + '/board-link', 'POST', { workspace });
+      else if (action === 'board-link') result = await request(path + '/board-link', 'POST', {
+        workspace, ...(args.values['manage-sharing'] ? { manageSharing: true } : {}),
+      });
       else if (action === 'calendar') {
         if (!rest[0] || rest.length !== 1) throw new Error('Use work-items calendar YYYY-MM.');
         result = await request(path + '/calendar?' + new URLSearchParams({ workspace, month: rest[0] }));

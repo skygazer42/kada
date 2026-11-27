@@ -52,6 +52,11 @@ export const workboardPage = String.raw`<!doctype html>
     input, select, textarea { min-width: 0; width: 100%; padding: 8px 9px; border: 1px solid #bccac0; border-radius: 6px; color: #162426; background: #fff; }
     textarea { min-height: 100px; resize: vertical; }
     .edit-block { border-top: 1px solid #dde4db; padding-top: 12px; margin-top: 15px; }
+    .sharing summary { cursor: pointer; font-weight: 600; }
+    .sharing label.permission { display: flex; align-items: center; gap: 8px; }
+    .sharing input[type="checkbox"] { width: auto; }
+    .sharing-accounts { padding: 0; list-style: none; }
+    .sharing-accounts li + li { margin-top: 8px; }
     .dialog-error { color: #a32b28; min-height: 1.1em; font-size: .86rem; margin: 7px 0 0; }
     @media (max-width: 620px) { header { display: grid; align-items: start; } .column { flex-basis: min(290px, 84vw); } }
   </style>
@@ -158,12 +163,78 @@ export const workboardPage = String.raw`<!doctype html>
     const control = element(row, 'button', text, 'action primary');
     control.type = 'submit';
     form.addEventListener('submit', event => { event.preventDefault(); submit(); });
+    return control;
   }
   function showEditor(title) {
     fields.replaceChildren();
     get('editor-title').textContent = title;
     get('editor-error').textContent = '';
     return fields;
+  }
+  function sharingEditor(host, item) {
+    const section = element(host, 'details', undefined, 'edit-block sharing');
+    element(section, 'summary', '账户共享');
+    const list = element(section, 'ul', undefined, 'sharing-accounts');
+    const form = element(section, 'form');
+    const account = field(form, '配对账户 ID', '', 80);
+    const role = selectField(form, '账户角色', [['viewer', '查看'], ['participant', '查看和答复']], 'viewer');
+    const checkbox = title => {
+      const toggle = element(element(form, 'label', title, 'permission'), 'input');
+      toggle.type = 'checkbox';
+      return toggle;
+    };
+    const edits = checkbox('编辑工作项');
+    const controls = checkbox('控制原运行');
+    const status = element(section, 'p', undefined, 'meta');
+    status.setAttribute('role', 'status');
+    const path = 'items/' + item.id + '/accounts';
+    const accountPath = id => path + '/' + encodeURIComponent(id);
+    let pending = false;
+    function selectGrant(grant) {
+      account.value = grant.accountId;
+      role.value = grant.role;
+      edits.checked = grant.edits;
+      controls.checked = grant.controls;
+      account.focus();
+    }
+    async function load() {
+      const grants = await request(path);
+      list.replaceChildren();
+      if (!grants.length) element(list, 'li', '暂无账户授权', 'meta');
+      for (const grant of grants) {
+        const row = element(list, 'li');
+        const scopes = [grant.role === 'participant' ? '查看和答复' : '查看'];
+        if (grant.edits) scopes.push('编辑');
+        if (grant.controls) scopes.push('控制');
+        element(row, 'div', grant.accountId + ' · ' + scopes.join('、'), 'meta');
+        const actions = element(row, 'div', undefined, 'actions');
+        button(actions, '编辑授权', () => selectGrant(grant), 'quiet').setAttribute('aria-label', '编辑授权 ' + grant.accountId);
+        button(actions, '撤回授权', () => void change('DELETE', grant.accountId), 'quiet').setAttribute('aria-label', '撤回授权 ' + grant.accountId);
+      }
+    }
+    async function run(message, action) {
+      if (pending) return;
+      pending = true;
+      submit.disabled = true;
+      status.textContent = message;
+      try {
+        status.textContent = await action();
+      } catch (error) { status.textContent = error.message; }
+      finally { pending = false; submit.disabled = false; }
+    }
+    function change(method, id, value) {
+      return run('正在更新授权', async () => {
+        await request(accountPath(id), method, value);
+        await load();
+        return method === 'DELETE' ? '已撤回账户授权' : '已保存账户授权';
+      });
+    }
+    const submit = formSubmit(form, '保存授权', () => void change('PUT', account.value.trim(), {
+      role: role.value, edits: edits.checked, controls: controls.checked,
+    }));
+    section.addEventListener('toggle', () => {
+      if (section.open) void run('正在读取授权', async () => { await load(); return ''; });
+    });
   }
   function itemEditor(item, column) {
     const host = showEditor(item ? '工作项' : '新建工作项');
@@ -203,6 +274,7 @@ export const workboardPage = String.raw`<!doctype html>
       positions(); destination.addEventListener('change', positions);
       formSubmit(move, '移动工作项', () => void save(() => command({ action: 'move-card', itemId: item.id,
         itemRevision: item.revision, columnId: destination.value, beforeId: position.value || null }, version), '已移动工作项'));
+      if (board.manageSharing) sharingEditor(host, item);
     }
     editor.showModal(); title.focus();
   }

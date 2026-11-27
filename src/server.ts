@@ -248,9 +248,10 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         return send(405, { error: 'Method not allowed' });
       }
       if (url.pathname === '/v1/work-items/board-link' && req.method === 'POST') {
-        const { workspace } = await body(req);
+        const { workspace, manageSharing } = await body(req);
         if (typeof workspace !== 'string') throw new Error('Provide the project workspace.');
-        return send(201, await workboard.link(workspace));
+        if (manageSharing !== undefined && typeof manageSharing !== 'boolean') throw new Error('Provide a boolean for managing sharing.');
+        return send(201, await workboard.link(workspace, manageSharing === true));
       }
       if (url.pathname === '/v1/work-items/calendar-source' || url.pathname === '/v1/work-items/calendar') {
         const workspace = url.searchParams.get('workspace');
@@ -643,7 +644,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     const models = options?.models ?? cloudModels();
     runtime = new LocalRuntime(config, { ...options, models, extensions: [...extensions, ...(options?.extensions ?? [])],
       computer: config.computer ? computer : options?.computer, browserProfiles: config.browserProfiles ? browserProfiles : options?.browserProfiles });
-    workboard = createWorkboardAccess(runtime.workItems, runtime.calendars, `http://127.0.0.1:${config.port}`, body);
+    workboard = createWorkboardAccess(runtime.workItems, runtime.calendars, devices, `http://127.0.0.1:${config.port}`, body);
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
     projectMcp = createProjectMcpAccess(runtime.mcp, { gmail:runtime.gmail, calendar:runtime.calendars },
       `http://127.0.0.1:${config.port}`, body);
