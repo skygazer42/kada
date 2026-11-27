@@ -31,6 +31,47 @@ const fakeServer = `
 
 const definition: McpDefinition = { id: 'fixture', transport: 'stdio', command: process.execPath, args: ['-e', fakeServer] };
 
+test('the local MCP page edits only the linked project and distinguishes inheritance from an empty allowlist', async t => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage('Ready.'));
+  await fixture.runtime.close();
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, '127.0.0.1', resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const config = { ...fixture.settings, port };
+  const server = await serve(config, { models: fixture.models });
+  t.after(async () => { await server.close(); await fixture.close(); });
+  await server.runtime.mcp.configure(definition);
+  const tested = await server.runtime.mcp.test('fixture');
+  await server.runtime.mcp.enable('fixture', ['echo', 'pause'], tested.revision);
+  const other = join(fixture.directory, 'other-project');
+  await mkdir(other);
+  const client = createClient(config);
+  const { url } = await client.request<{ url: string }>('/v1/settings/mcp/link', 'POST', { workspace: fixture.workspace });
+  assert.match(await (await fetch(url)).text(), /项目 MCP 工具/);
+  const location = new URL(url);
+  const call = (route: string, method: string, token?: string, input?: unknown) => fetch(location.origin + location.pathname + '/' + route, {
+    method, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(input !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    ...(input !== undefined ? { body: JSON.stringify(input) } : {}),
+  });
+  assert.equal((await call('state', 'GET')).status, 401);
+  const { token } = await (await call('session', 'POST', undefined, { ticket: location.hash.slice(1) })).json();
+  assert.equal((await call('session', 'POST', undefined, { ticket: location.hash.slice(1) })).status, 401);
+  const original = await (await call('state', 'GET', token)).json();
+  assert.equal(original.tools, null);
+  assert.deepEqual(original.connections, [{ id: 'fixture', tools: ['echo', 'pause'] }]);
+  assert.equal((await call('tools', 'PUT', token, { workspace: other, tools: [] })).status, 400);
+  const echo = [{ id: 'fixture', tool: 'echo' }];
+  assert.equal((await call('tools', 'PUT', token, { tools: echo })).status, 200);
+  assert.deepEqual(await server.runtime.mcp.projectTools(fixture.workspace), echo);
+  assert.equal(await server.runtime.mcp.projectTools(other), null);
+  assert.equal((await call('tools', 'PUT', token, { tools: [{ id: 'fixture', tool: 'absent' }] })).status, 400);
+  assert.equal((await call('tools', 'PUT', token, { tools: [] })).status, 200);
+  assert.deepEqual(await server.runtime.mcp.pins(fixture.workspace), []);
+  assert.equal((await call('tools', 'PUT', token, { tools: null })).status, 200);
+  assert.equal(await server.runtime.mcp.projectTools(fixture.workspace), null);
+});
+
 test('C05 MCP discovery alone grants no tools, allowlist gates calls and cancel closes them', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'kada-mcp-'));
   const manager = new McpTools(dir);

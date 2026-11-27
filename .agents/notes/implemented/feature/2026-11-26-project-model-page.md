@@ -10,6 +10,8 @@ Status: implemented
 
 模型页面复用项目浏览器会话机制，链接只兑换一次，每个页面持有独立会话存储。服务从会话取项目，检查与写入转给当前 ProviderSettings。已有运行沿原任务固定的模型。 [源码参考及验收](../../../../docs/superpowers/plans/2026-11-26-project-model-page.md)
 
+项目 MCP 范围使用独立浏览器会话。页面沿原策略区分继承、空列表与显式选择，服务在保存前复核当前已启用的工具。 [MCP 图形设置](../../../../docs/superpowers/plans/2026-11-26-project-mcp-page.md)
+
 ## Alternatives considered
 
 沿用工作看板已有会话能减少一个入口，但工作项授权会扩大到模型设置。共享底层会话实现并分别发放链接，保留原操作边界。

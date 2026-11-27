@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "environment": "Windows, local Chromium, agent-browser",
+  "viewport": { "width": 390, "height": 844 },
+  "cliLink": true,
+  "connectionTransport": "local stdio fixture",
+  "persistedSelectedTool": true,
+  "explicitEmptySaved": true,
+  "restoredInheritance": true
+}

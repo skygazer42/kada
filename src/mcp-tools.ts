@@ -96,7 +96,7 @@ export function normalizeMcpPrecheck(input: unknown): McpPrecheck {
   return { id, revision, tool, arguments: JSON.parse(stableJson(args)) as JsonObject };
 }
 
-async function projectRoot(workspace: string): Promise<string> {
+export async function projectRoot(workspace: string): Promise<string> {
   const project = await memoryProject(workspace);
   if (!project) throw new Error('The MCP settings workspace must be an existing directory.');
   return project;
