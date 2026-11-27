@@ -225,6 +225,8 @@ npm run harness -- skills rollback 方法名 版本
 
 ## MCP
 
+`npm run harness -- mcp connections` 生成本机连接管理链接。可保存连接定义、发起或退出 OAuth 登录、测试连接、启用工具、要求逐次批准和停用连接。完成 OAuth 登录后，在连接页刷新状态，再测试并启用所需工具。 [验收](superpowers/plans/2026-11-26-mcp-connections-page.md)
+
 `mcp browser --workspace 路径` 生成本机项目工具设置链接。可指定当前已启用的工具，也可以保存空白范围或恢复继承。 [验收](superpowers/plans/2026-11-26-project-mcp-page.md)
 
 在新本机普通聊天中，可请助手建议登记一个 MCP 地址，或者调整项目使用的工具。用 `/mcp-proposals` 核对地址、传输类型或新旧工具范围，再用 `/apply-mcp 建议ID` 应用或 `/decline-mcp 建议ID` 拒绝。登记后的连接沿下面的测试、登录和工具启用入口设置。项目工具建议应用到新任务。[契约与实测](superpowers/plans/2026-11-26-chat-mcp-proposals.md)

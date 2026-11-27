@@ -31,6 +31,48 @@ const fakeServer = `
 
 const definition: McpDefinition = { id: 'fixture', transport: 'stdio', command: process.execPath, args: ['-e', fakeServer] };
 
+test('the local MCP connection page manages the same tested definitions and global controls as the CLI', async t => {
+  const fixture = await scriptedFixture(() => fauxAssistantMessage('Ready.'));
+  await fixture.runtime.close();
+  const socket = createServer();
+  await new Promise<void>(resolve => socket.listen(0, '127.0.0.1', resolve));
+  const port = (socket.address() as { port: number }).port;
+  await new Promise<void>(resolve => socket.close(() => resolve()));
+  const config = { ...fixture.settings, port };
+  const server = await serve(config, { models: fixture.models });
+  t.after(async () => { await server.close(); await fixture.close(); });
+  const client = createClient(config);
+  const { url } = await client.request<{ url: string }>('/v1/settings/mcp/connections-link', 'POST', {});
+  assert.match(await (await fetch(url)).text(), /MCP 连接/);
+  const location = new URL(url);
+  assert.equal((await fetch(location.origin + '/v1/settings/mcp/connections-link', { method: 'POST' })).status, 401);
+  const call = (route: string, method: string, token?: string, input?: unknown) => fetch(location.origin + location.pathname + '/' + route, {
+    method, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(input !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    ...(input !== undefined ? { body: JSON.stringify(input) } : {}),
+  });
+  assert.equal((await call('connections', 'POST', undefined, definition)).status, 401);
+  const projectLink = await client.request<{ url: string }>('/v1/settings/mcp/link', 'POST', { workspace: fixture.workspace });
+  assert.equal((await call('session', 'POST', undefined, { ticket: new URL(projectLink.url).hash.slice(1) })).status, 401);
+  const ticket = location.hash.slice(1);
+  const { token } = await (await call('session', 'POST', undefined, { ticket })).json();
+  assert.equal((await call('session', 'POST', undefined, { ticket })).status, 401);
+  assert.equal((await fetch(location.origin + location.pathname + '/state', {
+    headers: { Authorization: 'Bearer ' + token, Origin: 'https://example.test' },
+  })).status, 403);
+  assert.equal((await call('connections', 'POST', token, definition)).status, 201);
+  const initial = await (await call('state', 'GET', token)).json();
+  assert.equal(initial.connections[0].id, 'fixture');
+  assert(!Object.hasOwn(initial.connections[0], 'definition'));
+  const tested = await (await call('connections/fixture/test', 'POST', token)).json();
+  assert.equal(tested.test.status, 'ok');
+  assert.equal((await call('connections/fixture/enable', 'POST', token, { revision: 'old', tools: ['echo'] })).status, 400);
+  assert.equal((await call('connections/fixture/enable', 'POST', token, { revision: tested.revision, tools: ['echo'] })).status, 200);
+  assert.equal((await call('connections/fixture/approval', 'POST', token, { revision: tested.revision, tools: ['echo'] })).status, 200);
+  assert.deepEqual((await server.runtime.mcp.pins())[0]?.approvalTools, ['echo']);
+  assert.equal((await call('connections/fixture/disable', 'POST', token)).status, 200);
+  assert.deepEqual(await server.runtime.mcp.pins(), []);
+});
+
 test('the local MCP page edits only the linked project and distinguishes inheritance from an empty allowlist', async t => {
   const fixture = await scriptedFixture(() => fauxAssistantMessage('Ready.'));
   await fixture.runtime.close();

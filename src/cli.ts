@@ -54,6 +54,7 @@ try {
     console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
     console.log('model browser --workspace 路径　生成本机项目模型设置链接。');
     console.log('mcp browser --workspace 路径　生成本机项目 MCP 工具设置链接。');
+    console.log('mcp connections　生成本机 MCP 连接管理链接。');
     console.log('snapshots browser 任务ID　生成对应工作区的本机快照链接。');
     console.log("\n例行任务 precheck 可选 command 参数数组，或 mcp: { id, revision, tool, arguments }。MCP 预检只使用项目中已启用、声明只读且无需单次审批的工具；结果未变时不启动模型任务。");
     console.log("循环项目任务可选 activity: { withinMinutes, minIntervalMinutes }，只在近期有本地项目用户请求且已满运行间隔时自动检查。默认关闭；routines run 为用户手动要求，不受活动门槛限制，仍遵守预算、预检和防重叠。");
@@ -241,6 +242,10 @@ try {
       else throw new Error('Use skills list, enable, disable, capture, rollback, import or export.');
     } else if (command === 'mcp') {
       if (action === 'list') result = await request('/v1/settings/mcp');
+      else if (action === 'connections' && !rest.length) {
+        if (!await client.healthy('mcp-connections-page')) throw new Error('请重启到支持 MCP 连接管理页面的后台版本。');
+        result = await request('/v1/settings/mcp/connections-link', 'POST', {});
+      }
       else if (action === 'add') result = await request('/v1/settings/mcp','POST',await json(rest[0]));
       else if (action === 'browser') {
         if (!args.values.workspace) throw new Error('Provide --workspace for local project MCP settings.');
@@ -254,7 +259,7 @@ try {
           ? await request(projectPath + '?workspace=' + encodeURIComponent(workspace))
           : await request(projectPath, 'PUT', { workspace, tools: action === 'project-clear' ? null : await json(rest[0]) });
       } else if (['test','enable','disable','approval','login','logout'].includes(action)) result = await request('/v1/settings/mcp/'+segment(rest[0])+'/'+action,'POST',['enable','approval'].includes(action) ? {revision:rest[1],tools:rest.slice(2)} : {});
-      else throw new Error('Use mcp list, add, test, enable, disable, approval, login, logout, project, project-set, project-clear or browser.');
+      else throw new Error('Use mcp list, connections, add, test, enable, disable, approval, login, logout, project, project-set, project-clear or browser.');
     } else if (command === 'routines') {
       if (action === 'list') result = await request('/v1/routines');
       else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences'+(args.values['task-status'] ? '?includeTaskStatus=true' : ''));

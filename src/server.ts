@@ -25,6 +25,8 @@ import { createWorkboardAccess } from './workboard-access.js';
 import { createProjectModelAccess } from './project-model-access.js';
 import { createProjectMcpAccess } from './project-mcp-access.js';
 import { createWorkspaceSnapshotAccess } from './workspace-snapshot-access.js';
+import { createMcpConnectionsAccess } from './mcp-connections-access.js';
+import { runMcpConnectionAction, type McpConnectionAction } from './mcp-connection-actions.js';
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -50,6 +52,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
   let projectModels: ReturnType<typeof createProjectModelAccess>;
   let projectMcp: ReturnType<typeof createProjectMcpAccess>;
   let snapshotsBrowser: ReturnType<typeof createWorkspaceSnapshotAccess>;
+  let mcpConnections: ReturnType<typeof createMcpConnectionsAccess>;
   let pushRun: Promise<void> | undefined;
   let pushTimer: NodeJS.Timeout | undefined;
   const githubAbort = new AbortController();
@@ -74,7 +77,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (chartPreviews.handle(req, res, url)) return;
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','workspace-snapshot-page','named-assistants','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;
@@ -82,6 +85,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (await projectModels.handle(req, res, url)) return;
       if (await projectMcp.handle(req, res, url)) return;
       if (await snapshotsBrowser.handle(req, res, url)) return;
+      if (await mcpConnections.handle(req, res, url)) return;
       if (url.pathname === '/v1/settings/mcp/oauth/callback' && req.method === 'GET') {
         if (req.headers.host !== new URL(`http://127.0.0.1:${config.port}`).host) return send(403, { error: 'Use the local OAuth callback address.' });
         res.setHeader('Referrer-Policy', 'no-referrer');
@@ -183,6 +187,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         }
         return send(200, await runtime.exportSkill(workspace, { name, version }, path));
       }
+      if (url.pathname === '/v1/settings/mcp/connections-link' && req.method === 'POST') return send(201, mcpConnections.link());
       if (url.pathname === '/v1/settings/mcp/link' && req.method === 'POST') {
         const { workspace } = await body(req);
         if (typeof workspace !== 'string') return send(400, { error: 'Provide the project workspace.' });
@@ -207,14 +212,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       const mcp = /^\/v1\/settings\/mcp\/([^/]+)\/(test|enable|disable|approval|login|logout)$/.exec(url.pathname);
       if (mcp && req.method === 'POST') {
         const id = decodeURIComponent(mcp[1]!);
-        if (mcp[2] === 'test') return send(200,await runtime.mcp.test(id));
-        if (mcp[2] === 'disable') return send(200,await runtime.mcp.disable(id));
-        if (mcp[2] === 'login') return send(200, await runtime.mcp.login(id, `http://127.0.0.1:${config.port}/v1/settings/mcp/oauth/callback`));
-        if (mcp[2] === 'logout') return send(200, await runtime.mcp.logout(id));
-        const input = await body(req);
-        if (!Array.isArray(input.tools) || !input.tools.every(tool => typeof tool === 'string') || typeof input.revision !== 'string') throw new Error('Enable the displayed tools with their tested revision.');
-        if (mcp[2] === 'approval') return send(200, await runtime.mcp.setApproval(id, input.tools, input.revision));
-        return send(200,await runtime.mcp.enable(id,input.tools,input.revision));
+        return send(200, await runMcpConnectionAction(runtime.mcp, id, mcp[2] as McpConnectionAction, () => body(req),
+          `http://127.0.0.1:${config.port}/v1/settings/mcp/oauth/callback`));
       }
       if (url.pathname === '/v1/assistants') {
         if (req.method === 'GET') return send(200, await runtime.assistants.list(url.searchParams.get('workspace')));
@@ -556,6 +555,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
     projectModels = createProjectModelAccess(runtime.providers, config.model, `http://127.0.0.1:${config.port}`, body);
     projectMcp = createProjectMcpAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
     snapshotsBrowser = createWorkspaceSnapshotAccess(runtime, `http://127.0.0.1:${config.port}`, body);
+    mcpConnections = createMcpConnectionsAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
     remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,devices:()=>devices.credentials(),sharedDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });
     await quarantineLegacyRemoteTasks(runtime,join(config.dataDir,'remote'));

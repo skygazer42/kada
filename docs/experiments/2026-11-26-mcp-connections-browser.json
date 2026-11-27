@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "environment": "Windows, Chromium, agent-browser 0.38.1",
+  "viewport": { "width": 390, "height": 844 },
+  "cliLink": true,
+  "provider": "loopback OAuth and HTTP MCP fixture",
+  "oauthNavigation": "followed the rendered authorization URL in the same test tab",
+  "registeredThroughPage": true,
+  "refreshReportedCompletion": true,
+  "callbackCompleted": true,
+  "testedAndEnabled": true,
+  "approvalPreservedOnReload": true,
+  "disablePreservedLogin": true,
+  "logoutClearedLogin": true
+}

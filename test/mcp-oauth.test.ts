@@ -144,7 +144,14 @@ test('the owner signs in to an OAuth MCP server through PKCE, resumes across res
   const authority = await oauthServer(t), f = await app(t);
   assert.equal((await f.request('/v1/settings/mcp', 'POST', { id: 'inbox', transport: 'http', url: authority.origin + '/mcp', oauth: true })).status, 201);
   assert.equal((await fetch(f.origin + '/v1/settings/mcp/inbox/login', { method: 'POST' })).status, 401);
-  const login = await f.request('/v1/settings/mcp/inbox/login', 'POST', {});
+  const { url } = await (await f.request('/v1/settings/mcp/connections-link', 'POST', {})).json();
+  const page = new URL(url);
+  const api = page.origin + page.pathname;
+  const grant = await fetch(api + '/session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket: page.hash.slice(1) }) });
+  assert.equal(grant.status, 200);
+  const { token } = await grant.json();
+  const login = await fetch(api + '/connections/inbox/login', { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
   assert.equal(login.status, 200, await login.clone().text());
   const pending = await login.json();
   assert.equal(new URL(pending.authorizationUrl).origin, authority.origin);
