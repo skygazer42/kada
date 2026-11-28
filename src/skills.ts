@@ -15,7 +15,7 @@ export type SkillPin = { name: string; description: string; filePath: string; ve
 export type SkillState = { pins: SkillPin[]; loaded: string[]; executions?: SkillExecution[]; proposal?: { name: string; version: string }; settledRevision?: number; notice?: string };
 type Head = { version: string; previous?: string; published: string[]; disabled?: boolean };
 const bundled = fileURLToPath(new URL("../skills", import.meta.url));
-const projectSources = (root: string) => [".pi", ".agents", ".claude", ".codex", ".cursor", ".opencode", ".gemini"].map(dir => join(root, dir, "skills"));
+const projectSources = (root: string) => [".pi", ".agents", ".claude", ".codex", ".cursor", ".opencode", ".gemini", ".kada"].map(dir => join(root, dir, "skills"));
 const validName = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const key = (pin: { name: string; version: string }) => `${pin.name}@${pin.version}`;
 export type SkillSelection = { name: string; version?: string };

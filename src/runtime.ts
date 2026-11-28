@@ -53,6 +53,7 @@ import { Assistants, AssistantError, assistantCollaboratorRef, assistantProject,
   type AssistantRef, type AssistantPin, type AssistantCollaboratorRef, type AssistantCollaboratorPin } from './assistants.js';
 import { assistantPolicy, assistantTools } from './assistant-policy.js';
 import { chatAssistantsExtension } from './chat-assistants.js';
+import { chatSkillsExtension } from './chat-skills.js';
 import { chatModelProposals } from './chat-model-proposals.js';
 import { chatMcpProposals } from './chat-mcp-proposals.js';
 import { AssistantPeers, AssistantPeerError, assistantWorkView, outstandingAssistantWork, readAssistantAnswer, retireAssistantWork,
@@ -104,6 +105,7 @@ export interface TaskMeta {
   chatReminders?: true | 'managed';
   chatWorkItems?: { project: string };
   chatAssistants?: { project: string };
+  chatSkills?: { project: string };
   modelProposals?: true;
   mcpProposals?: true;
   historyRecall?: true;
@@ -789,6 +791,7 @@ export class LocalRuntime {
         ...(calendar && calendarTools.length ? { calendarWrite:{fingerprint:calendar.fingerprint,tools:calendarTools} } : {}),
         ...(calendar && calendarAvailable ? {calendarAvailability:calendar.fingerprint} : {}),
         ...(workItemProject ? { chatAssistants: { project: workItemProject }, modelProposals: true as const, mcpProposals: true as const } : {}),
+        ...(workItemProject ? { chatSkills: { project: workItemProject } } : {}),
         ...(workItemProject ? { projectCatalog: true as const, threadTools: true as const } : {}),
         ...(localChat ? { historyRecall: true as const, projectTaskCatalog: true as const, chartDelivery: true as const } : {}),
         ...(!room ? { structuredQuestions: true as const } : {}),
@@ -1388,6 +1391,8 @@ export class LocalRuntime {
           return { currentModel: meta.model, defaultModel: await this.providers.selected(this.config.model, meta.chatAssistants!.project) ?? null,
             models: this.options.models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), tools: [...tools.values()] };
         })] : []),
+        ...(!remote && meta.chatSkills ? [chatSkillsExtension(meta.workspace, meta.chatSkills.project, async () =>
+          (this.skillStore ??= SkillStore.open(this.config.dataDir)))] : []),
         ...(history ? [history] : []),
         ...(projectTasks ? [projectTasks] : []),
         ...(!remote && meta.projectCatalog ? [projectCatalogExtension((section, limit, offset) => this.projectCatalog(meta.id, section, limit, offset))] : []),

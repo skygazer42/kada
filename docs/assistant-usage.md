@@ -760,3 +760,5 @@ node --import tsx scripts/live-assistant-capture.ts --live
 在线脚本使用合成数据，可在终端无回显输入硅基流动凭据。`SILICONFLOW_MODEL` 可以指定账户目录实际提供的模型；在线验证的临时目录和失败尝试均与用户项目分开。独立断言核对工具次数、产物字节、记忆引用和实际执行记录。小模型的复杂工具执行失败保留在实验记录中，测试通过不代表长期任务完成率或成本已经改善。
 
 全量测试逐文件执行，保留进程隔离，减少 SQLite、子进程恢复与短计时场景之间的资源争用。Windows 若 `python3` 是商店占位命令，先将 `CASE_PYTHON` 指向已安装的实际 Python 3.12；无需修改系统权限。Office 案例依赖 `scripts/cases/requirements.txt`。
+
+普通本地聊天也可以管理项目 Skill。用户明确提出保存、读取、修改、停用或删除可复用方法时，聊天会提供 skills_list、skill_read、skill_create、skill_update、skill_enable 和 skill_delete。创建的目录保存在项目 .kada/skills，更新和删除要求当前版本。Skill 修改不会启动任务或改变当前聊天角色。
