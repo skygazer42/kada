@@ -31,9 +31,9 @@
 
 **Interfaces:** RoutineHttpCheck={url:string;track?:string[]}；normalizeRoutineHttp(input:unknown)；sampleRoutineHttp(check, signal?, network?) 返回 {sha256}。网络复用已有 lookup/request 类型，所有安全判断继续执行。
 
-- [ ] 先写并运行失败测试：规范化、JSON/track 指纹、请求固定及网络拒绝。
-- [ ] 实现原始响应限额、固定 DNS、取消和安全错误；复用公网地址及稳定 JSON。
-- [ ] 验证重复身份、噪音字段、内容信封、超深/超大输入和 DNS 迟到失败。
+- [x] 先写并运行失败测试：规范化、JSON/track 指纹、请求固定及网络拒绝。
+- [x] 实现原始响应限额、固定 DNS、取消和安全错误；复用公网地址及稳定 JSON。
+- [x] 验证重复身份、噪音字段、内容信封、超深/超大输入和 DNS 迟到失败。
 
 ## Task 2: Pi 发生项、入口与恢复
 
@@ -41,8 +41,8 @@
 
 **Interfaces:** precheck.http；LocalRoutineOptions.http 和 RuntimeOptions.routineHttp 注入一次读取依赖。原发生项预检状态使用已有 baseline/unchanged/changed/failed。
 
-- [ ] 先写 baseline→重启→unchanged→changed 失败测试，再把检查接入原 samplePrecheck。
-- [ ] 首次在原采样事务保存基线；任务/通知成功再更新变化基线，保留原未知效果与修订检查。
-- [ ] 覆盖运行失败、通知、暂停/更新/取消、Run now、原回执及实际强杀恢复。
-- [ ] 从 CLI/API 保存、读取并运行；真实公共 HTTPS 验证仅做安全读取，记录脚本化对照及局限。
-- [ ] 更新 Spec/使用说明/矩阵；聚焦测试、独立审查后冻结代码跑全量 check，提交并仅推送 Fork。
+- [x] 先写 baseline→重启→unchanged→changed 失败测试，再把检查接入原 samplePrecheck。
+- [x] 首次在原采样事务保存基线；任务/通知成功再更新变化基线，保留原未知效果与修订检查。
+- [x] 覆盖运行失败、通知、暂停/更新/取消、Run now、原回执及实际强杀恢复；恢复后核对原宿主任务与通知回执，避免暂停竞态重复效果。
+- [x] 从 CLI/API 保存、读取并运行；真实公共 HTTPS 验证仅做安全读取，记录脚本化对照及局限。
+- [x] 更新 Spec/使用说明/矩阵；46 项相关回归、独立静态审查及 782 项全量测试通过。Fork 推送结果由远端 Git 核对，不创建上游 PR。

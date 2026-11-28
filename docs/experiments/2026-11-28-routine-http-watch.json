@@ -1,6 +1,7 @@
 {
   "date": "2026-11-28",
   "baseCommit": "40544f08231bfd0869b3a698a5f8e4b36e6bd97f",
+  "codeCommit": "5bff18fbb8966c74b38b89efab1f8dba38c9c1ad",
   "publicNetwork": {
     "initialEndpoint": "https://example.com/",
     "initialResult": "DNS ENOTFOUND on this machine; not counted as passed",
@@ -37,10 +38,34 @@
     "Missing host receipts do not invent a successful delivery; current changes remain eligible",
     "Receipt lookup failure retains pending state and withholds the upstream error"
   ],
+  "repositoryCheck": {
+    "command": "npm run check",
+    "exitCode": 0,
+    "tests": 782,
+    "passed": 782,
+    "failed": 0,
+    "skipped": 0,
+    "testDurationMs": 2297813.6631,
+    "typecheck": "passed",
+    "build": "passed",
+    "commitContentCheck": "passed"
+  },
+  "independentStaticReview": {
+    "range": "40544f0..5bff18f",
+    "result": "No material correctness or permission blockers found; no in-scope requirement set aside.",
+    "reviewerRanTests": false
+  },
+  "autoreview": {
+    "originalCredentialPreflight": "passed",
+    "preflightSeconds": 22.7,
+    "structuredModelReport": "not produced",
+    "modelInvoked": false,
+    "reason": "The extra model reviewer authentication was already known unavailable (HTTP 401 in the preceding feature); the credential preflight was run without repeating that request."
+  },
   "limits": [
     "Scripted model comparison; no claim about real-model quality, token cost or bills.",
     "Public-network verification checks stable reads; changing content and network refusal cases use synthetic transports.",
     "Only public port-443 HTTPS GET with identity encoding is supported; no authentication or redirects.",
-    "Final repository check and independent code review are recorded after they complete."
+    "Static review and runtime tests have separate scope; there is no extra structured Autoreview model report."
   ]
 }
