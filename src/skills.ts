@@ -236,6 +236,21 @@ export class SkillStore {
     });
   }
 
+  async publishVersion(workspace: Workspace, path: string, expectedVersion?: string) {
+    const candidate = await tree(workspace, path);
+    const skill = nativeSkill(workspace, candidate.root.path);
+    const ref = { name: skill.name, version: candidate.root.sha256 };
+    return this.changes.run(async () => {
+      const heads = await this.heads();
+      const old = heads[ref.name];
+      if (old?.published.includes(ref.version)) return ref;
+      if (old?.version !== expectedVersion) throw new Error("The published Skill changed. Provide its current version before publishing an update.");
+      await copy(workspace, candidate.root.path, join(this.files.root, ref.name, ref.version), ref.version);
+      await this.recordVersion(heads, ref, { status: "owner publish", workspace: workspace.root, path: candidate.root.path });
+      return ref;
+    });
+  }
+
   async exportVersion(workspace: Workspace, ref: { name: string; version: string }, path: string, discovered: LocalSkill[] = []) {
     return this.changes.run(async () => {
       const candidate = (await this.candidates(workspace, discovered)).find(({ entry }) => entry.name === ref.name);

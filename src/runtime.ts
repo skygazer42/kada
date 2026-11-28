@@ -579,6 +579,10 @@ export class LocalRuntime {
     const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
     return store.importVersion(await Workspace.open(workspace, { create: false }), path, version, await this.discoveredSkills(workspace));
   }
+  async publishSkill(workspace: string, path: string, version?: string) {
+    const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
+    return store.publishVersion(await Workspace.open(workspace, { create: false }), path, version);
+  }
   async exportSkill(workspace: string, ref: { name: string; version: string }, path: string) {
     const store = await (this.skillStore ??= SkillStore.open(this.config.dataDir));
     return store.exportVersion(await Workspace.open(workspace, { create: false }), ref, path, await this.discoveredSkills(workspace));

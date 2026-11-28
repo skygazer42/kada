@@ -71,7 +71,7 @@ try {
     console.log('\n本机语音\n  voice transcribe 会话ID 工作区内WAV [请求ID]\n  voice show 会话ID 请求ID\n  voice send 会话ID 请求ID\n  voice render 会话ID [请求ID]\n  voice play 会话ID 请求ID');
     console.log('files chart 任务ID 编号　为已验收的 .chart.json 生成本机预览。');
     console.log('computer profiles 查看浏览器配置。run、chat 和 computer 可用 --browser-profile 名称选择。');
-    console.log('skills import 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
+    console.log('skills import|publish 目录 [当前版本] --workspace 路径\nskills export 名称 版本 目标目录 --workspace 路径');
     console.log('model browser --workspace 路径　生成本机项目模型设置链接。');
     console.log('assistants browser --workspace 路径　生成本机项目助手设置链接。');
     console.log('mcp browser --workspace 路径　生成本机项目 MCP 工具设置链接。');
@@ -337,6 +337,7 @@ try {
       } else if (action === 'rollback') result = await request('/v1/settings/skills/rollback','POST',{name:rest[0],version:rest[1]});
       else if (action === 'capture') result = await request('/v1/tasks/'+segment(rest[0])+'/skills/capture','POST',{path:rest[1]});
       else if (action === 'import' && rest[0] && rest.length <= 2) result = await request('/v1/settings/skills/import', 'POST', { workspace, path: rest[0], version: rest[1] });
+      else if (action === 'publish' && rest[0] && rest.length <= 2) result = await request('/v1/settings/skills/publish', 'POST', { workspace, path: rest[0], version: rest[1] });
       else if (action === 'export' && rest.length === 3) result = await request('/v1/settings/skills/export', 'POST', { workspace, name: rest[0], version: rest[1], path: rest[2] });
       else throw new Error('Use skills list, enable, disable, capture, rollback, import or export.');
     } else if (command === 'mcp') {

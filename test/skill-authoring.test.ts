@@ -38,3 +38,20 @@ test('owner-published Skill versions reopen and export their original native pac
   await assert.rejects(store.exportVersion(workspace, second, 'reviewed-skill'), /destination/i);
   assert.equal(await readFile(original.pins[0]!.filePath, 'utf8'), body('First instructions.'));
 });
+
+test('a project Skill can be published to the managed catalogue and revoked without changing its source', async t => {
+  const temp = await mkdtemp(join(tmpdir(), 'kada-skill-publish-'));
+  t.after(() => rm(temp, { recursive: true, force: true, maxRetries: 5 }));
+  const sourceWorkspace = await Workspace.open(join(temp, 'source'));
+  const otherWorkspace = await Workspace.open(join(temp, 'other'));
+  const source = join(sourceWorkspace.root, '.kada', 'skills', 'published-method');
+  await mkdir(source, { recursive: true });
+  const content = '---\nname: published-method\ndescription: A published fixture method.\n---\n\nUse the published fixture.\n';
+  await writeFile(join(source, 'SKILL.md'), content);
+  const store = await SkillStore.open(join(temp, 'host'));
+  const published = await store.publishVersion(sourceWorkspace, '.kada/skills/published-method');
+  assert.equal((await store.catalog(otherWorkspace)).find(item => item.name === published.name)?.currentVersion, published.version);
+  assert.equal(await readFile(join(source, 'SKILL.md'), 'utf8'), content);
+  await store.rollback(published);
+  assert.equal((await store.catalog(otherWorkspace)).find(item => item.name === published.name)?.enabled, false);
+});

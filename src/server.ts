@@ -187,6 +187,14 @@ export async function serve(config: Config, options?: RuntimeOptions) {
         }
         return send(200, await runtime.importSkill(workspace, path, version));
       }
+      if (url.pathname === '/v1/settings/skills/publish' && req.method === 'POST') {
+        const { workspace, path, version } = await body(req);
+        if (typeof workspace !== 'string' || typeof path !== 'string' ||
+          version !== undefined && (typeof version !== 'string' || !/^[a-f0-9]{64}$/.test(version))) {
+          throw new Error('Provide a project workspace, Skill directory and the current published version for an update.');
+        }
+        return send(200, await runtime.publishSkill(workspace, path, version));
+      }
       if (url.pathname === '/v1/settings/skills/export' && req.method === 'POST') {
         const { workspace, path, name, version } = await body(req);
         if (typeof workspace !== 'string' || typeof path !== 'string' || typeof name !== 'string' || typeof version !== 'string') {
