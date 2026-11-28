@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { hasTool, scriptedFixture, until } from "./helpers.js";
@@ -83,4 +83,31 @@ test("ordinary chat creates, reads, updates, disables and deletes a project Skil
   assert.equal(status.status, "answered");
   assert.equal(value(status.messages.find((message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === "skill_delete")!).deleted, true);
   await assert.rejects(readFile(join(fixture.workspace, ".kada", "skills", name, "SKILL.md")));
+});
+
+test("Skill update and delete keep a stale chat from overwriting a newer project version", async t => {
+  let phase = "create";
+  let version = "";
+  const fixture = await scriptedFixture(context => {
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+    if (phase === "create" && !results.length) return call("skill_create", { name: "stale-check", description: "Protect edits.", body: "Original." });
+    if (phase === "stale" && results.length === 1) return call("skill_update", { name: "stale-check", currentVersion: version, body: "Old overwrite." });
+    if (phase === "delete" && results.length === 2) return call("skill_delete", { name: "stale-check", currentVersion: version });
+    return fauxAssistantMessage("The stale change was rejected.");
+  });
+  t.after(() => fixture.close());
+  const chat = await fixture.runtime.create("Create a protected Skill.", fixture.workspace, [], { chat: true });
+  let status = await until(() => fixture.runtime.status(chat.id), row => row.status === "answered" || row.status === "failed");
+  const created = value(status.messages.find((message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === "skill_create")!);
+  version = created.skill.version;
+  await writeFile(join(fixture.workspace, ".kada", "skills", "stale-check", "SKILL.md"),
+    "---\nname: stale-check\ndescription: Protect edits.\n---\n\nNewer owner content.\n");
+  phase = "stale";
+  await fixture.runtime.followUp(chat.id, "Try the stale edit.", "skill-stale-update");
+  status = await until(() => fixture.runtime.status(chat.id), row => row.status === "answered");
+  assert.equal(status.messages.filter(message => message.role === "toolResult" && message.toolName === "skill_update").at(-1)?.isError, true);
+  phase = "delete";
+  await fixture.runtime.followUp(chat.id, "Try the stale delete.", "skill-stale-delete");
+  status = await until(() => fixture.runtime.status(chat.id), row => row.status === "answered");
+  assert.equal(status.messages.filter(message => message.role === "toolResult" && message.toolName === "skill_delete").at(-1)?.isError, true);
 });
