@@ -10,7 +10,8 @@ const prefix = '/project-assistants';
 
 export function createProjectAssistantsAccess(assistants: Assistants, models: Models, origin: string,
   readBody: (request: IncomingMessage) => Promise<Record<string, unknown>>,
-  skills: (workspace: string) => Promise<SkillCatalogEntry[]>) {
+  skills: (workspace: string) => Promise<SkillCatalogEntry[]>,
+  browserProfiles: () => { name: string; connected: boolean }[]) {
   const host = new URL(origin).host, sessions = createLocalBrowserSessions();
   async function link(workspace: unknown) {
     return { url: origin + prefix + '?open#' + sessions.ticket(await assistantProject(workspace)) };
@@ -38,7 +39,7 @@ export function createProjectAssistantsAccess(assistants: Assistants, models: Mo
     const project = sessions.scope(req.headers.authorization);
     if (!project) return send(401, { error: 'Open project assistants again from Kada.' });
     if (path === prefix + '/state' && req.method === 'GET') return send(200, { project, windows: process.platform === 'win32', roles: await assistants.list(project, project),
-      models: models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), skills: await skills(project) });
+      models: models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), skills: await skills(project), browserProfiles: browserProfiles() });
     const id = /^\/project-assistants\/roles\/([a-f0-9-]{36})$/.exec(path)?.[1];
     if (id && req.method === 'GET') {
       if (await assistantProject(project) !== project) throw new AssistantError(409, 'The original assistant project changed.');

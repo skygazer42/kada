@@ -284,7 +284,7 @@ export class LocalRuntime {
     this.gmail = new ProjectGmail(config.dataDir, this.mcp);
     this.calendars = new ProjectCalendars(config.dataDir, this.mcp);
     this.credentials = new ApplicationCredentials(config.dataDir, options.credentialNetwork);
-    this.assistants = new Assistants(config.dataDir, options.models);
+    this.assistants = new Assistants(config.dataDir, options.models, () => [...(this.options.browserProfiles?.keys() ?? [])]);
     this.snapshots = new WorkspaceSnapshots(config.dataDir);
     this.workItems = new WorkItems<TaskMeta>(config.dataDir, {
       task: async id => {
@@ -620,11 +620,11 @@ export class LocalRuntime {
     await this.routines.recover();
   }
   private async pinAssistant(workspace: string, ref: AssistantRef, fallback: ModelRef | undefined, directory: string): Promise<AssistantPin> {
-    const { id, revision, project, name, description, instructions, tools, model, memoryScope, skills } = await this.assistants.select(workspace, ref);
+    const { id, revision, project, name, description, instructions, tools, model, memoryScope, skills, browserProfile } = await this.assistants.select(workspace, ref);
     const skillPins = await pinSkills(await Workspace.open(workspace, { create: false }),
       join(directory, 'assistant-skills', id), await SkillStore.existing(this.config.dataDir), skills, await this.discoveredSkills(workspace));
     return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback),
-      ...(memoryScope ? { memoryScope } : {}), ...(skills === undefined ? {} : { skills }), skillPins };
+      ...(memoryScope ? { memoryScope } : {}), ...(skills === undefined ? {} : { skills }), ...(browserProfile ? { browserProfile } : {}), skillPins };
   }
 
   private async pinParticipant(workspace: string, { workspace: target, ...ref }: AssistantCollaboratorRef,
@@ -656,8 +656,8 @@ export class LocalRuntime {
       if (source?.room) throw new TaskConflictError('Open independent work from an ordinary local thread.');
       if (source) workspace = source.workspace;
       if (options.images?.length && !options.remote) throw new Error("Image references require a scoped remote submission.");
-      const browserProfile = options.browserProfile;
-      if (browserProfile !== undefined && (typeof browserProfile !== 'string' || !browserProfilePattern.test(browserProfile) || options.remote || options.room)) {
+      const requestedBrowserProfile = options.browserProfile;
+      if (requestedBrowserProfile !== undefined && (typeof requestedBrowserProfile !== 'string' || !browserProfilePattern.test(requestedBrowserProfile) || options.remote || options.room)) {
         throw new QuestionError(400, 'Choose a configured browser profile for a new local task.');
       }
       const assistant = options.assistant === undefined ? undefined : assistantRef(options.assistant);
@@ -682,7 +682,7 @@ export class LocalRuntime {
       if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error("Provide a valid task UUID.");
       const requestedWorkspace = resolve(workspace ?? join(this.directory(id), "workspace"));
       const creationHash = createHash("sha256").update(JSON.stringify({ objective, workspace: requestedWorkspace, acceptance: checks, prepare: Boolean(options.prepare), chat: Boolean(options.chat), budget: budget ?? null, skills:options.skills ?? null, routineOccurrenceId:options.routineOccurrenceId ?? null,notifyOnChange:options.notifyOnChange === true,remote:options.remote===true,
-        ...(browserProfile ? { browserProfile } : {}),
+        ...(requestedBrowserProfile ? { browserProfile: requestedBrowserProfile } : {}),
         ...(options.images?.length ? { images: options.images } : {}),
         ...(options.routineIssue ? { routineIssue: options.routineIssue } : {}),
         ...(options.routinePullRequest ? { routinePullRequest: options.routinePullRequest } : {}),
@@ -714,6 +714,11 @@ export class LocalRuntime {
       const collaborators = collaboratorRefs ? await Promise.all(collaboratorRefs.map(pin)) : undefined;
       if (this.config.subagentModel) validateModel(this.options.models, this.config.subagentModel);
       const localChat = !options.remote && !room;
+      const inheritedBrowser = !assistant ? inherited : undefined;
+      const browserProfile = requestedBrowserProfile ?? inheritedBrowser?.browserProfile ?? role?.browserProfile;
+      if (requestedBrowserProfile === undefined && inheritedBrowser?.browserDriver && !this.browserConnectionMatches(inheritedBrowser)) {
+        throw new QuestionError(409, 'Reconnect the original browser driver before opening related work.');
+      }
       const taskComputer = localChat ? this.computerFor(browserProfile) : undefined;
       const browserDriver = taskComputer?.browserKey?.();
       const browserSession = browserProfile ? taskComputer?.browserSession?.() : undefined;
@@ -768,7 +773,8 @@ export class LocalRuntime {
         ...(this.config.workspaceSnapshots && localChat ? { snapshotBeforeTurn: true as const } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
           instructions: role.instructions, tools: [...role.tools], model: { ...model }, ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}),
-          ...(role.skills === undefined ? {} : { skills: structuredClone(role.skills) }), ...(selectedSkills ? { skillPins: selectedSkills } : {}) } } : {}),
+          ...(role.skills === undefined ? {} : { skills: structuredClone(role.skills) }), ...(role.browserProfile ? { browserProfile: role.browserProfile } : {}),
+          ...(selectedSkills ? { skillPins: selectedSkills } : {}) } } : {}),
         mcpPins,
         ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
         ...(this.config.deferOptionalTools && localChat && !role ? { optionalToolDiscovery:true as const } : {}),
@@ -1401,7 +1407,7 @@ export class LocalRuntime {
             .map(tool => [tool.name, { name: tool.name, description: (tool.description ?? '').slice(0, 300) }]));
           return { currentModel: meta.model, defaultModel: await this.providers.selected(this.config.model, meta.chatAssistants!.project) ?? null,
             models: this.options.models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), tools: [...tools.values()],
-            skills: await this.skillCatalog(meta.workspace) };
+            skills: await this.skillCatalog(meta.workspace), browserProfiles: this.computerProfiles().map(({ name, connected }) => ({ name, connected })) };
         })] : []),
         ...(!remote && meta.chatSkills ? [chatSkillsExtension(meta.workspace, meta.chatSkills.project, async () =>
           (this.skillStore ??= SkillStore.open(this.config.dataDir)))] : []),

@@ -17,6 +17,37 @@ async function fixture(t: test.TestContext) {
 }
 const definition = { name: '研究员', instructions: 'Read the original sources and cite evidence.', tools: ['read', 'history_search'] };
 
+test('assistant browser defaults retain revisions and historical receipts without changing an old task selection', async t => {
+  const f = await fixture(t);
+  let profiles = ['alpha', 'beta'];
+  const roles = new Assistants(f.directory, f.models, () => profiles);
+  const input = { ...definition, workspace: f.project, browserProfile: 'alpha' };
+  const request = { requestId: 'browser-default-create', workspace: f.sub, project: f.project };
+  const original = await roles.create(input, request);
+  assert.equal(original.browserProfile, 'alpha');
+  assert.equal((await roles.select(f.sub, { id: original.id, revision: 1 })).browserProfile, 'alpha');
+  const next = await roles.update(original.id, { revision: 1, browserProfile: 'beta' });
+  assert.equal(next.revision, 2);
+  assert.equal(next.browserProfile, 'beta');
+  profiles = [];
+  assert.equal((await new Assistants(f.directory, f.models).get(original.id)).browserProfile, 'beta');
+  assert.equal((await roles.create(input, request)).browserProfile, 'alpha');
+  assert.equal((await roles.select(f.project, { id: original.id, revision: 2 })).browserProfile, 'beta');
+  const renamed = await roles.update(original.id, { revision: 2, description: 'Keep unavailable defaults readable.' });
+  assert.equal(renamed.browserProfile, 'beta');
+  const clearRequest = { requestId: 'browser-default-clear', workspace: f.sub, project: f.project };
+  const cleared = await roles.update(original.id, { revision: 3, browserProfile: null }, clearRequest);
+  assert.equal(cleared.browserProfile, undefined);
+  assert.equal(cleared.revision, 4);
+  profiles = ['alpha'];
+  await roles.update(original.id, { revision: 4, browserProfile: 'alpha' });
+  assert.equal((await roles.update(original.id, { revision: 3, browserProfile: null }, clearRequest)).browserProfile, undefined);
+  for (const browserProfile of ['unknown', '../alpha', '', 'ALPHA', 1, {}]) {
+    await assert.rejects(roles.update(original.id, { revision: 5, browserProfile }), { status: 400 });
+  }
+  assert.equal((await roles.get(original.id)).revision, 5);
+});
+
 test('assistant Skill assignments retain exact versions, distinct revisions and original receipts', async t => {
   const f = await fixture(t);
   const skills = [{ name: 'published-method', version: 'a'.repeat(64) }];

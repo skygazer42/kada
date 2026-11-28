@@ -10,6 +10,38 @@ import { hasTool, scriptedFixture, until } from './helpers.js';
 const call = (name: string, args: Record<string, unknown>) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: 'toolUse' });
 const value = (result: ToolResultMessage) => JSON.parse(result.content.filter(part => part.type === 'text').map(part => part.text).join(''));
 
+test('ordinary chat configures existing browser defaults from safe metadata without opening a browser or task', async t => {
+  const browser = { forTask() { assert.fail('Saving a browser default must not start it.'); }, release() {} };
+  const f = await scriptedFixture(context => {
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult');
+    for (const result of results) assert.equal(result.isError, false, JSON.stringify(result));
+    const catalog = results.find(result => result.toolName === 'assistant_catalog');
+    if (!catalog) return call('assistant_catalog', { kind: 'browsers', query: 'alpha' });
+    assert.deepEqual(value(catalog).items, [{ name: 'alpha', connected: false }]);
+    assert.doesNotMatch(JSON.stringify(value(catalog)), /browserSession|lease|command|environment/);
+    const created = results.find(result => result.toolName === 'assistant_create');
+    if (!created) return call('assistant_create', { name: 'Browser reader', instructions: 'Use the selected browser for requested work.', tools: ['read'], browserProfile: 'alpha' });
+    const role = value(created).assistant;
+    assert.equal(role.browserProfile, 'alpha');
+    const updates = results.filter(result => result.toolName === 'assistant_update');
+    if (!updates.length) return call('assistant_update', { id: role.id, revision: 1, browserProfile: 'beta' });
+    assert.equal(value(updates[0]!).assistant.browserProfile, 'beta');
+    if (updates.length === 1) return call('assistant_update', { id: role.id, revision: 2, browserProfile: null });
+    assert.equal(value(updates[1]!).assistant.browserProfile, undefined);
+    return fauxAssistantMessage('Saved the settings without starting work.');
+  }, {}, () => [], { browserProfiles: new Map([['alpha', browser], ['beta', browser]]) });
+  t.after(() => f.close());
+  const chat = await f.runtime.create('Configure browser defaults only.', f.workspace, [], { chat: true });
+  const done = await until(() => f.runtime.status(chat.id), row => ['answered', 'failed'].includes(row.status));
+  assert.equal(done.status, 'answered');
+  assert.equal(done.goal, undefined);
+  assert.equal(done.assistant, undefined);
+  assert.equal((await f.runtime.list()).length, 1);
+  const [role] = await f.runtime.assistants.list(f.workspace);
+  assert.equal(role.revision, 3);
+  assert.equal(role.browserProfile, undefined);
+});
+
 test('ordinary chat assigns exact catalogue Skill versions and can clear or restore the defaults without starting work', async t => {
   let selected: { name: string; version: string }[] = [];
   const f = await scriptedFixture(context => {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { Models } from '@earendil-works/pi-ai';
-import type { ModelRef } from './config.js';
+import { browserProfilePattern, type ModelRef } from './config.js';
 import type { SkillState } from './skills.js';
 import { memoryProject } from './memory-sources.js';
 import { validateModel } from './models.js';
@@ -10,7 +10,7 @@ import { atomicJson, readJson, SerialQueue } from './util.js';
 export type AssistantRef = { id: string; revision: number };
 export type AssistantSkill = { name: string; version: string };
 type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[];
-  memoryScope?: 'shared' | 'isolated'; skills?: AssistantSkill[] };
+  memoryScope?: 'shared' | 'isolated'; skills?: AssistantSkill[]; browserProfile?: string };
 export type Assistant = AssistantRef & Definition & { project: string; archived: boolean; createdAt: number; updatedAt: number };
 export type AssistantPin = AssistantRef & Definition & { project: string; model: ModelRef; skillPins?: SkillState };
 export type AssistantCollaboratorRef = AssistantRef & { workspace?: string };
@@ -19,9 +19,9 @@ export type AssistantMutation = { requestId: string; project: string; workspace:
 type StoredAssistant = Assistant & { operations?: { requestId: string; fingerprint: string; result: Assistant }[] };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const requiredDefinitionKeys = ['name', 'description', 'instructions', 'model', 'tools'];
-const definitionKeys = [...requiredDefinitionKeys, 'memoryScope', 'skills'];
+const definitionKeys = [...requiredDefinitionKeys, 'memoryScope', 'skills', 'browserProfile'];
 const requiredStoredKeys = [...requiredDefinitionKeys, 'id', 'revision', 'project', 'archived', 'createdAt', 'updatedAt'];
-const storedKeys = [...requiredStoredKeys, 'memoryScope', 'skills'];
+const storedKeys = [...requiredStoredKeys, 'memoryScope', 'skills', 'browserProfile'];
 export class AssistantError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message); } }
 
 function fields(input: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -69,6 +69,11 @@ function memoryScope(input: unknown): 'shared' | 'isolated' {
   if (input !== 'shared' && input !== 'isolated') throw new AssistantError(400, 'Choose shared or isolated assistant memory.');
   return input;
 }
+function browserProfile(input: unknown): string | undefined {
+  if (input === null) return;
+  if (typeof input !== 'string' || !browserProfilePattern.test(input)) throw new AssistantError(400, 'Choose a configured browser profile name.');
+  return input;
+}
 function skillSelection(input: unknown): AssistantSkill[] | undefined {
   if (input === null) return;
   if (!Array.isArray(input) || input.length > 16) throw new AssistantError(400, 'Choose up to sixteen Skill names and full versions.');
@@ -87,7 +92,8 @@ function definition(input: Record<string, unknown>): Definition {
   return { name: assistantName(input.name), description: input.description === undefined ? '' : text(input.description, 'description', 1000, true).trim(),
     instructions: text(input.instructions, 'instructions', 16_000), model: modelRef(input.model), tools: toolNames(input.tools),
     ...(input.memoryScope === undefined ? {} : { memoryScope: memoryScope(input.memoryScope) }),
-    ...(input.skills === undefined || input.skills === null ? {} : { skills: skillSelection(input.skills) }) };
+    ...(input.skills === undefined || input.skills === null ? {} : { skills: skillSelection(input.skills) }),
+    ...(input.browserProfile === undefined || input.browserProfile === null ? {} : { browserProfile: browserProfile(input.browserProfile) }) };
 }
 const nameKey = (name: string) => name.trim().normalize('NFC').toLowerCase();
 export async function assistantProject(workspace: unknown): Promise<string> {
@@ -97,9 +103,9 @@ export async function assistantProject(workspace: unknown): Promise<string> {
   return project;
 }
 function publicAssistant(item: Assistant): Assistant {
-  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, memoryScope, skills } = item;
+  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, memoryScope, skills, browserProfile } = item;
   return { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, ...(memoryScope ? { memoryScope } : {}),
-    ...(skills === undefined ? {} : { skills: structuredClone(skills) }) };
+    ...(skills === undefined ? {} : { skills: structuredClone(skills) }), ...(browserProfile ? { browserProfile } : {}) };
 }
 function storedAssistant(input: unknown, allowed: readonly string[] = storedKeys): Assistant {
   const value = fields(input, allowed); definition(value);
@@ -126,7 +132,9 @@ async function mutationScope(request?: AssistantMutation) {
 export class Assistants {
   private readonly path: string;
   private readonly changes = new SerialQueue();
-  constructor(dataDir: string, private readonly models: Models) { this.path = join(dataDir, 'assistants.json'); }
+  constructor(dataDir: string, private readonly models: Models, private readonly browserProfiles: () => readonly string[] = () => []) {
+    this.path = join(dataDir, 'assistants.json');
+  }
   private async load(): Promise<StoredAssistant[]> {
     let input: unknown;
     try { input = await readJson(this.path); }
@@ -166,6 +174,9 @@ export class Assistants {
     if (model) try { validateModel(this.models, model); }
     catch { throw new AssistantError(400, 'Choose an assistant model from the installed Pi catalog.'); }
   }
+  private checkBrowserProfile(profile?: string) {
+    if (profile && !this.browserProfiles().includes(profile)) throw new AssistantError(400, 'Choose a configured browser profile.');
+  }
   private unique(items: Assistant[], project: string, name: string, except?: string) {
     if (items.some(item => item.project === project && item.id !== except && nameKey(item.name) === nameKey(name))) throw new AssistantError(409, 'This project already has an assistant with that name.');
   }
@@ -184,7 +195,7 @@ export class Assistants {
       await mutationScope(request);
       const project = await assistantProject(value.workspace);
       if (request && project !== request.project) throw new AssistantError(409, 'The original assistant project changed.');
-      this.checkModel(settings.model); this.unique(items, project, settings.name);
+      this.checkModel(settings.model); this.checkBrowserProfile(settings.browserProfile); this.unique(items, project, settings.name);
       const now = Date.now(), next: Assistant = { ...settings, project, id: randomUUID(), revision: 1, archived: false, createdAt: now, updatedAt: now };
       await atomicJson(this.path, [...items, { ...next, ...(request ? { operations: [{ requestId: request.requestId, fingerprint, result: next }] } : {}) }]); return next;
     });
@@ -201,7 +212,8 @@ export class Assistants {
       ...(value.model === undefined ? {} : { model: modelRef(value.model) }), ...(value.tools === undefined ? {} : { tools: toolNames(value.tools) }),
       ...(value.archived === undefined ? {} : { archived: value.archived as boolean }),
       ...(value.memoryScope === undefined ? {} : { memoryScope: memoryScope(value.memoryScope) }),
-      ...(value.skills === undefined ? {} : { skills: skillSelection(value.skills) }) };
+      ...(value.skills === undefined ? {} : { skills: skillSelection(value.skills) }),
+      ...(value.browserProfile === undefined ? {} : { browserProfile: browserProfile(value.browserProfile) }) };
     const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, patch, request?.project, request?.workspace])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load(), receipt = replay(items, request, fingerprint); if (receipt) return receipt;
@@ -210,6 +222,7 @@ export class Assistants {
       if (request && previous.project !== request.project) throw new AssistantError(404, 'Assistant not found in this project.');
       if (previous.revision !== expected) throw new AssistantError(409, 'The assistant changed. Read its latest revision.');
       if (Object.hasOwn(patch, 'model')) this.checkModel(patch.model!);
+      if (Object.hasOwn(patch, 'browserProfile') && patch.browserProfile !== previous.browserProfile) this.checkBrowserProfile(patch.browserProfile);
       this.unique(items, previous.project, patch.name ?? previous.name, id);
       const next: Assistant = { ...previous, ...patch }, changed = JSON.stringify(next) !== JSON.stringify(previous);
       if (!changed && !request) return previous;

@@ -121,6 +121,10 @@ npm run harness -- memory review off --workspace E:/project
 
 助手设置页也可选择固定版本的 Skills。保持「使用项目默认 Skills」沿用原行为；选择固定版本后留空，表示此助手不选 Skill。JSON 配置使用 `skills: [{ "name": "方法名", "version": "完整 SHA-256" }]`，修改时 `skills: null` 恢复项目默认。普通聊天可以通过 `assistant_catalog` 的 `skills` 目录取得精确版本再分配。新任务、派活助手和本机群组成员保留各自的包副本，修改来源、配置或撤回发布均不替换已开始的工作；新工作会拒绝不可用的版本。Skills 不增加工具权限，派活与群组仅按原权限读取方法。 [分配契约与验收](superpowers/plans/2026-11-27-assistant-skills.md)
 
+在「默认浏览器配置」中选择已经配置的名称，也可在角色 JSON 中设置 `"browserProfile": "work"`。新直接任务和例行运行采用该默认，任务显式的 `--browser-profile` 优先；修改为 `null` 清除默认。普通聊天配置可通过 `assistant_catalog` 的 `browsers` 目录取得实际名称及连接状态后设置。保存配置不启动浏览器，也不增加电脑工具权限。
+
+旧任务及关联工作的原会话和驱动继续固定，角色后续改名、归档或换默认不会迁移活动浏览器。原配置失效时仍可读取及编辑其他字段，新工作会明确报错；显式选择另一个有效配置可以覆盖失效默认。协作者和配对群组继续没有电脑工具，这项选择不授权它们借主任务操作浏览器。 [参考与验收](superpowers/specs/2026-11-28-assistant-browser-profiles-design.md)
+
 先在项目中保存一份角色定义，例如 `reader.json`：
 
 ```json

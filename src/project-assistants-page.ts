@@ -40,6 +40,7 @@ export const projectAssistantsPage = String.raw`<!doctype html>
         <label for="description">说明</label><textarea id="description" maxlength="1000"></textarea>
         <label for="instructions">指令</label><textarea id="instructions" required maxlength="16000"></textarea>
         <label for="model">模型</label><select id="model"></select>
+        <label for="browser-profile">默认浏览器配置</label><select id="browser-profile"></select>
         <label for="memoryScope">记忆范围</label>
         <select id="memoryScope"><option value="shared">共享项目记忆</option><option value="isolated">此助手的私有记忆</option></select>
         <label for="tools">允许的工具（每行一个）</label><textarea id="tools" spellcheck="false"></textarea>
@@ -64,7 +65,7 @@ export const projectAssistantsPage = String.raw`<!doctype html>
 const field = id => document.getElementById(id);
 const roles = field('roles'), models = field('model'), status = field('status');
 const key = 'kada-project-assistants-session';
-let token, current, catalog = [], skillCatalog = [], pending, workspaceArgument;
+let token, current, catalog = [], skillCatalog = [], browserProfiles = [], pending, workspaceArgument;
 function option(select, value, label) {
   const item = document.createElement('option');
   item.value = value;
@@ -99,6 +100,14 @@ function render(role) {
   for (const id of ['name','description','instructions']) field(id).value = role?.[id] ?? '';
   field('tools').value = role?.tools.join('\n') ?? '';
   field('memoryScope').value = role?.memoryScope ?? 'shared';
+  const browser = field('browser-profile');
+  browser.replaceChildren();
+  option(browser, '', '使用默认浏览器');
+  for (const profile of browserProfiles) option(browser, profile.name, profile.name + (profile.connected ? '' : '（未连接）'));
+  if (role?.browserProfile && !browserProfiles.some(profile => profile.name === role.browserProfile)) {
+    option(browser, role.browserProfile, role.browserProfile + '（暂不可用）');
+  }
+  browser.value = role?.browserProfile ?? '';
   field('skill-mode').value = role?.skills === undefined ? 'project' : 'assigned';
   field('skill-selection').hidden = field('skill-mode').value !== 'assigned';
   const selectedSkills = new Set((role?.skills ?? []).map(skill => skill.name + '@' + skill.version));
@@ -133,6 +142,7 @@ async function refresh(preferred, saved) {
   field('command-label').textContent = state.windows ? '在 Kada 目录的 PowerShell 中运行' : '在 Kada 目录运行以开始新会话';
   catalog = state.models;
   skillCatalog = state.skills;
+  browserProfiles = state.browserProfiles;
   roles.replaceChildren();
   option(roles, '', '新建助手');
   for (const row of state.roles) option(roles, row.id, row.name + (row.archived ? '（已归档）' : ''));
@@ -159,6 +169,7 @@ field('editor').addEventListener('submit', event => {
     const method = current ? 'PATCH' : 'POST';
     const model = models.value ? JSON.parse(models.value) : null;
     const memoryScope = field('memoryScope').value;
+    const browserProfile = field('browser-profile').value || null;
     const skills = field('skill-mode').value === 'project' ? null : Array.from(field('skills').selectedOptions).map(option => {
       const [name, version] = option.value.split('@');
       return { name, version };
@@ -168,6 +179,7 @@ field('editor').addEventListener('submit', event => {
       tools:field('tools').value.split(/\r?\n/).map(name => name.trim()).filter(Boolean),
       ...(!current || JSON.stringify(model) !== JSON.stringify(current.model) ? { model } : {}),
       ...(memoryScope !== (current?.memoryScope ?? 'shared') ? { memoryScope } : {}),
+      ...(browserProfile !== (current?.browserProfile ?? null) ? { browserProfile } : {}),
       ...(JSON.stringify(skills) !== JSON.stringify(current?.skills ?? null) ? { skills } : {}),
       ...(current ? { revision:current.revision, archived:field('archived').checked } : {}),
     };

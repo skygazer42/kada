@@ -271,6 +271,7 @@ export function assistantPeersExtension(options: Options): Extension {
         pin = { id: definition.id, revision: definition.revision, project: definition.project, name: definition.name,
           description: definition.description, instructions: definition.instructions, model: { ...model }, tools: definition.tools,
           ...(definition.skills === undefined ? {} : { skills: structuredClone(definition.skills) }),
+          ...(definition.browserProfile ? { browserProfile: definition.browserProfile } : {}),
           ...('skillPins' in definition && definition.skillPins ? { skillPins: definition.skillPins } : {}),
           ...('workspace' in definition && typeof definition.workspace === 'string' ? { workspace: definition.workspace } : {}) };
       }

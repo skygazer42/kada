@@ -1,0 +1,34 @@
+{
+  "date": "2026-11-28",
+  "environment": "Windows, existing agent-browser CLI and Chromium, synthetic local pages only",
+  "browserExecution": {
+    "source": "named assistant defaults",
+    "profiles": ["alpha", "beta"],
+    "distinctLocalPages": true,
+    "roleEditedBeforeRestart": true,
+    "originalSessionsRetainedAfterRestart": true,
+    "independentTakeoverAndReturn": true,
+    "verifiedMarkers": ["alpha", "beta"]
+  },
+  "projectSettings": [
+    { "case": "save beta and reload", "result": "passed", "revision": 2 },
+    { "case": "clear browser default and reload", "result": "passed", "revision": 3 },
+    { "case": "create a second assistant with a configured default", "result": "passed" },
+    { "case": "catalogue removal between selection and save rejects the change and retains the draft", "result": "passed" },
+    { "case": "an existing missing default remains selected with an unavailable label", "result": "passed" },
+    { "case": "edit another field and reload without dropping the unavailable default", "result": "passed", "revision": 5 }
+  ],
+  "focusedVerification": {
+    "command": "node --import tsx --test --test-concurrency=1 test/assistant-browser-profiles.test.ts test/assistants.test.ts test/chat-assistants.test.ts test/named-assistant-entry.test.ts test/browser-sign-in.test.ts test/thread-models.test.ts test/routine-assistants.test.ts",
+    "tests": 38,
+    "passed": 38,
+    "failed": 0,
+    "skipped": 0,
+    "typecheck": "passed"
+  },
+  "limits": [
+    "The model is scripted; this does not establish real-model quality or cost improvements.",
+    "No real login credentials or third-party account was used.",
+    "Collaborators and paired rooms retain their existing lack of computer tools; per-member browser execution remains a separate gap."
+  ]
+}

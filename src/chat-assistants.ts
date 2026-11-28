@@ -9,10 +9,14 @@ export type AssistantCatalog = {
   models: { provider: string; modelId: string; name: string }[];
   tools: { name: string; description: string }[];
   skills: SkillCatalogEntry[];
+  browserProfiles: { name: string; connected: boolean }[];
 };
 const id = Type.String({ minLength: 1, maxLength: 120 });
 const model = Type.Union([Type.Object({ provider: Type.String({ minLength: 1, maxLength: 128 }), modelId: Type.String({ minLength: 1, maxLength: 256 }) }, { additionalProperties: false }), Type.Null()]);
 const memoryScope = Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')]));
+const browserProfile = Type.Optional(Type.Union([Type.String({ pattern: '^[a-z][a-z0-9_-]{0,39}$' }), Type.Null()], {
+  description: 'An existing name from assistant_catalog kind=browsers. Applies to future direct and routine tasks; explicit task selection wins. Null clears the default; omit to preserve. Does not grant computer tools or change a running browser.',
+}));
 const skills = Type.Optional(Type.Union([Type.Array(Type.Object({
   name: Type.String({ minLength: 1, maxLength: 64, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }),
   version: Type.String({ pattern: '^[a-f0-9]{64}$' }),
@@ -28,7 +32,8 @@ const outputLimits = { maxBytes: 262_144, maxLines: 1 };
 const output = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 const summary = (role: Omit<Assistant, 'instructions'>) => ({ id: role.id, revision: role.revision, name: role.name, description: role.description.slice(0, 300), descriptionTruncated: role.description.length > 300,
   model: role.model, toolCount: role.tools.length, archived: role.archived, updatedAt: role.updatedAt,
-  ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}), ...(role.skills === undefined ? {} : { skills: role.skills }) });
+  ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}), ...(role.skills === undefined ? {} : { skills: role.skills }),
+  ...(role.browserProfile ? { browserProfile: role.browserProfile } : {}) });
 const page = <T>(items: T[], { offset = 0, limit = 20 }: { offset?: number; limit?: number }) => ({ items: items.slice(offset, offset + limit), total: items.length, nextOffset: offset + limit < items.length ? offset + limit : null });
 
 export function chatAssistantsExtension(roles: Assistants, workspace: string, project: string, chatId: string, catalog: () => Promise<AssistantCatalog>) {
@@ -44,22 +49,22 @@ export function chatAssistantsExtension(roles: Assistants, workspace: string, pr
       parameters: Type.Object({ id }, { additionalProperties: false }), replay: 'safe', outputLimits,
       execute: async args => { await checkProject(); const role = await roles.get(args.id); if (role.project !== project) throw new AssistantError(404, 'Assistant not found in this project.'); return output(role); },
     }),
-    defineTool({ name: 'assistant_catalog', description: 'Read paged installed Pi models, original task-stage tool metadata or project Skills with exact available versions for assistant configuration. The default model is this project setting; currentModel is this conversation pin. Metadata does not prove credentials, access or permission, and does not connect or enable services. Use a query and nextOffset; never invent identifiers.',
-      parameters: Type.Object({ kind: Type.Union([Type.Literal('models'), Type.Literal('tools'), Type.Literal('skills')]), query: Type.Optional(Type.String({ maxLength: 200 })), ...pagination }, { additionalProperties: false }), replay: 'safe', outputLimits,
+    defineTool({ name: 'assistant_catalog', description: 'Read paged installed Pi models, original task-stage tool metadata, project Skills with exact available versions, or configured browser names and connection status. The default model is this project setting; currentModel is this conversation pin. Metadata does not prove credentials, access or permission, and does not connect or enable services. Use a query and nextOffset; never invent identifiers.',
+      parameters: Type.Object({ kind: Type.Union([Type.Literal('models'), Type.Literal('tools'), Type.Literal('skills'), Type.Literal('browsers')]), query: Type.Optional(Type.String({ maxLength: 200 })), ...pagination }, { additionalProperties: false }), replay: 'safe', outputLimits,
       execute: async args => {
         await checkProject(); const found = await catalog(), query = args.query?.trim().toLowerCase();
-        const items = (args.kind === 'models' ? found.models : args.kind === 'skills' ? found.skills : found.tools)
+        const items = (args.kind === 'models' ? found.models : args.kind === 'skills' ? found.skills : args.kind === 'browsers' ? found.browserProfiles : found.tools)
           .filter(item => !query || JSON.stringify(item).toLowerCase().includes(query));
         return output({ kind: args.kind, currentModel: found.currentModel, defaultModel: found.defaultModel, ...page(items, args) });
       },
     }),
     defineTool({ name: 'assistant_create', description: 'Save a reusable project assistant only when the user requests configuration. This never starts a Goal, task, reminder or new conversation and never switches the current role. Use an explicit action tool ceiling without wildcards; model=null (default) follows the project default at future task creation. Use exact IDs from assistant_catalog for requested models/tools, clarify material ambiguity, and claim saved only after success. A replay result is the original operation; read again for current settings.',
-      parameters: Type.Object({ name: settings.name, instructions: settings.instructions, tools: settings.tools, description: Type.Optional(settings.description), model: Type.Optional(model), memoryScope, skills }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
+      parameters: Type.Object({ name: settings.name, instructions: settings.instructions, tools: settings.tools, description: Type.Optional(settings.description), model: Type.Optional(model), memoryScope, skills, browserProfile }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
       execute: async (args, api) => { const role = await roles.create({ ...args, workspace }, request(api.taskId)); return output({ assistant: summary(role), instructionsLength: role.instructions.length, workspace, started: false }); },
     }),
     defineTool({ name: 'assistant_update', description: 'Edit an existing project assistant configuration only as the user requested. Use exact ID/revision from list/read, provide changed fields only, and read complete original instructions before an amendment. instructions replaces the full string; model=null follows future project defaults. archived=true/false archives/restores without deleting history or cancelling tasks. Existing role pins and budgets stay unchanged. This never starts or switches work. On replay read again for current settings.',
       parameters: Type.Object({ id, revision: Type.Integer({ minimum: 1 }), name: Type.Optional(settings.name), description: Type.Optional(settings.description), instructions: Type.Optional(settings.instructions),
-        tools: Type.Optional(settings.tools), model: Type.Optional(model), memoryScope, skills, archived: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
+        tools: Type.Optional(settings.tools), model: Type.Optional(model), memoryScope, skills, browserProfile, archived: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), replay: 'safe', executionMode: 'sequential',
       execute: async ({ id, ...args }, api) => { const role = await roles.update(id, args, request(api.taskId)); return output({ assistant: summary(role), instructionsLength: role.instructions.length, workspace, started: false }); },
     }),
   ] });

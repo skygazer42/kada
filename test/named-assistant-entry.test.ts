@@ -19,7 +19,8 @@ test('a local assistant settings link edits only its project and reuses the orig
   await f.runtime.close();
   const socket = createServer(); await new Promise<void>(done => socket.listen(0, '127.0.0.1', done));
   const port = (socket.address() as { port: number }).port; await new Promise<void>(done => socket.close(() => done()));
-  const config = { ...f.settings, port }, server = await serve(config, { models: f.models });
+  const config = { ...f.settings, port }, server = await serve(config, { models: f.models,
+    browserProfiles: new Map([['alpha', { forTask() { assert.fail('Configuration must not open a browser.'); }, release() {} }]]) });
   t.after(async () => { await server.close(); await f.close(); });
   const another = join(f.directory, 'another-project');
   await mkdir(another);
@@ -46,13 +47,14 @@ test('a local assistant settings link edits only its project and reuses the orig
   assert.equal((await call('state', 'GET', undefined, token, 'https://example.test')).status, 403);
   assert.equal((await call('roles/' + foreign.id, 'GET', undefined, token)).status, 404);
   assert.equal((await call('roles/' + foreign.id, 'PATCH', { requestId: 'foreign', revision: 1, name: 'Foreign edit' }, token)).status, 404);
-  const body = { ...definition, memoryScope: 'isolated', skills, requestId: 'browser-create-1' };
+  const body = { ...definition, memoryScope: 'isolated', skills, browserProfile: 'alpha', requestId: 'browser-create-1' };
   assert.equal((await call('roles', 'POST', { ...body, workspace: another }, token)).status, 400);
   const created = await call('roles', 'POST', body, token);
   assert.equal(created.status, 201);
   const role = await created.json();
   assert.equal(role.memoryScope, 'isolated');
   assert.deepEqual(role.skills, skills);
+  assert.equal(role.browserProfile, 'alpha');
   assert.equal((await (await call('roles', 'POST', body, token)).json()).id, role.id);
   const edit = 'roles/' + role.id;
   assert.equal((await (await call(edit, 'GET', undefined, token)).json()).instructions, definition.instructions);
@@ -64,13 +66,15 @@ test('a local assistant settings link edits only its project and reuses the orig
   assert.deepEqual(archived.skills, []);
   assert.equal(archived.archived, true);
   assert.equal((await call(edit, 'PATCH', { requestId: 'stale', revision: 1, name: 'Stale title' }, token)).status, 409);
-  const restored = await (await call(edit, 'PATCH', { requestId: 'restore', revision: 2, archived: false, skills: null }, token)).json();
+  const restored = await (await call(edit, 'PATCH', { requestId: 'restore', revision: 2, archived: false, skills: null, browserProfile: null }, token)).json();
   assert.equal(restored.archived, false);
   assert.equal(restored.skills, undefined);
+  assert.equal(restored.browserProfile, undefined);
   const state = await (await call('state', 'GET', undefined, token)).json();
   assert.deepEqual(state.roles.map((entry: { id: string }) => entry.id), [role.id]);
   assert(state.models.some((entry: { modelId: string }) => entry.modelId === f.settings.model?.modelId));
   assert(state.skills.some((entry: { name: string; currentVersion: string }) => entry.name === method.name && entry.currentVersion === method.currentVersion));
+  assert.deepEqual(state.browserProfiles, [{ name: 'alpha', connected: false }]);
   assert.equal((await server.runtime.list()).length, 0);
 });
 
