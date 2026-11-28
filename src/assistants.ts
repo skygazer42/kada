@@ -2,23 +2,26 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { Models } from '@earendil-works/pi-ai';
 import type { ModelRef } from './config.js';
+import type { SkillState } from './skills.js';
 import { memoryProject } from './memory-sources.js';
 import { validateModel } from './models.js';
 import { atomicJson, readJson, SerialQueue } from './util.js';
 
 export type AssistantRef = { id: string; revision: number };
-type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[]; memoryScope?: 'shared' | 'isolated' };
+export type AssistantSkill = { name: string; version: string };
+type Definition = { name: string; description: string; instructions: string; model: ModelRef | null; tools: string[];
+  memoryScope?: 'shared' | 'isolated'; skills?: AssistantSkill[] };
 export type Assistant = AssistantRef & Definition & { project: string; archived: boolean; createdAt: number; updatedAt: number };
-export type AssistantPin = AssistantRef & Definition & { project: string; model: ModelRef };
+export type AssistantPin = AssistantRef & Definition & { project: string; model: ModelRef; skillPins?: SkillState };
 export type AssistantCollaboratorRef = AssistantRef & { workspace?: string };
 export type AssistantCollaboratorPin = AssistantPin & { workspace?: string };
 export type AssistantMutation = { requestId: string; project: string; workspace: string };
 type StoredAssistant = Assistant & { operations?: { requestId: string; fingerprint: string; result: Assistant }[] };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const requiredDefinitionKeys = ['name', 'description', 'instructions', 'model', 'tools'];
-const definitionKeys = [...requiredDefinitionKeys, 'memoryScope'];
+const definitionKeys = [...requiredDefinitionKeys, 'memoryScope', 'skills'];
 const requiredStoredKeys = [...requiredDefinitionKeys, 'id', 'revision', 'project', 'archived', 'createdAt', 'updatedAt'];
-const storedKeys = [...requiredStoredKeys, 'memoryScope'];
+const storedKeys = [...requiredStoredKeys, 'memoryScope', 'skills'];
 export class AssistantError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message); } }
 
 function fields(input: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -66,10 +69,25 @@ function memoryScope(input: unknown): 'shared' | 'isolated' {
   if (input !== 'shared' && input !== 'isolated') throw new AssistantError(400, 'Choose shared or isolated assistant memory.');
   return input;
 }
+function skillSelection(input: unknown): AssistantSkill[] | undefined {
+  if (input === null) return;
+  if (!Array.isArray(input) || input.length > 16) throw new AssistantError(400, 'Choose up to sixteen Skill names and full versions.');
+  const selected = input.map(item => {
+    const { name, version } = fields(item, ['name', 'version']);
+    if (typeof name !== 'string' || name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) ||
+      typeof version !== 'string' || !/^[a-f0-9]{64}$/.test(version)) {
+      throw new AssistantError(400, 'Choose Skill names and full versions from the project catalogue.');
+    }
+    return { name, version };
+  });
+  if (new Set(selected.map(skill => skill.name)).size !== selected.length) throw new AssistantError(400, 'Choose each Skill once.');
+  return selected.sort((a, b) => a.name.localeCompare(b.name));
+}
 function definition(input: Record<string, unknown>): Definition {
   return { name: assistantName(input.name), description: input.description === undefined ? '' : text(input.description, 'description', 1000, true).trim(),
     instructions: text(input.instructions, 'instructions', 16_000), model: modelRef(input.model), tools: toolNames(input.tools),
-    ...(input.memoryScope === undefined ? {} : { memoryScope: memoryScope(input.memoryScope) }) };
+    ...(input.memoryScope === undefined ? {} : { memoryScope: memoryScope(input.memoryScope) }),
+    ...(input.skills === undefined || input.skills === null ? {} : { skills: skillSelection(input.skills) }) };
 }
 const nameKey = (name: string) => name.trim().normalize('NFC').toLowerCase();
 export async function assistantProject(workspace: unknown): Promise<string> {
@@ -79,8 +97,9 @@ export async function assistantProject(workspace: unknown): Promise<string> {
   return project;
 }
 function publicAssistant(item: Assistant): Assistant {
-  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, memoryScope } = item;
-  return { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, ...(memoryScope ? { memoryScope } : {}) };
+  const { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, memoryScope, skills } = item;
+  return { id, revision, project, name, description, instructions, model, tools, archived, createdAt, updatedAt, ...(memoryScope ? { memoryScope } : {}),
+    ...(skills === undefined ? {} : { skills: structuredClone(skills) }) };
 }
 function storedAssistant(input: unknown, allowed: readonly string[] = storedKeys): Assistant {
   const value = fields(input, allowed); definition(value);
@@ -181,7 +200,8 @@ export class Assistants {
       ...(value.instructions === undefined ? {} : { instructions: text(value.instructions, 'instructions', 16_000) }),
       ...(value.model === undefined ? {} : { model: modelRef(value.model) }), ...(value.tools === undefined ? {} : { tools: toolNames(value.tools) }),
       ...(value.archived === undefined ? {} : { archived: value.archived as boolean }),
-      ...(value.memoryScope === undefined ? {} : { memoryScope: memoryScope(value.memoryScope) }) };
+      ...(value.memoryScope === undefined ? {} : { memoryScope: memoryScope(value.memoryScope) }),
+      ...(value.skills === undefined ? {} : { skills: skillSelection(value.skills) }) };
     const fingerprint = createHash('sha256').update(JSON.stringify(['update', id, expected, patch, request?.project, request?.workspace])).digest('hex');
     return this.changes.run(async () => {
       const items = await this.load(), receipt = replay(items, request, fingerprint); if (receipt) return receipt;

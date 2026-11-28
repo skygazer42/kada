@@ -1,5 +1,5 @@
 import { lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSkills, formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
@@ -74,7 +74,10 @@ function withoutCollisions(candidates: Candidate[]): Candidate[] {
   }
   return [...unique.values()];
 }
-const contains = (parent: string, child: string) => child === parent || child.startsWith(parent + sep);
+const contains = (parent: string, child: string) => {
+  const path = relative(parent, child);
+  return path === '' || path !== '..' && !path.startsWith('..' + sep) && !isAbsolute(path);
+};
 const load = (cwd: string, paths: string[]) => loadSkills({ cwd, agentDir: join(cwd, ".pi"), skillPaths: paths, includeDefaults: false });
 
 /** File bounds protect this optional local catalogue; native Pi handles parsing and routing. */
@@ -100,6 +103,15 @@ async function copy(workspace: Workspace, path: string, destination: string, ver
   }
   if ((await tree(workspace, path)).root.sha256 !== version || (await tree(target, ".")).root.sha256 !== version) throw new Error("Skill changed while pinning");
   return target;
+}
+
+export async function isPinnedSkillRead(path: string, pins: readonly SkillPin[] = []) {
+  const pin = pins.find(pin => contains(dirname(pin.filePath), path));
+  if (!pin) return false;
+  const workspace = await Workspace.open(dirname(pin.filePath), { create: false });
+  if ((await tree(workspace, '.')).root.sha256 !== pin.version) throw new Error('The original assigned Skill changed.');
+  await workspace.inspect(path);
+  return true;
 }
 
 function nativeSkill(workspace: Workspace, directory: string) {
@@ -346,12 +358,12 @@ export async function pinSkills(workspace: Workspace, directory: string, store?:
   if (selection === undefined && candidates.filter(({ entry }) => entry.enabled).length > 16) notices.push("Skill catalogue limited to 16; consolidate unused Skills");
   return { pins, loaded: [], ...(notices.length ? { notice: notices.join("; ").slice(0, 1000) } : {}) };
 }
-export function skillInstructions(state?: SkillState, capture = false): string {
+export function skillInstructions(state?: SkillState, capture = false, scripts = true): string {
   const skills: Skill[] = state?.pins.map(pin => ({ ...pin, baseDir: dirname(pin.filePath), disableModelInvocation: false,
     sourceInfo: { path: pin.filePath, baseDir: dirname(pin.filePath), source: "path", scope: "temporary", origin: "top-level" } })) ?? [];
   return (capture ? "\nLocal trial capture is optional: only for a useful new reusable script/workflow in recurring work, write a short standard SKILL.md (name/description frontmatter, applicability/limits, relative script paths) with its reusable files under an authorized output directory BEFORE the final check. Pass that directory as task_submit.skill. Skip duplicates and one-off work; no reflection turn or extra task. A saved trial is not a quality or savings claim.\n" : "") +
     (state?.pins.some(p => p.managed) ? "\nGenerated Skills are local trials. Recheck applicability/current inputs and run current task checks; they never grant permissions or override requirements.\n" : "") +
-    (state?.pins.length ? "\nFor scripts from pinned Skills, first read that pin's SKILL.md. Then call run_skill_script with the Skill name, script path relative to the Skill, and args. This records the exact version and result.\n" : "") +
+    (scripts && state?.pins.length ? "\nFor scripts from pinned Skills, first read that pin's SKILL.md. Then call run_skill_script with the Skill name, script path relative to the Skill, and args. This records the exact version and result.\n" : "") +
     formatSkillsForPrompt(skills, "read");
 }
 

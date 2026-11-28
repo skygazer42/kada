@@ -43,6 +43,11 @@ export const projectAssistantsPage = String.raw`<!doctype html>
         <label for="memoryScope">记忆范围</label>
         <select id="memoryScope"><option value="shared">共享项目记忆</option><option value="isolated">此助手的私有记忆</option></select>
         <label for="tools">允许的工具（每行一个）</label><textarea id="tools" spellcheck="false"></textarea>
+        <label for="skill-mode">Skills</label>
+        <select id="skill-mode"><option value="project">使用项目默认 Skills</option><option value="assigned">选择固定版本</option></select>
+        <div id="skill-selection" hidden>
+          <label for="skills">固定的 Skills（可多选，留空表示不选）</label><select id="skills" multiple size="5"></select>
+        </div>
         <label id="archive" hidden><input id="archived" type="checkbox"> 归档此助手</label>
         <div class="actions"><button id="save" class="primary" type="submit">保存助手</button></div>
       </fieldset>
@@ -59,7 +64,7 @@ export const projectAssistantsPage = String.raw`<!doctype html>
 const field = id => document.getElementById(id);
 const roles = field('roles'), models = field('model'), status = field('status');
 const key = 'kada-project-assistants-session';
-let token, current, catalog = [], pending, workspaceArgument;
+let token, current, catalog = [], skillCatalog = [], pending, workspaceArgument;
 function option(select, value, label) {
   const item = document.createElement('option');
   item.value = value;
@@ -94,6 +99,20 @@ function render(role) {
   for (const id of ['name','description','instructions']) field(id).value = role?.[id] ?? '';
   field('tools').value = role?.tools.join('\n') ?? '';
   field('memoryScope').value = role?.memoryScope ?? 'shared';
+  field('skill-mode').value = role?.skills === undefined ? 'project' : 'assigned';
+  field('skill-selection').hidden = field('skill-mode').value !== 'assigned';
+  const selectedSkills = new Set((role?.skills ?? []).map(skill => skill.name + '@' + skill.version));
+  const availableSkills = skillCatalog.filter(skill => skill.enabled && !skill.issue)
+    .flatMap(skill => skill.versions.map(version => ({ name: skill.name, version })));
+  for (const skill of role?.skills ?? []) {
+    if (!availableSkills.some(item => item.name === skill.name && item.version === skill.version)) availableSkills.push({ ...skill, unavailable: true });
+  }
+  field('skills').replaceChildren();
+  for (const skill of availableSkills) {
+    const value = skill.name + '@' + skill.version;
+    option(field('skills'), value, skill.name + ' · ' + skill.version.slice(0, 12) + (skill.unavailable ? '（暂不可用）' : ''));
+    field('skills').lastElementChild.selected = selectedSkills.has(value);
+  }
   field('archive').hidden = !role;
   field('archived').checked = role?.archived ?? false;
   field('launch').hidden = !role || role.archived;
@@ -113,6 +132,7 @@ async function refresh(preferred, saved) {
   workspaceArgument = "'" + state.project.replaceAll("'", state.windows ? "''" : "'\\''") + "'";
   field('command-label').textContent = state.windows ? '在 Kada 目录的 PowerShell 中运行' : '在 Kada 目录运行以开始新会话';
   catalog = state.models;
+  skillCatalog = state.skills;
   roles.replaceChildren();
   option(roles, '', '新建助手');
   for (const row of state.roles) option(roles, row.id, row.name + (row.archived ? '（已归档）' : ''));
@@ -129,6 +149,9 @@ field('refresh').addEventListener('click', () => void perform(async () => {
   await refresh(roles.value);
   report('已读取项目助手。');
 }));
+field('skill-mode').addEventListener('change', () => {
+  field('skill-selection').hidden = field('skill-mode').value !== 'assigned';
+});
 field('editor').addEventListener('submit', event => {
   event.preventDefault();
   void perform(async () => {
@@ -136,11 +159,16 @@ field('editor').addEventListener('submit', event => {
     const method = current ? 'PATCH' : 'POST';
     const model = models.value ? JSON.parse(models.value) : null;
     const memoryScope = field('memoryScope').value;
+    const skills = field('skill-mode').value === 'project' ? null : Array.from(field('skills').selectedOptions).map(option => {
+      const [name, version] = option.value.split('@');
+      return { name, version };
+    });
     const body = {
       name:field('name').value, description:field('description').value, instructions:field('instructions').value,
       tools:field('tools').value.split(/\r?\n/).map(name => name.trim()).filter(Boolean),
       ...(!current || JSON.stringify(model) !== JSON.stringify(current.model) ? { model } : {}),
       ...(memoryScope !== (current?.memoryScope ?? 'shared') ? { memoryScope } : {}),
+      ...(JSON.stringify(skills) !== JSON.stringify(current?.skills ?? null) ? { skills } : {}),
       ...(current ? { revision:current.revision, archived:field('archived').checked } : {}),
     };
     const signature = JSON.stringify([path, body]);

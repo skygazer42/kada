@@ -119,6 +119,8 @@ npm run harness -- memory review off --workspace E:/project
 
 开启本机记忆时，可以将角色的「记忆范围」设为「此助手的私有记忆」。同一角色的新会话可检索自己的私有事实和原对话。记录与复核开关沿用项目设置。已接回的私有会话用 `/memory list` 查看，终端也可在 `memory list`、`memory edit`、`memory forget`、`memory candidates`、`memory accept` 或 `memory reject` 加 `--assistant ID@修订 --workspace 路径` 管理私有记录。 [实现与验收](superpowers/plans/2026-11-26-assistant-private-memory.md)
 
+助手设置页也可选择固定版本的 Skills。保持「使用项目默认 Skills」沿用原行为；选择固定版本后留空，表示此助手不选 Skill。JSON 配置使用 `skills: [{ "name": "方法名", "version": "完整 SHA-256" }]`，修改时 `skills: null` 恢复项目默认。普通聊天可以通过 `assistant_catalog` 的 `skills` 目录取得精确版本再分配。新任务、派活助手和本机群组成员保留各自的包副本，修改来源、配置或撤回发布均不替换已开始的工作；新工作会拒绝不可用的版本。Skills 不增加工具权限，派活与群组仅按原权限读取方法。 [分配契约与验收](superpowers/plans/2026-11-27-assistant-skills.md)
+
 先在项目中保存一份角色定义，例如 `reader.json`：
 
 ```json

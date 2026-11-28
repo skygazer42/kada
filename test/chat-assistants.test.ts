@@ -10,6 +10,43 @@ import { hasTool, scriptedFixture, until } from './helpers.js';
 const call = (name: string, args: Record<string, unknown>) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: 'toolUse' });
 const value = (result: ToolResultMessage) => JSON.parse(result.content.filter(part => part.type === 'text').map(part => part.text).join(''));
 
+test('ordinary chat assigns exact catalogue Skill versions and can clear or restore the defaults without starting work', async t => {
+  let selected: { name: string; version: string }[] = [];
+  const f = await scriptedFixture(context => {
+    const results = context.messages.filter((message): message is ToolResultMessage => message.role === 'toolResult');
+    for (const result of results) assert.equal(result.isError, false, JSON.stringify(result));
+    const catalog = results.find(result => result.toolName === 'assistant_catalog');
+    if (!catalog) return call('assistant_catalog', { kind: 'skills', query: 'chat-assigned-proof' });
+    const [method] = value(catalog).items;
+    assert.equal(method.name, 'chat-assigned-proof');
+    assert.match(method.currentVersion, /^[a-f0-9]{64}$/);
+    selected = [{ name: method.name, version: method.currentVersion }];
+    const created = results.find(result => result.toolName === 'assistant_create');
+    if (!created) return call('assistant_create', { name: 'Method reader', instructions: 'Read assigned originals.', tools: ['read'], skills: selected });
+    const saved = value(created).assistant;
+    assert.deepEqual(saved.skills, selected);
+    const edits = results.filter(result => result.toolName === 'assistant_update');
+    if (!edits.length) return call('assistant_update', { id: saved.id, revision: 1, skills: [] });
+    assert.deepEqual(value(edits[0]!).assistant.skills, []);
+    if (edits.length === 1) return call('assistant_update', { id: saved.id, revision: 2, skills: null });
+    assert.equal(value(edits[1]!).assistant.skills, undefined);
+    return fauxAssistantMessage('Assignment saved and defaults restored.');
+  });
+  t.after(() => f.close());
+  const source = join(f.workspace, '.kada', 'skills', 'chat-assigned-proof');
+  await mkdir(source, { recursive: true });
+  await writeFile(join(source, 'SKILL.md'), '---\nname: chat-assigned-proof\ndescription: Apply the original method.\n---\n\nRead the original.\n');
+  const chat = await f.runtime.create('Configure and restore this reader, without starting its work.', f.workspace, [], { chat: true });
+  const done = await until(() => f.runtime.status(chat.id), row => ['answered', 'failed'].includes(row.status));
+  assert.equal(done.status, 'answered');
+  assert.equal(done.goal, undefined);
+  assert.equal(done.assistant, undefined);
+  const [role] = await f.runtime.assistants.list(f.workspace);
+  assert.equal(role.revision, 3);
+  assert.equal(role.skills, undefined);
+  assert.equal((await f.runtime.list()).length, 1);
+});
+
 test('ordinary chat manages one assistant across restart without a Goal or starting the configured role', async t => {
   let phase = 'create', id = '';
   const f = await scriptedFixture(context => {

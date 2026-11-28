@@ -11,6 +11,8 @@ import { taskUsage } from './budget.js';
 import { conversationAnswer } from './conversation.js';
 import { nativeFileTools, scopedNativeFileArguments } from './remote-policy.js';
 import { Workspace } from './workspace.js';
+import { skillInstructions, type SkillState } from './skills.js';
+import { plain } from './goal.js';
 
 export class RoomError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message); }
@@ -18,7 +20,7 @@ export class RoomError extends Error {
 
 type Outcome = 'answered' | 'unanswered' | 'interrupted';
 type Speaker = { target: ConversationId; memberId: string; revision: number; name: string;
-  workspace?: string; fileTools?: string[]; canForward?: true; canReadFile?: true;
+  workspace?: string; fileTools?: string[]; skillPins?: SkillState; canForward?: true; canReadFile?: true;
   canAttachText?: true; canAttachFile?: true; canSaveFile?: true };
 type Attachment = { id: number; name: string; bytes: number };
 type Handoff = { receiver: Speaker; message: string };
@@ -36,9 +38,7 @@ function memberKey(id: string, revision: number, workspace?: string) {
   const version = id + '@' + revision;
   return workspace === undefined ? version : version + ':' + createHash('sha256').update(workspace).digest('hex');
 }
-const copySpeaker = (speaker: Speaker): Speaker => ({
-  ...speaker, ...(speaker.fileTools ? { fileTools: [...speaker.fileTools] } : {}),
-});
+const copySpeaker = (speaker: Speaker): Speaker => plain(speaker);
 const RoomState = defineDoc<{ seats: Record<string, ConversationId>; turns: Record<string, Turn>; active?: string; queued?: string[] }>({
   scope: 'session', kind: 'local.assistant_room', version: 1,
   initial: () => ({ seats: {}, turns: {} }), checkpointWhen: () => true,
@@ -324,8 +324,8 @@ export const assistantRooms = defineExtension({ name: 'local_assistant_rooms', t
     async execute(args, api, context) {
       const speaker = await api.commit(async tx => copySpeaker((await currentStage(tx, api.conversationId, api.now())).turn.current), context);
       if (!speaker.fileTools?.includes(current.name)) throw new Error('This action is outside the original room stage workspace scope.');
-      const workspace = await openRoomWorkspace(speaker.workspace);
-      const scoped = await scopedNativeFileArguments(workspace, current.name, args as { path: string }, workspace.root, context);
+      const workspace = await openRoomWorkspace(speaker.workspace ?? (await api.agent(context)).cwd);
+      const scoped = await scopedNativeFileArguments(workspace, current.name, args as { path: string }, workspace.root, context, speaker.skillPins?.pins);
       return current.execute(scoped, api, context);
     },
   }))),
@@ -454,20 +454,22 @@ export async function sendRoomMessage(root: Conversation, room: RoomExecution & 
     const now = Date.now();
     const seatFor = async (pin: AssistantCollaboratorPin): Promise<Speaker> => {
       const scopedFiles = allowWorkspaceTools && pin.workspace !== undefined;
+      const readsSkill = allowWorkspaceTools && pin.tools.includes('read') && Boolean(pin.skillPins?.pins.length);
       const version = memberKey(pin.id, pin.revision, pin.workspace);
-      const readsPrivateFiles = pin.workspace !== undefined || pin.tools.includes(RoomReadFile.name);
+      const readsPrivateFiles = pin.workspace !== undefined || pin.tools.includes(RoomReadFile.name) || Boolean(pin.skillPins?.pins.length);
       const seat = !allowWorkspaceTools && readsPrivateFiles ? version + ':paired' : version;
       let target = state.seats[seat];
       if (target === undefined) {
         const anchor = await tx.createTask(Anchor, null, { ownership: { kind: 'conversation' }, background: true });
         target = (await tx.createConversation({ ownership: { kind: 'task', taskId: anchor } })).id;
         await configure(tx, target, { model: pin.model, cwd: scopedFiles ? pin.workspace : workspace.root, extensions: [assistantRooms], tools: [], instructions:
-          `${pin.instructions}\n\nYou are ${pin.name} in a local assistant room. Answer the owner message as yourself. The recent room messages are context.` });
+          `${pin.instructions}\n\nYou are ${pin.name} in a local assistant room. Answer the owner message as yourself. The recent room messages are context.` + (readsSkill ? skillInstructions(pin.skillPins, false, false) : '') });
         state.seats[seat] = target;
       }
       return { target, memberId: pin.id, revision: pin.revision, name: pin.name,
         ...(pin.workspace ? { workspace: pin.workspace } : {}),
-        ...(scopedFiles ? { fileTools: pin.tools.filter(name => nativeFileTools.has(name)) } : {}),
+        ...(scopedFiles ? { fileTools: pin.tools.filter(name => nativeFileTools.has(name)) } : readsSkill ? { fileTools: ['read'] } : {}),
+        ...(readsSkill ? { skillPins: pin.skillPins } : {}),
         ...(scopedFiles && pin.tools.includes(RoomAttachFile.name) ? { canAttachFile: true as const } : {}),
         ...(scopedFiles && pin.tools.includes(RoomSaveFile.name) ? { canSaveFile: true as const } : {}),
         ...(pin.tools.includes(RoomHandoff.name) ? { canForward: true as const } : {}),

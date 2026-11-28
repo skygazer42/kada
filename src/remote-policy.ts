@@ -9,19 +9,22 @@ import { createEditTool, createReadTool, createWriteTool } from "@earendil-works
 import { acceptanceChecks } from "./checks.js";
 import { localEnvironment } from "./execution.js";
 import type { Workspace } from "./workspace.js";
+import { isPinnedSkillRead, type SkillPin } from "./skills.js";
 
 const allowedTools = new Set([
   "read", "write", "edit", "read_file", "write_file", "list_files", "copy_file", "delegate",
   "delegate_background", "delegate_send", "delegation_ask",
   "task_prepare", "task_status", "task_plan", "task_checkpoint", "task_submit", "task_blocked", "review_result", "ask_user",
 ]);
-const nativePath = (path: string) => path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+export const nativePath = (path: string) => path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
 export const nativeFileTools = new Set(["read", "write", "edit"]);
 
-export async function scopedNativeFileArguments(workspace: Workspace, name: string, args: Record<string, unknown>, cwd: string, context: Context) {
+export async function scopedNativeFileArguments(workspace: Workspace, name: string, args: Record<string, unknown>, cwd: string, context: Context,
+  skillPins?: readonly SkillPin[]) {
   // Match Pi's path aliases and environment expansion before checking the boundary.
   const input = nativePath(args.path as string);
   const absolute = getOrThrow(await localEnvironment(cwd).absolutePath(input, context));
+  if (name === "read" && await isPinnedSkillRead(nativePath(absolute), skillPins)) return { ...args, path: nativePath(absolute) };
   const path = await workspace.path(nativePath(absolute), cwd);
   if (name === "read") {
     for (const variant of [path.replace(/ (AM|PM)\./gi, "\u202F$1."), path.normalize("NFD"),

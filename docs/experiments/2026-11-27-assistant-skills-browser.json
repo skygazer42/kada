@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-27",
+  "environment": "Windows, installed agent-browser, Chromium, synthetic local Kada project",
+  "surface": "project-assistants",
+  "cases": [
+    { "name": "save two distinct Skills with full versions and reload", "result": "passed", "revision": 2 },
+    { "name": "reject two versions of one Skill and retain the unsaved selection", "result": "passed", "error": "Choose each Skill once." },
+    { "name": "save explicitly empty selection", "result": "passed", "revision": 3, "storedSkills": [] },
+    { "name": "restore project defaults and reload", "result": "passed", "revision": 4, "storedSkillsFieldPresent": false, "selectionHidden": true },
+    { "name": "retain an assigned version after it is disabled in the project catalogue", "result": "passed", "label": "暂不可用" },
+    { "name": "edit the description and reload without dropping an unavailable assignment", "result": "passed", "revision": 6 }
+  ],
+  "limits": [
+    "Synthetic local configuration only; no online multi-user Skill catalogue was tested.",
+    "No real-model completion-rate or cost comparison was performed for assistant assignments."
+  ]
+}

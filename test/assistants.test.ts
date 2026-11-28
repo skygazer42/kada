@@ -17,6 +17,28 @@ async function fixture(t: test.TestContext) {
 }
 const definition = { name: '研究员', instructions: 'Read the original sources and cite evidence.', tools: ['read', 'history_search'] };
 
+test('assistant Skill assignments retain exact versions, distinct revisions and original receipts', async t => {
+  const f = await fixture(t);
+  const skills = [{ name: 'published-method', version: 'a'.repeat(64) }];
+  const input = { ...definition, workspace: f.project, skills };
+  const request = { requestId: 'skill-role-create', project: f.project, workspace: f.sub };
+  const first = await f.roles.create(input, request);
+  assert.deepEqual(first.skills, skills);
+  assert.deepEqual((await f.open().select(f.sub, { id: first.id, revision: first.revision })).skills, skills);
+  const changed = await f.roles.update(first.id, { revision: 1, skills: [] });
+  assert.equal(changed.revision, 2);
+  assert.deepEqual(changed.skills, []);
+  assert.deepEqual((await f.roles.create(input, request)).skills, skills);
+  const inherited = await f.roles.update(first.id, { revision: 2, skills: null });
+  assert.equal(inherited.revision, 3);
+  assert.equal(inherited.skills, undefined);
+  for (const invalid of [[{ name: 'sample', version: 'latest' }], [{ name: '../outside', version: 'b'.repeat(64) }],
+    [skills[0], skills[0]], 'sample', [{ ...skills[0], path: 'outside' }]]) {
+    await assert.rejects(f.roles.update(first.id, { revision: 3, skills: invalid }), { status: 400 });
+  }
+  assert.equal((await f.open().get(first.id)).revision, 3);
+});
+
 test('assistant definitions persist by project and revision, select from subdirectories and archive without deleting history', async t => {
   const f = await fixture(t);
   assert.deepEqual(await f.roles.list(f.project), []);

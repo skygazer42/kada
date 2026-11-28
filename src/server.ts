@@ -658,7 +658,8 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       `http://127.0.0.1:${config.port}`, body);
     snapshotsBrowser = createWorkspaceSnapshotAccess(runtime, `http://127.0.0.1:${config.port}`, body);
     mcpConnections = createMcpConnectionsAccess(runtime.mcp, `http://127.0.0.1:${config.port}`, body);
-    projectAssistants = createProjectAssistantsAccess(runtime.assistants, models, `http://127.0.0.1:${config.port}`, body);
+    projectAssistants = createProjectAssistantsAccess(runtime.assistants, models, `http://127.0.0.1:${config.port}`, body,
+      workspace => runtime!.skillCatalog(workspace));
     remote = createRemoteHandler(runtime,{directory:join(config.dataDir,'remote'),origin:config.remoteOrigin ?? `http://127.0.0.1:${config.port}`,
       computers:config.remoteComputers,devices:()=>devices.credentials(),sharedDevices:devices,push:config.remotePush && Boolean(config.remoteOrigin)});
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, "127.0.0.1", resolve); });

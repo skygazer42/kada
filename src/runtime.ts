@@ -618,21 +618,24 @@ export class LocalRuntime {
     });
     await this.routines.recover();
   }
-  private async pinAssistant(workspace: string, ref: AssistantRef, fallback: ModelRef | undefined): Promise<AssistantPin> {
-    const { id, revision, project, name, description, instructions, tools, model, memoryScope } = await this.assistants.select(workspace, ref);
-    return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback), ...(memoryScope ? { memoryScope } : {}) };
+  private async pinAssistant(workspace: string, ref: AssistantRef, fallback: ModelRef | undefined, directory: string): Promise<AssistantPin> {
+    const { id, revision, project, name, description, instructions, tools, model, memoryScope, skills } = await this.assistants.select(workspace, ref);
+    const skillPins = skills === undefined ? undefined : await pinSkills(await Workspace.open(workspace, { create: false }),
+      join(directory, 'assistant-skills', id), await SkillStore.existing(this.config.dataDir), skills, await this.discoveredSkills(workspace));
+    return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback),
+      ...(memoryScope ? { memoryScope } : {}), ...(skills === undefined ? {} : { skills, skillPins }) };
   }
 
   private async pinParticipant(workspace: string, { workspace: target, ...ref }: AssistantCollaboratorRef,
-    fallback: ModelRef | undefined): Promise<AssistantCollaboratorPin> {
-    if (!target) return this.pinAssistant(workspace, ref, fallback);
+    fallback: ModelRef | undefined, directory: string): Promise<AssistantCollaboratorPin> {
+    if (!target) return this.pinAssistant(workspace, ref, fallback, directory);
     const destination = await Workspace.open(target, { create: false }).catch(error => {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') throw new AssistantError(400, 'Choose an existing collaborator workspace.');
       throw error;
     });
     const model = await this.providers.selected(this.config.model, destination.root);
-    return { ...await this.pinAssistant(destination.root, ref, model), workspace: destination.root };
+    return { ...await this.pinAssistant(destination.root, ref, model, directory), workspace: destination.root };
   }
 
   async create(objective: string, workspace?: string, acceptance: unknown = [], options: {
@@ -701,7 +704,7 @@ export class LocalRuntime {
       const role = assistant ? await this.assistants.select(requestedWorkspace, assistant) : inherited?.assistant;
       const projectModel = (!selectedModel && !role?.model) || collaboratorRefs
         ? await this.providers.selected(this.config.model, projectWorkspace) : undefined;
-      const pin = (ref: AssistantCollaboratorRef) => this.pinParticipant(requestedWorkspace, ref, projectModel);
+      const pin = (ref: AssistantCollaboratorRef) => this.pinParticipant(requestedWorkspace, ref, projectModel, this.directory(id));
       const room = options.room ? await Promise.all(options.room.map(pin)) : undefined;
       const model = selectedModel ? await selectThreadModel(this.options.models, selectedModel)
         : room?.[0]?.model ?? validateModel(this.options.models, inherited?.model ?? role?.model ?? projectModel);
@@ -720,7 +723,7 @@ export class LocalRuntime {
       const gmail = credentialProject ? await this.gmail.assistantMailbox(credentialProject) : undefined;
       const calendar = credentialProject ? await this.calendars.assistantCalendar(credentialProject) : undefined;
       if (options.chat && localChat && !workItemProject) throw new Error('The chat work item project is unavailable.');
-      const selection=options.remote ? [] : options.skills;
+      const selection=options.remote ? [] : options.skills ?? role?.skills;
       const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       let mcpPins = localChat ? await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root) : [];
       const fileSource = options.routineGmail ?? gmail;
@@ -762,7 +765,8 @@ export class LocalRuntime {
         ...(room ? { room } : {}),
         ...(this.config.workspaceSnapshots && localChat ? { snapshotBeforeTurn: true as const } : {}),
         ...(role ? { assistant: { id: role.id, revision: role.revision, project: role.project, name: role.name, description: role.description,
-          instructions: role.instructions, tools: [...role.tools], model: { ...model }, ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}) } } : {}),
+          instructions: role.instructions, tools: [...role.tools], model: { ...model }, ...(role.memoryScope ? { memoryScope: role.memoryScope } : {}),
+          ...(role.skills === undefined ? {} : { skills: structuredClone(role.skills) }), ...(selectedSkills ? { skillPins: selectedSkills } : {}) } } : {}),
         mcpPins,
         ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
         ...(this.config.deferOptionalTools && localChat && !role ? { optionalToolDiscovery:true as const } : {}),
@@ -840,7 +844,7 @@ export class LocalRuntime {
       const fallback = refs ? await this.providers.selected(this.config.model, meta.workspace) : undefined;
       const room = refs ? await Promise.all(refs.map(ref =>
         meta.room.find(pin => pin.id === ref.id && pin.revision === ref.revision && pin.workspace === ref.workspace) ??
-        this.pinParticipant(meta.workspace, ref, fallback))) : meta.room;
+        this.pinParticipant(meta.workspace, ref, fallback, this.directory(id)))) : meta.room;
       const objective = name ?? meta.objective;
       if (objective === meta.objective && room.length === meta.room.length && room.every((pin, index) => pin === meta.room[index])) return roomSummary(meta);
       const active = await this.open(meta, false);
@@ -1393,7 +1397,8 @@ export class LocalRuntime {
           const tools = new Map([...current.executionExtensions, ...current.preparationExtensions, ...current.chatExtensions].flatMap(extension => extension.tools ?? [])
             .map(tool => [tool.name, { name: tool.name, description: (tool.description ?? '').slice(0, 300) }]));
           return { currentModel: meta.model, defaultModel: await this.providers.selected(this.config.model, meta.chatAssistants!.project) ?? null,
-            models: this.options.models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), tools: [...tools.values()] };
+            models: this.options.models.getModels().map(model => ({ provider: model.provider, modelId: model.id, name: model.name })), tools: [...tools.values()],
+            skills: await this.skillCatalog(meta.workspace) };
         })] : []),
         ...(!remote && meta.chatSkills ? [chatSkillsExtension(meta.workspace, meta.chatSkills.project, async () =>
           (this.skillStore ??= SkillStore.open(this.config.dataDir)))] : []),
@@ -1478,6 +1483,7 @@ export class LocalRuntime {
         ...(!remote && meta.schemaVersion === 3 && this.config.web !== false ? [webExtension(workspace)] : []), ...extra];
       if (team) {
         const peers = assistantPeersExtension({ roles: this.assistants, workspace, models: this.options.models, defaultModel: meta.model, maxPeers: meta.maxSubagents,
+          pinAssistant: ref => this.pinAssistant(meta.workspace, ref, meta.model, this.directory(meta.id)),
           collaborators: team, extensions: () => extensions.filter(extension => extension.name !== 'local_assistant_peers'),
           harness: () => this.active.get(meta.id)!.harness,
           withControl: action => this.peerControl(this.active.get(meta.id)!)(action) });
@@ -1508,7 +1514,7 @@ export class LocalRuntime {
         const initialExtensions = meta.room ? [] : meta.entrypoint === 'chat' ? chatExtensions : meta.preparation ? preparationExtensions : extensions;
         const root = await harness.root(ctx, { agent: { model: meta.model, cwd: meta.workspace, extensions: initialExtensions,
           ...(meta.room ? { tools: [] } : meta.assistant ? { tools: assistantTools(initialExtensions.flatMap(extension => extension.tools ?? []), meta.assistant) } : {}),
-          instructions: meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true, !remote && !!meta.chatWorkItems) : this.instructions(meta, !!meta.preparation) } });
+          instructions: (meta.entrypoint === "chat" ? conversationInstructions(meta.workspace, !remote ? meta.chatReminders ?? false : false, !remote && meta.historyRecall === true, !remote && !!meta.chatWorkItems) : this.instructions(meta, !!meta.preparation)) + (meta.assistant?.tools.includes('read') && (meta.entrypoint === 'chat' || meta.preparation) ? skillInstructions(meta.skillPins, false, false) : '') } });
         active = { harness, storage, root, meta, workspace, enabled: false, reviewExtensions: [readonly, review],
           executionExtensions: extensions, childAdmission, preparationExtensions, chatExtensions, compactionCounts: new Map(), methods, skills, localContext };
         this.active.set(meta.id, active);
@@ -1673,7 +1679,7 @@ export class LocalRuntime {
       await active.root.configure({ extensions: active.chatExtensions,
         ...(active.meta.assistant ? { tools: assistantTools(active.chatExtensions.flatMap(extension => extension.tools ?? []), active.meta.assistant) } : {}),
         ...(active.meta.optionalToolDiscovery ? {modelTools:{add:stagedOptionalTools(active.chatExtensions)}} : {}),
-        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true, !active.meta.remotePolicy && !!active.meta.chatWorkItems) + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
+        instructions: conversationInstructions(active.meta.workspace, !active.meta.remotePolicy ? active.meta.chatReminders ?? false : false, !active.meta.remotePolicy && active.meta.historyRecall === true, !active.meta.remotePolicy && !!active.meta.chatWorkItems) + (active.meta.assistant?.tools.includes('read') ? skillInstructions(active.meta.skillPins, false, false) : '') + (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
       return;
     }
     const preparing = !!active.meta.preparation && !state?.confirmation;
@@ -1704,8 +1710,8 @@ export class LocalRuntime {
     await active.root.configure({ extensions: stageExtensions,
       ...(roleTools ? { tools: roleTools } : ask ? { tools: { remove: [ask] } } : {}),
       modelTools,
-      instructions: this.instructions(active.meta, preparing) + (!active.meta.remotePolicy && active.meta.historyRecall ? '\n' + historyInstructions : '') + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
-        (!preparing && active.meta.resourcePolicy === "pi-skills" ? skillInstructions(state?.skills, !!active.skills) : "") +
+      instructions: this.instructions(active.meta, preparing) + (preparing && active.meta.assistant?.tools.includes('read') ? skillInstructions(active.meta.skillPins, false, false) : '') + (!active.meta.remotePolicy && active.meta.historyRecall ? '\n' + historyInstructions : '') + (!preparing && active.methods ? learningInstructions(state?.learning) : "") +
+        (!preparing && active.meta.resourcePolicy === "pi-skills" && (!active.meta.assistant || active.meta.assistant.tools.includes('read')) ? skillInstructions(state?.skills, !!active.skills, !active.meta.assistant || active.meta.assistant.tools.includes('run_skill_script')) : "") +
         (active.localContext ? localContextInstructions(active.localContext,{skills:active.meta.skillPolicy!=='catalogue'}) : "") }, ctx);
   }
   private async taskSkills(active:Active):Promise<SkillState> {
