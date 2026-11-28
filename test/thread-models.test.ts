@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
 import { LocalRuntime } from '../src/runtime.js';
@@ -35,14 +37,21 @@ test('an independent second opinion uses the selected model, source role and ori
     return call('task_prepare', brief);
   }));
   f.models.setProvider(other.provider);
+  const skill = join(f.workspace, '.kada', 'skills', 'thread-proof');
+  const method = (text: string) => '---\nname: thread-proof\ndescription: Read the original second-opinion method.\n---\n\n' + text + '\n';
+  await mkdir(skill, { recursive: true });
+  await writeFile(join(skill, 'SKILL.md'), method('ORIGINAL_THREAD_METHOD_81'));
   const role = await runtime.assistants.create({ workspace: f.workspace, name: 'Project reader', instructions: 'PINNED_ORIGINAL_ROLE', tools: ['read'] });
   const source = await runtime.create('Discuss the project.', f.workspace, [], { chat: true, assistant: { id: role.id, revision: role.revision } });
   await until(() => runtime.status(source.id), state => state.status === 'answered');
+  await writeFile(join(skill, 'SKILL.md'), method('CHANGED_THREAD_METHOD_47'));
+  await runtime.assistants.update(role.id, { revision: 1, instructions: 'Changed project role.', archived: true });
   const request = { title: 'Second opinion', message: taskMessage, requestId: 'two-models', reportBack: true, modelSelection: alternate };
   const opened = await runtime.startThread(source.id, request);
   const pending = await until(() => runtime.status(opened.id), state => state.status === 'awaiting_confirmation');
   assert.deepEqual(pending.model, alternate);
   assert.deepEqual(pending.assistant, { ...source.assistant, model: alternate });
+  assert.match(await readFile(pending.skillPins!.pins.find(pin => pin.name === 'thread-proof')!.filePath, 'utf8'), /ORIGINAL_THREAD_METHOD_81/);
   assert.deepEqual(await runtime.providers.selected(f.settings.model, f.workspace), f.settings.model);
   assert.equal(prepared, 1);
   assert.equal(executed, 0);

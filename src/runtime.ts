@@ -723,8 +723,9 @@ export class LocalRuntime {
       const gmail = credentialProject ? await this.gmail.assistantMailbox(credentialProject) : undefined;
       const calendar = credentialProject ? await this.calendars.assistantCalendar(credentialProject) : undefined;
       if (options.chat && localChat && !workItemProject) throw new Error('The chat work item project is unavailable.');
-      const selection=options.remote ? [] : options.skills ?? role?.skills;
-      const selectedSkills=selection === undefined && !role ? undefined : selection?.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
+      const inheritedSkills = !assistant && options.skills === undefined ? inherited?.assistant?.skillPins : undefined;
+      const selection=options.remote ? [] : options.skills ?? inheritedSkills?.pins.map(({name,version}) => ({name,version})) ?? role?.skills;
+      const selectedSkills=inheritedSkills ? structuredClone(inheritedSkills) : selection === undefined && !role ? undefined : selection?.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       let mcpPins = localChat ? await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root) : [];
       const fileSource = options.routineGmail ?? gmail;
       const attachmentPin = fileSource && mcpPins.find(pin => pin.id === fileSource.id && pin.tools.includes(gmailAttachmentTool) &&
