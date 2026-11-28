@@ -32,6 +32,7 @@ import { McpProposalError, McpTools, type McpConnectionProposalInput, type McpPi
 import { gmailAttachmentTool, gmailMutations, ProjectGmail, projectGmailExtension, projectGmailFiles, projectGmailWrites, type GmailMutation, type RoutineGmailMatch } from './project-gmail.js';
 import { calendarFreeBusyTool, calendarMutations, ProjectCalendars, projectCalendarExtension, projectCalendarWrites, type CalendarMutation } from './project-calendars.js';
 import { LocalRoutines, type LocalRoutineOptions } from "./routines.js";
+import type { RoutineHttpNetwork } from './routine-http.js';
 import { WorkItems, type WorkItemLink } from "./work-items.js";
 import { NotificationStore, taskNotifications } from "./notifications.js";
 import { artifactList } from "./artifacts.js";
@@ -247,7 +248,7 @@ async function catalogStorageVersion(path: string) {
 type ComputerRuntime = Pick<ComputerBridge, 'forTask' | 'release'> &
   Partial<Pick<ComputerBridge, 'status' | 'takeover' | 'returnControl' | 'browserKey' | 'browserSession'>>;
 export interface RuntimeOptions { models: Models; extensions?: Extension[]; computer?: ComputerRuntime; browserProfiles?: ReadonlyMap<string, ComputerRuntime>;
-  discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
+  discovery?: DiscoveryOptions; routineClock?: Pick<LocalRoutineOptions, "now" | "setTimer">; routineHttp?: RoutineHttpNetwork; credentialNetwork?: CredentialNetwork; voiceTranscriber?: VoiceTranscriber; voiceSynthesizer?: VoiceSynthesizer; /** Compatibility fixtures only; never changes persisted tasks. */ legacyResources?: boolean }
 type BrowserHold = { taskId: string; questionId: string };
 const browserSignInRequest = (questionId: string) => 'browser-sign-in-' + questionId;
 const browserSignInCompleted = 'The user finished the requested browser step. Acquire a new lease and observe the browser before continuing.';
@@ -302,12 +303,24 @@ export class LocalRuntime {
       }),
     }, this.assistants);
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,gmail:this.gmail,calendar:this.calendars,assistants:this.assistants,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,gmail:this.gmail,calendar:this.calendars,assistants:this.assistants,http:options.routineHttp,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
       try { return await this.taskOverview(id); }
       catch (error) {
         const cause = error as NodeJS.ErrnoException;
         if (cause.code !== "ENOENT" || cause.path !== this.metaFile(id)) throw error;
       }
+    },httpApplied:async pending => {
+      if (pending.action === 'notify') return this.inbox.notified(pending.id);
+      return this.changes.run(async () => {
+        try {
+          const task = await this.metadata(pending.taskId);
+          return task.routineOccurrenceId === pending.id && (task.control === 'active' || task.control === 'paused');
+        } catch (error) {
+          const cause = error as NodeJS.ErrnoException;
+          if (cause.code !== 'ENOENT' || cause.path !== this.metaFile(pending.taskId)) throw error;
+          return false;
+        }
+      });
     },execute:async (occurrence,signal) => {
       signal.throwIfAborted();
       const requireRoutineAdmission = async () => {

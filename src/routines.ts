@@ -15,6 +15,7 @@ import type { AccountRefusal } from './routine-account-backoff.js';
 import { gmailSearchQuery, type ProjectGmail, type RoutineGmailBinding, type RoutineGmailMatch } from './project-gmail.js';
 import type { CalendarReminder, ProjectCalendars } from './project-calendars.js';
 import { assistantRef, type AssistantRef, type Assistants } from './assistants.js';
+import { normalizeRoutineHttp, sampleRoutineHttp, type RoutineHttpCheck, type RoutineHttpNetwork } from './routine-http.js';
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -40,7 +41,7 @@ export type RoutineInput = {
   overlapPolicy?: "skip";
   notifyOnChange?: boolean;
   budget?: RoutineBudget;
-  precheck?: { command: string[] } | { mcp: McpPrecheck } | { gmail: { query: string } } | { calendar: { withinMinutes: number } };
+  precheck?: { command: string[] } | { mcp: McpPrecheck } | { gmail: { query: string } } | { calendar: { withinMinutes: number } } | { http: RoutineHttpCheck };
   activity?: { withinMinutes: number; minIntervalMinutes: number };
   accountBackoff?: true;
   event?: RoutineEvent;
@@ -52,6 +53,7 @@ type RoutineDefinition = Omit<RoutineInput, "id" | "acceptance" | "missedPolicy"
   budgetPolicy: NonNullable<RoutineInput["budgetPolicy"]>;
   notifyOnChange: boolean;
 };
+type HttpPending = { id: string; taskId: string; action: RoutineInput['action']; scheduledAt: string; sha256: string };
 
 export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPolicy" | "overlapPolicy" | "event"> & {
   id: string;
@@ -66,6 +68,7 @@ export type RoutineOccurrence = Omit<RoutineDefinition, "schedule" | "missedPoli
   gmail?: RoutineGmailMatch;
   calendarSource?: { fingerprint: string };
   calendar?: CalendarReminder[];
+  httpPending?: HttpPending[];
 };
 
 export type RoutineExecution =
@@ -160,7 +163,7 @@ async function interruptManual(tx: Tx, conversationId: ConversationId, rule: Sto
 
 async function interruptWatchClaim(tx: Tx, conversationId: ConversationId, rule: StoredRoutine, now: number) {
   const claim = rule.claim;
-  if (!claim?.gmail && !claim?.calendar) return;
+  if (!claim?.gmail && !claim?.calendar && !(claim?.precheck && 'http' in claim.precheck)) return;
   await recordOccurrence(tx, conversationId, rule, {
     id: claim.id, scheduledAt: claim.scheduledAt, status: 'interrupted',
     ...(claim.gmail ? { gmail: { messageIds: claim.gmail.messageIds } } : {}),
@@ -169,7 +172,8 @@ async function interruptWatchClaim(tx: Tx, conversationId: ConversationId, rule:
     ...(claim.action === 'task' ? { taskId: claim.taskId } : {}),
     ...(claim.timing ? { timing: claim.timing } : {}),
     detail: claim.gmail ? 'The Gmail matches were saved before the rule was interrupted during delivery.'
-      : 'The calendar events were saved before the rule was interrupted during delivery.',
+      : claim.calendar ? 'The calendar events were saved before the rule was interrupted during delivery.'
+      : 'The HTTP check was interrupted. Inspect its original task or notification receipt.',
   }, now);
 }
 
@@ -226,6 +230,7 @@ type StoredRoutine = Routine & {
   lastStartedAt?: number;
   lastAccountResult?: string;
   firstSlotAfterResume?: string;
+  pendingHttp?: HttpPending[];
 };
 
 export interface LocalRoutineOptions {
@@ -236,6 +241,8 @@ export interface LocalRoutineOptions {
   gmail?: Pick<ProjectGmail, "watchMailbox" | "watchMessageIds">;
   calendar?: Pick<ProjectCalendars, "watchCalendar" | "upcomingReminders">;
   assistants?: Pick<Assistants, 'select'>;
+  http?: RoutineHttpNetwork;
+  httpApplied?(pending: HttpPending): Promise<boolean>;
   lastUserActivity?(workspace: string): Promise<number | undefined>;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
@@ -278,7 +285,7 @@ function snapshot<T>(value: T): T {
 
 function toRoutine({ timerId: _timer, claim: _claim, manual: _manual, lastPrecheckSha256: _baseline, lastPrecheckScheduledAt: _sample,
   gmailMailbox: _mailbox, gmailBaseline: _gmailBaseline, calendarSource: _calendar, lastStarted: _lastStarted, lastStartedAt: _lastStartedAt,
-  lastAccountResult: _accountResult, firstSlotAfterResume: _resumed, ...routine }: StoredRoutine): Routine {
+  lastAccountResult: _accountResult, firstSlotAfterResume: _resumed, pendingHttp: _pendingHttp, ...routine }: StoredRoutine): Routine {
   const nextTiming=routine.nextRunAt ? routineTiming(routine.schedule,Date.parse(routine.nextRunAt)) : undefined;
   return { ...routine, notifyOnChange: routine.notifyOnChange ?? false,...(nextTiming ? {nextTiming} : {}) };
 }
@@ -355,7 +362,7 @@ function definition(input: RoutineInput): RoutineDefinition {
   }
   if (input.accountBackoff !== undefined && (input.accountBackoff !== true || input.action !== 'task' || !input.workspace ||
     input.event !== undefined || ['once', 'event'].includes(schedule.kind))) throw new RoutineError(400, 'Account backoff requires a recurring project task and the value true.');
-  const overlapPolicy = input.overlapPolicy ?? (activity || input.accountBackoff ? "skip" : undefined);
+  let overlapPolicy = input.overlapPolicy ?? (activity || input.accountBackoff ? "skip" : undefined);
   if (overlapPolicy !== undefined && (overlapPolicy !== "skip" || input.action !== "task" || schedule.kind === "once")) {
     throw new RoutineError(400, "The skip overlap policy requires a recurring task.");
   }
@@ -366,7 +373,12 @@ function definition(input: RoutineInput): RoutineDefinition {
   if (precheck !== undefined) {
     if (!precheck || typeof precheck !== "object" || Array.isArray(precheck) || !input.workspace ||
       Object.keys(precheck).length !== 1) throw new RoutineError(400, "A precheck requires a workspace and exactly one check.");
-    if ("gmail" in precheck) {
+    if ('http' in precheck) {
+      if (schedule.kind === 'once' || schedule.kind === 'event' || input.event !== undefined) throw new RoutineError(400, 'An HTTP precheck requires a recurring project rule.');
+      try { precheck = { http: normalizeRoutineHttp(precheck.http) }; }
+      catch (error) { throw new RoutineError(400, (error as Error).message); }
+      if (input.action === 'task') overlapPolicy ??= 'skip';
+    } else if ("gmail" in precheck) {
       const value = precheck.gmail;
       if (schedule.kind === 'once' || schedule.kind === 'event' || input.event !== undefined ||
         !value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value,'query')) {
@@ -456,6 +468,7 @@ function occurrenceFor(rule: StoredRoutine, at: number, requestKey?: string): Ro
     ...(activity ? { activity } : {}),
     ...(rule.gmailMailbox ? { gmailMailbox: rule.gmailMailbox } : {}),
     ...(rule.calendarSource ? { calendarSource: rule.calendarSource } : {}),
+    ...(rule.pendingHttp?.length ? { httpPending: snapshot(rule.pendingHttp) } : {}),
   };
 }
 
@@ -470,7 +483,7 @@ function recordStarted(rule: StoredRoutine, receipt: Receipt): StoredRoutine {
   if (rule.overlapPolicy === "skip" && receipt.status === "started" && receipt.taskId) {
     saved.lastStarted = { occurrenceId: receipt.id, taskId: receipt.taskId };
   }
-  if (receipt.status === "started" && receipt.precheck?.status === "changed" &&
+  if ((receipt.status === "started" || receipt.status === 'notified' && rule.precheck && 'http' in rule.precheck) && receipt.precheck?.status === "changed" &&
     (!rule.lastPrecheckScheduledAt || rule.lastPrecheckScheduledAt <= receipt.scheduledAt)) {
     saved.lastPrecheckSha256 = receipt.precheck.sha256;
     saved.lastPrecheckScheduledAt = receipt.scheduledAt;
@@ -495,9 +508,21 @@ function advance(rule: StoredRoutine, receipt: Receipt, now: number) {
 }
 
 async function samplePrecheck(due: RoutineOccurrence, precheck: NonNullable<RoutineInput["precheck"]>, ctx: typeof context,
-  options: LocalRoutineOptions, now: number): Promise<{ sha256: string; messageIds?: string[]; calendar?: CalendarReminder[] } | { detail: string }> {
+  options: LocalRoutineOptions, now: number): Promise<{ sha256: string; messageIds?: string[]; calendar?: CalendarReminder[]; httpApplied?: HttpPending[] } | { detail: string }> {
   const workspace = due.workspace!;
   const signal = () => AbortSignal.any([AbortSignal.timeout(30_000), ...(ctx.abortSignal ? [ctx.abortSignal] : [])]);
+  if ('http' in precheck) {
+    const applied: HttpPending[] = [];
+    try {
+      for (const pending of due.httpPending ?? []) {
+        if (!options.httpApplied) throw new Error('The original HTTP delivery receipt is unavailable.');
+        if (await awaitWithContext(options.httpApplied(pending), ctx)) applied.push(pending);
+      }
+    }
+    catch { ctx.abortSignal?.throwIfAborted(); return { detail: 'Could not read the original HTTP delivery receipt.' }; }
+    try { return { ...await sampleRoutineHttp(precheck.http, signal(), options.http), ...(due.httpPending ? { httpApplied: applied } : {}) }; }
+    catch (error) { ctx.abortSignal?.throwIfAborted(); return { detail: (error as Error).message }; }
+  }
   if ("gmail" in precheck) {
     try {
       if (!options.gmail || !due.gmailMailbox) throw new Error('Gmail prechecks are unavailable.');
@@ -731,6 +756,14 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             if (!current(rule)) return completed;
             const claim = claimFor(rule);
             if (claim?.id !== id) return completed;
+            if (!('detail' in sample) && sample.httpApplied) {
+              for (const accepted of sample.httpApplied.toSorted((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))) {
+                if (!rule.lastPrecheckScheduledAt || rule.lastPrecheckScheduledAt <= accepted.scheduledAt) {
+                  rule.lastPrecheckSha256 = accepted.sha256; rule.lastPrecheckScheduledAt = accepted.scheduledAt;
+                }
+              }
+              delete rule.pendingHttp;
+            }
             if ("detail" in sample) {
               precheck = { status: "failed", detail: sample.detail };
             } else if (sample.messageIds) {
@@ -749,6 +782,10 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
               const events = await observeCalendar(tx, rule, sample.calendar);
               precheck = { status: events.length ? "changed" : "unchanged", sha256: sample.sha256 };
               if (events.length) due.calendar = events;
+            } else if (due.precheck && 'http' in due.precheck && !rule.lastPrecheckSha256) {
+              precheck = { status: 'baseline', sha256: sample.sha256 };
+              rule.lastPrecheckSha256 = sample.sha256;
+              rule.lastPrecheckScheduledAt = scheduledAt;
             } else {
               const other = (manual ? rule.claim : rule.manual?.claim)?.precheckResult;
               const status = sample.sha256 === rule.lastPrecheckSha256 ? "unchanged"
@@ -850,7 +887,7 @@ export class LocalRoutines {
 
   private async validatePrecheck(details: RoutineDefinition): Promise<Pick<StoredRoutine, "gmailMailbox" | "calendarSource">> {
     const check = details.precheck;
-    if (!check || "command" in check) return {};
+    if (!check || "command" in check || 'http' in check) return {};
     try {
       if ("gmail" in check) {
         if (!this.options.gmail) throw new Error("Gmail prechecks are unavailable.");
@@ -1151,6 +1188,9 @@ export class LocalRoutines {
         const next = endSchedule(rule, "paused");
         // A claimed task may have been admitted before the timer could record its result.
         const claim = rule.claim ?? rule.manual?.claim;
+        const pending = [rule.claim, rule.manual?.claim].flatMap(value => value?.precheck && 'http' in value.precheck && value.precheckResult?.status === 'changed'
+          ? [{ id: value.id, taskId: value.taskId, action: value.action, scheduledAt: value.scheduledAt, sha256: value.precheckResult.sha256 }] : []);
+        if (pending.length) next.pendingHttp = [...new Map([...(rule.pendingHttp ?? []), ...pending].map(value => [value.id, value])).values()];
         if (rule.overlapPolicy === "skip" && claim) {
           next.lastStarted = { occurrenceId: claim.id, taskId: claim.taskId };
         }

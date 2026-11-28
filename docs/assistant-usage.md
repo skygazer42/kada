@@ -516,6 +516,23 @@ npm run harness -- routines github-sync github-triage
 
 有明确 `workspace` 的任务规则可添加 `"precheck": {"command":["node","checks/project-fingerprint.mjs"]}`。脚本在该目录中以本地用户权限运行，使用参数数组直接启动，时限为 30 秒。使用只读脚本，并向标准输出写出稳定的 UTF-8 检查结果。首次成功或输出的 SHA-256 变化会创建任务，输出相同的发生项记为 `skipped`。更新规则版本会重新建立基线。预检失败或中断会记录原因，当前发生项到此结束。`routines history` 可查看预检状态和成功样本的哈希。
 
+公开 HTTPS 地址可使用 `precheck.http`，无需启动浏览器或模型。把下面的 URL 换成实际公开 JSON 清单地址，再用 `routines add` 保存。首次成功检查只建立基线，之后有变化才执行原目标或发通知；`routines run` 也做相同判断。
+
+```json
+{
+  "id": "service-status",
+  "action": "notify",
+  "objective": "公开服务状态有变化，请核对",
+  "workspace": "E:/project",
+  "schedule": {"kind":"daily","time":"09:00","timeZone":"UTC"},
+  "precheck": {"http":{"url":"https://status.example.org/services.json","track":["id","updatedAt"]}}
+}
+```
+
+省略 `track` 时比较完整 UTF-8 文本；合法 JSON 会忽略对象键序。提供 `track` 时，第一项是字符串或数字身份，后面是变化字段；递归读取全部匹配对象，保留同一身份的多份值并忽略条目顺序，缺字段按 null 处理。属性名按原名匹配，不解释点号路径。需要执行工作时选择 action=task 并提供原预算，也可沿已支持的 assistant 引用选择助手；HTTP task 默认防止重叠。
+
+HTTP 检查只做公开 443 HTTPS GET，不支持认证、Cookie、请求体、跳转或压缩响应；一次含 DNS/读取最多 15 秒、响应最多 1 MB。错误状态、无法按 track 读取的响应或网络失败会保留原基线，在原日程的下一次发生项再检查。暂停与重启保留基线，编辑规则重新建基线；已经受理的任务或已保存的通知会按原回执核对，避免暂停竞态重复交付。 [参考、边界与验收](superpowers/specs/2026-11-28-routine-http-watch-design.md)
+
 周期任务可设置 `"overlapPolicy": "skip"`。如果同一规则版本的上一次任务仍在运行或等待处理，本次直接跳过。回执的 `blockedBy` 保存上一次发生项、任务 ID 和当时的状态。`--task-status` 按原任务 ID 查询当前状态，并在有值时显示待答问题、原因或交付摘要。若回执有关联 ID 但任务尚未建立，当前状态显示 `missing`。
 
 列表的 `nextTiming` 显示计划本地时间、实际本地时间及夏令时调整说明；发生项回执保留已采用的调整。`history` 读取 Pi 的持久条目，保留旧规则版本的认领、失败、跳过和预算停止记录。`claimed` 表示已认领但尚无确认结果，不能当作任务已经启动或成功；取消/中断后应按 `taskId` 查询实际状态。任务产物和用量仍从原任务读取。更早版本只有最近回执，没有的历史不会被补造。

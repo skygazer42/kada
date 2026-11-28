@@ -1,0 +1,46 @@
+{
+  "date": "2026-11-28",
+  "baseCommit": "40544f08231bfd0869b3a698a5f8e4b36e6bd97f",
+  "publicNetwork": {
+    "initialEndpoint": "https://example.com/",
+    "initialResult": "DNS ENOTFOUND on this machine; not counted as passed",
+    "verifiedEndpoint": "https://api.github.com/",
+    "transport": "Native Node HTTPS with validated pinned DNS, TLS verification and fixed Kada User-Agent",
+    "checks": 2,
+    "sameFingerprint": true,
+    "responseBodyStored": false,
+    "modelRequests": 0,
+    "elapsedMs": 645
+  },
+  "nativePiComparison": {
+    "version": "1.4.0",
+    "model": { "provider": "same-native-http-proof", "modelId": "scripted" },
+    "sameInstructionsAndReadonlyTool": true,
+    "samples": [1, 1, 2],
+    "withoutWatch": { "modelRuns": 3, "requests": 6, "httpReads": 3 },
+    "withWatch": { "modelRuns": 1, "requests": 2, "httpReads": 4 },
+    "extraRead": "The changed model work rechecks its source with the same read-only tool."
+  },
+  "focusedVerification": {
+    "command": "node --import tsx --test --test-concurrency=1 test/routine-http.test.ts test/routine-http-watch.test.ts test/routine-http-recovery.test.ts test/routine-manual.test.ts test/routine-admission.test.ts test/routine-mcp-precheck.test.ts test/routine-gmail.test.ts test/routine-precheck-recovery.test.ts",
+    "tests": 46,
+    "passed": 46,
+    "failed": 0,
+    "skipped": 0,
+    "typecheck": "passed",
+    "build": "passed"
+  },
+  "recoveryCases": [
+    "SIGKILL after a committed baseline retains baseline then unchanged without a model",
+    "SIGKILL after task effect but before the timer receipt reopens one original task without refetching or repeating the effect",
+    "Scheduled/manual task and notification effects are reconciled after pause, restart and resume",
+    "Missing host receipts do not invent a successful delivery; current changes remain eligible",
+    "Receipt lookup failure retains pending state and withholds the upstream error"
+  ],
+  "limits": [
+    "Scripted model comparison; no claim about real-model quality, token cost or bills.",
+    "Public-network verification checks stable reads; changing content and network refusal cases use synthetic transports.",
+    "Only public port-443 HTTPS GET with identity encoding is supported; no authentication or redirects.",
+    "Final repository check and independent code review are recorded after they complete."
+  ]
+}

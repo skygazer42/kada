@@ -78,7 +78,7 @@ const idPattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const envPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const headerPattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
-function stableJson(value: unknown): string {
+export function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
     ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 }

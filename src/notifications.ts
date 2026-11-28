@@ -70,4 +70,5 @@ export class NotificationStore {
       }
     });
   }
+  async notified(occurrenceId: string) { return this.changes.run(async () => (await this.load()).reminders.some(item => item.id === hash(['routine', occurrenceId]))); }
 }
