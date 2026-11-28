@@ -1,6 +1,6 @@
 # 指定命名助手执行例行任务
 
-Status: implementation under verification. 基线为固定 Skill 分配提交 `2b57388`。独立可实施性检查未发现待决问题。
+Status: implemented. 基线为固定 Skill 分配提交 `2b57388`，最终功能提交为 `d57f1c6`。独立可实施性检查未发现待决问题。
 
 ## 目标与证据
 
@@ -54,4 +54,6 @@ RoutineInput 增加可选 assistant: { id, revision }。只允许 action=task �
 
 ## 本地证据
 
-新增七项回归与原例行任务手动/受理回归合计 21 项通过。覆盖所选 Skill、旧角色恢复、新修订的明确选择、配置回执、归档和跨项目拒绝、排队与受理时的角色变更、Owner CLI/API 及旧后台能力检查。实际 SIGKILL 在文件效果保存后改动目录角色，再重启确认同一原任务继续使用 revision 1，目录已为 revision 2，效果文件仅一行。全量回归和独立代码审查另行记录。
+新增七项回归与原例行任务手动/受理回归合计 21 项通过；合并固定 Skill 与第二意见修正后的相关回归 67 项通过。覆盖所选 Skill、旧角色恢复、新修订的明确选择、配置回执、归档和跨项目拒绝、排队与受理时的角色变更、Owner CLI/API 及旧后台能力检查。实际 SIGKILL 在文件效果保存后改动目录角色，再重启确认同一原任务继续使用 revision 1，目录已为 revision 2，效果文件仅一行。
+
+最终 `npm run check` 在 `d57f1c6` 上通过：752 项测试全部通过，无跳过，类型检查、构建和提交检查通过。Office 用例使用已安装的内置 Python 依赖。独立静态审查核对原归属、受理、重放、工具过滤及 CLI 能力检查后未发现阻塞问题。TruffleHog 对整批提交的扫描通过；额外的结构化 Autoreview 模型调用因缺少认证返回 401，未产生有效报告，不能记为通过。 [验收记录](../../experiments/2026-11-27-assistant-routines-verification.json)

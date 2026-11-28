@@ -31,10 +31,10 @@
 
 **Interfaces:** `RoutineInput.assistant?: AssistantRef`；`LocalRoutineOptions.assistants?: Pick<Assistants, 'select'>`；发生项与历史保存可选引用。执行调用既有 `create(..., { assistant })`。
 
-- [ ] 先写并运行失败测试：保存精确引用；notify、无工作区、外项目、旧修订拒绝；首次 Run now 模型获得原角色及方法。
-- [ ] 使用 `assistantRef` 规范化引用；创建/更新在原回执检查之后验证所选助手；在 occurrenceFor 与原历史中保留引用。
-- [ ] runtime 向 LocalRoutines 提供现有 Assistants；原执行路径传给 create，保存元数据前重新验证当前助手。已有 taskId 的恢复先回读原任务。
-- [ ] 运行相关例行任务、权限和角色回归。预期新断言与历史未分配规则均通过。
+- [x] 先写并运行失败测试：保存精确引用；notify、无工作区、外项目、旧修订拒绝；首次 Run now 模型获得原角色及方法。
+- [x] 使用 `assistantRef` 规范化引用；创建/更新在原回执检查之后验证所选助手；在 occurrenceFor 与原历史中保留引用。
+- [x] runtime 向 LocalRoutines 提供现有 Assistants；原执行路径传给 create，保存元数据前重新验证当前助手。已有 taskId 的恢复先回读原任务。
+- [x] 运行相关例行任务、权限和角色回归。预期新断言与历史未分配规则均通过。
 
 ## Task 2: 恢复、失效和实际入口验收
 
@@ -42,8 +42,8 @@
 
 **Interfaces:** 复用 Task 1 的引用与现有回执；失败历史保存有界说明，后续规则替换可选择新修订。
 
-- [ ] 测试定时发生项和重启；编辑/归档后新工作失败、更新规则后恢复；已开始任务继续使用原角色、原 Skill 与预算。
-- [ ] 覆盖创建/更新回执重放及取消/排队竞态。原 taskId 保存后中断和重试不能重复模型效果。
-- [ ] 从 Owner API/CLI 保存、列出、手动运行并读取发生项；历史包含原助手引用。
-- [ ] 更新使用说明和矩阵，区分直接任务分配与尚未实现的群组定时投递。
-- [ ] 运行聚焦测试、typecheck、check:commit 和仓库 check；有效独立审查通过后提交并仅推送 Fork 功能分支。
+- [x] 测试定时发生项和重启；编辑/归档后新工作失败、更新规则后恢复；已开始任务继续使用原角色、原 Skill 与预算。
+- [x] 覆盖创建/更新回执重放及取消/排队竞态。原 taskId 保存后中断和重试不能重复模型效果。
+- [x] 从 Owner API/CLI 保存、列出、手动运行并读取发生项；历史包含原助手引用。
+- [x] 更新使用说明和矩阵，区分直接任务分配与尚未实现的群组定时投递。
+- [x] 运行聚焦测试、typecheck、check:commit 和仓库 check；有效独立静态审查通过。Fork 推送结果由 Git 远端核对，额外结构化模型审查的认证失败保留在验收记录。

@@ -1,0 +1,45 @@
+{
+  "recordDate": "2026-11-27",
+  "codeCommit": "d57f1c6ac41be0dc8d9571286d0dc4ce1a305e61",
+  "baseCommit": "7a157f76e18bc76b8e2f89866ff7637a733fe8ff",
+  "environment": "Windows, Node 24.20.0, Pi 1.4.0; bundled Python with Office fixture dependencies",
+  "focusedTests": { "tests": 67, "passed": 67, "failed": 0, "skipped": 0 },
+  "repositoryCheck": {
+    "command": "npm run check",
+    "exitCode": 0,
+    "tests": 752,
+    "passed": 752,
+    "failed": 0,
+    "skipped": 0,
+    "testDurationMs": 2056110.6952,
+    "typecheck": "passed",
+    "build": "passed",
+    "commitContentCheck": "passed"
+  },
+  "credentialScan": {
+    "tool": "TruffleHog 3.100.1",
+    "range": "7a157f7..d57f1c6",
+    "exitCode": 0,
+    "chunks": 104,
+    "bytes": 90746,
+    "verifiedSecrets": 0,
+    "unverifiedSecrets": 0
+  },
+  "independentStaticReview": {
+    "skillAssignment": "default-inheritance blocker found, fixed in 2474a25 and rechecked without remaining blockers",
+    "independentOpinions": "2474a25..81c12f2 rechecked without material blockers",
+    "routineAssignment": "81c12f2..d57f1c6 approved without correctness or permission blockers",
+    "reviewerRanTests": false
+  },
+  "structuredAutoreview": {
+    "status": "unavailable",
+    "credentialPreflight": "passed",
+    "modelReport": "not produced",
+    "reason": "Model invocation timed out and then returned HTTP 401 for missing authentication."
+  },
+  "limits": [
+    "No real-model quality or cost comparison for assistant Skill or routine assignments.",
+    "No real third-party tenant, native mobile-device or cross-host execution verification in this batch.",
+    "Group routine delivery and organization-wide assistant routing remain separate gaps."
+  ]
+}
