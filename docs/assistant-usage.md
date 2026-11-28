@@ -459,6 +459,10 @@ npm run harness -- routines cancel 规则ID
 
 `weekday` 以周日为 0。周期规则默认跳过离线错过项，单次默认补跑一次。`run_once` 只补最新一项。每日与每周的夏令时缺失时刻顺延，重复时刻选第一次。`notifyOnChange` 比较已验收产物的哈希；相同产物不重复通知，失败和待答仍展示。规则中的 task 操作就是对该目标及预算的明确授权。
 
+需要由指定助手执行时，先用 `assistants list --workspace 路径` 取得该项目的 ID 和当前修订，在 task 规则中加入 `"assistant": { "id": "该助手 ID", "revision": 1 }`，并填写该项目的 workspace。定时发生项和 `routines run` 均沿该助手的模型、指令、工具范围、记忆设置及 Skills 启动；新任务保持自己的原快照，历史记录同时显示助手引用。
+
+助手被修改或归档、模型或指定方法不可用时，新发生项会失败并保留说明，不会换成通用助手。用 `routines update` 的完整规则明确选择新修订后继续；省略 assistant 可清除分配。已经启动的旧任务仍从原任务入口答复和接回。通知规则不能分配执行助手，普通聊天的提醒工具仍只发通知。 [行为、源码参考及验证](superpowers/specs/2026-11-27-routine-assistants-design.md)
+
 间隔规则可按固定起点每隔 5 到 1440 分钟运行。以下日间窗口左闭右开。间隔按实际经过时间计算，星期和窗口按已选时区过滤，`endsAt` 可省略。
 
 ```json

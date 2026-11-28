@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-27",
+  "base": "2b57388",
+  "syntheticLocalOnly": true,
+  "inputNamedAssistant": true,
+  "savedNamedAssistant": false,
+  "modelSawRole": false,
+  "startedTaskHasAssistant": false,
+  "taskStatus": "completed"
+}

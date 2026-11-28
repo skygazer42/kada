@@ -8,8 +8,9 @@ import { createBashTool } from "@earendil-works/pi-durable/tools";
 import { LocalRuntime } from "../../src/runtime.js";
 import { fakeRoutineClock, until } from "../helpers.js";
 
-const [mode, dataDir, scenario] = process.argv.slice(2) as ["create" | "recover", string, "routine" | "verification"];
+const [mode, dataDir, scenario] = process.argv.slice(2) as ["create" | "recover", string, "routine" | "verification" | "assistant"];
 const verify = scenario === "verification";
+const assigned = scenario === 'assistant';
 const workspace = join(dataDir, "workspace");
 const due = Date.UTC(2026, 10, 23, 12);
 const clock = fakeRoutineClock(mode === "create" ? due - 60_000 : due + 60_000);
@@ -18,6 +19,10 @@ const provider = fauxProvider({ provider: model.provider, models: [{ id: model.m
 const call = (name: string, args: JsonObject) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const command = "dispatch-fixture-label";
 provider.setResponses(Array.from({ length: 12 }, () => context => {
+  if (assigned) {
+    assert.match(getCurrentSystemPrompt(context.messages), /ORIGINAL_ROUTINE_RECOVERY_ROLE_27/);
+    assert.doesNotMatch(getCurrentSystemPrompt(context.messages), /CHANGED_ROUTINE_RECOVERY_ROLE_86/);
+  }
   if (getCurrentTools(context.messages).some(tool => tool.name === "task_prepare")) return call("task_prepare", {
     outcome: "Dispatch one synthetic label.", deliverables: ["labels.txt"], inputs: [], scope: ["Synthetic workspace"],
     assumptions: [], questions: [], criteria: [{ method: "inspect", text: "A single label exists in the dispatch log." }],
@@ -42,6 +47,10 @@ const effect = defineExtension({ name: "routine_effect_fixture", wraps: [wrapToo
   execute: async (args, _api, ctx) => {
     assert.equal(args.command, command);
     await appendFile(join(workspace, "labels.txt"), "label-1\n");
+    if (assigned) {
+      const [role] = await runtime.assistants.list(workspace);
+      await runtime.assistants.update(role!.id, { revision: 1, instructions: 'CHANGED_ROUTINE_RECOVERY_ROLE_86', tools: [] });
+    }
     console.log(JSON.stringify({ type: "ready" }));
     await setTimeout(60_000, undefined, { signal: ctx.abortSignal });
     throw new Error("Fixture did not interrupt the command");
@@ -65,7 +74,10 @@ try {
         await setTimeout(60_000, undefined, { signal: args[3]?.signal });
         return task;
       };
+      const role = assigned ? await runtime.assistants.create({ workspace, name: 'Recovery routine reader',
+        instructions: 'ORIGINAL_ROUTINE_RECOVERY_ROLE_27', tools: ['bash', 'read'], skills: [] }) : undefined;
       await runtime.routines.create({ id: routineId, action: "task", workspace, objective: "Dispatch one label.",
+        ...(role ? { assistant: { id: role.id, revision: role.revision } } : {}),
         schedule: { kind: "once", at: new Date(due).toISOString() }, budget: { maxEstimatedCostUsd: 1, maxDurationMs: 60_000, maxTotalTokens: 20_000 } });
       await until(async () => clock.waitingAt(due), Boolean);
       clock.advanceTo(due);
@@ -80,6 +92,8 @@ try {
     const status = await until(() => runtime.status(taskId), value => ["completed", "failed", "needs_attention"].includes(value.status));
     assert.equal(status.status, "completed", JSON.stringify(status.goal?.proofs));
     const tools = status.messages.flatMap(message => message.role === "toolResult" ? [[message.toolName, message.isError]] : []);
-    console.log(JSON.stringify({ type: "completed", history: history.map(row => [row.status, row.taskId]), tasks: (await runtime.list()).map(task => task.id), tools }));
+    console.log(JSON.stringify({ type: "completed", history: history.map(row => [row.status, row.taskId]), tasks: (await runtime.list()).map(task => task.id), tools,
+      ...(assigned ? { assistantRevision: status.assistant?.revision,
+        currentAssistantRevision: (await runtime.assistants.get(status.assistant!.id)).revision } : {}) }));
   }
 } finally { await runtime.close(); }

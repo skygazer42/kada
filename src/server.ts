@@ -81,7 +81,7 @@ export async function serve(config: Config, options?: RuntimeOptions) {
       if (!ready || !runtime) return send(503, { error: "Runtime is starting" });
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.port}`);
       if (chartPreviews.handle(req, res, url)) return;
-      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-memory','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines','browser-profiles'] });
+      if (url.pathname === "/health" && req.method === "GET") return send(200, { status: "ok", version: VERSION, capabilities: ["ordinary-chat", "work-memory-view",'assistant-settings','project-model-page','project-mcp-page','mcp-connections-page','workspace-snapshot-page','named-assistants','project-assistants-page','assistant-memory','assistant-collaboration','assistant-rooms','voice-notes','chart-preview','local-threads','thread-reports','thread-models','task-handoff','remote-web','routines','routine-assistants','browser-profiles'] });
       const hook = await githubWebhook(req, url.pathname, config.githubWebhooks ?? [], runtime.routines);
       if (hook) return send(hook.status, hook.data);
       if (await remote(req,res)) return;

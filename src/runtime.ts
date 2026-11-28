@@ -302,7 +302,7 @@ export class LocalRuntime {
       }),
     }, this.assistants);
     this.inbox = new NotificationStore(config.dataDir);
-    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,gmail:this.gmail,calendar:this.calendars,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
+    this.routines = new LocalRoutines({...options.routineClock,dataDir:config.dataDir,mcp:this.mcp,gmail:this.gmail,calendar:this.calendars,assistants:this.assistants,lastUserActivity:workspace => this.lastUserActivity(workspace),taskOverview:async id => {
       try { return await this.taskOverview(id); }
       catch (error) {
         const cause = error as NodeJS.ErrnoException;
@@ -320,6 +320,7 @@ export class LocalRuntime {
       if (occurrence.action === 'notify') { await this.inbox.notify(occurrence,requireRoutineAdmission); return {status:'notified'}; }
       const task = await this.create(occurrence.objective,occurrence.workspace,occurrence.acceptance,{id:occurrence.taskId,budget:occurrence.budget,routineOccurrenceId:occurrence.id,notifyOnChange:occurrence.notifyOnChange,signal,
         requireRoutineAdmission,
+        ...(occurrence.assistant ? { assistant: occurrence.assistant } : {}),
         ...(occurrence.event?.issue ? { routineIssue: occurrence.event.issue } : {}),
         ...(occurrence.event?.pullRequest ? { routinePullRequest: occurrence.event.pullRequest } : {}),
         ...(occurrence.gmail ? { routineGmail: occurrence.gmail } : {})});
@@ -810,6 +811,7 @@ export class LocalRuntime {
         maxEstimatedCostUsd: budget?.maxEstimatedCostUsd ?? this.config.maxEstimatedCostUsd ?? 1, review: this.config.review ?? false,
         maxReworks: this.config.maxReworks ?? 3, maxStalls: this.config.maxStalls ?? 2 };
       if (options.requireRoutineAdmission) await options.requireRoutineAdmission();
+      if (options.routineOccurrenceId && assistant) await this.assistants.select(meta.workspace, assistant);
       options.signal?.throwIfAborted();
       await atomicJson(this.metaFile(id), meta);
       try {

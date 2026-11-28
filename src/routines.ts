@@ -14,6 +14,7 @@ import { githubIssueTarget, githubPullRequestEvents, githubPullRequestTarget, ty
 import type { AccountRefusal } from './routine-account-backoff.js';
 import { gmailSearchQuery, type ProjectGmail, type RoutineGmailBinding, type RoutineGmailMatch } from './project-gmail.js';
 import type { CalendarReminder, ProjectCalendars } from './project-calendars.js';
+import { assistantRef, type AssistantRef, type Assistants } from './assistants.js';
 
 export { nextRoutineTime, type RoutineSchedule } from "./routine-schedule.js";
 
@@ -31,6 +32,7 @@ export type RoutineInput = {
   action: "notify" | "task";
   objective: string;
   workspace?: string;
+  assistant?: AssistantRef;
   acceptance?: AcceptanceCheck[];
   schedule: RoutineSchedule;
   missedPolicy?: "run_once" | "skip";
@@ -103,6 +105,7 @@ export type RoutineOccurrenceRecord = Receipt & {
   missedPolicy: 'run_once' | 'skip';
   budgetPolicy: 'pause' | 'skip';
   budget?: RoutineBudget;
+  assistant?: AssistantRef;
   recordedAt: number;
 };
 export type RoutineHistoryRecord = RoutineOccurrenceRecord & {
@@ -130,7 +133,8 @@ async function updateReceipt(tx: Tx, conversationId: ConversationId, routineId: 
 
 async function recordOccurrence(tx:Tx,conversationId:ConversationId,rule:StoredRoutine,receipt:Receipt,recordedAt:number) {
   const data:RoutineOccurrenceRecord={...receipt,routineId:rule.id,revision:rule.revision,action:rule.action,objective:rule.objective,
-    missedPolicy:rule.missedPolicy,budgetPolicy:rule.budgetPolicy,...(rule.budget ? {budget:rule.budget} : {}),recordedAt};
+    missedPolicy:rule.missedPolicy,budgetPolicy:rule.budgetPolicy,...(rule.budget ? {budget:rule.budget} : {}),
+    ...(rule.assistant ? { assistant: { ...rule.assistant } } : {}),recordedAt};
   await tx.appendEntry(conversationId,{kind:occurrenceEntryKind,data});
   return data;
 }
@@ -231,6 +235,7 @@ export interface LocalRoutineOptions {
   mcp?: Pick<McpTools, "validatePrecheck" | "samplePrecheck">;
   gmail?: Pick<ProjectGmail, "watchMailbox" | "watchMessageIds">;
   calendar?: Pick<ProjectCalendars, "watchCalendar" | "upcomingReminders">;
+  assistants?: Pick<Assistants, 'select'>;
   lastUserActivity?(workspace: string): Promise<number | undefined>;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number, options: { readonly background: boolean }) => (() => void) | undefined;
@@ -318,6 +323,8 @@ function definition(input: RoutineInput): RoutineDefinition {
   if (input.workspace !== undefined && (typeof input.workspace !== "string" || !input.workspace.trim())) {
     throw new RoutineError(400, "A routine workspace must be a directory path.");
   }
+  const assistant = input.assistant === undefined ? undefined : assistantRef(input.assistant);
+  if (assistant && (input.action !== 'task' || !input.workspace)) throw new RoutineError(400, 'Select an assistant only for a task with an explicit project workspace.');
   let schedule: RoutineSchedule;
   let acceptance: AcceptanceCheck[];
   try {
@@ -395,6 +402,7 @@ function definition(input: RoutineInput): RoutineDefinition {
     action: input.action,
     objective: input.objective.trim(),
     ...(input.workspace ? { workspace: precheck ? resolve(input.workspace.trim()) : input.workspace.trim() } : {}),
+    ...(assistant ? { assistant } : {}),
     acceptance,
     schedule,
     missedPolicy,
@@ -442,6 +450,7 @@ function occurrenceFor(rule: StoredRoutine, at: number, requestKey?: string): Ro
     ...(requestKey ? { trigger: "manual" as const } : {}),
     ...(timing?.adjustment ? {timing} : {}),
     ...(workspace ? { workspace } : {}),
+    ...(rule.assistant ? { assistant: { ...rule.assistant } } : {}),
     ...(budget ? { budget } : {}),
     ...(precheck ? { precheck } : {}),
     ...(activity ? { activity } : {}),
@@ -766,8 +775,8 @@ function makeTimer(options: LocalRoutineOptions, openedAt: number) {
             receipt = { ...evidence, status: result.status ?? "started", ...("taskId" in result ? { taskId: result.taskId } : {}) };
             if (due.activity && receipt.status === "started") receipt.startedAt = "startedAt" in result ? result.startedAt ?? runtime.now() : runtime.now();
           }
-        } catch {
-          receipt = { ...evidence, status: "failed" };
+        } catch (error) {
+          receipt = { ...evidence, status: "failed", detail: (error instanceof Error ? error.message : String(error)).slice(0, 2000) };
         }
         if (runtime.signal.aborted) return;
 
@@ -858,6 +867,12 @@ export class LocalRoutines {
     catch (error) { throw new RoutineError(400, (error as Error).message); }
   }
 
+  private async validateAssistant(details: RoutineDefinition) {
+    if (!details.assistant) return;
+    if (!this.options.assistants) throw new RoutineError(400, 'Named assistants are unavailable for this routine host.');
+    await this.options.assistants.select(details.workspace, details.assistant);
+  }
+
   async create(input: RoutineInput): Promise<Routine> {
     const details = definition(input);
     const binding = await this.validatePrecheck(details);
@@ -873,6 +888,7 @@ export class LocalRoutines {
         }
         return toRoutine(previous);
       }
+      await this.validateAssistant(details);
       const next: StoredRoutine = { ...details, ...binding, id, revision: 1, status: "scheduled" };
       if (details.schedule.kind !== "event") {
         const firstAt = firstTime(details.schedule, this.now());
@@ -1043,6 +1059,7 @@ export class LocalRoutines {
       if (!previous) throw new RoutineError(404, "Routine not found.");
       if (request && previous.revision !== request.expectedRevision) throw new RoutineError(409, 'The reminder changed. Read the current reminder before editing it.');
       if (previous.status === "cancelled") throw new RoutineError(409, "This routine was cancelled.");
+      await this.validateAssistant(details);
       const keepPaused = request !== undefined && previous.status === 'paused';
       if (keepPaused && details.schedule.kind === 'once') throw new RoutineError(409, 'Resume the paused reminder before changing it to a single reminder.');
       const receipt = async (routine: Routine) => {

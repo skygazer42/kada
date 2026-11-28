@@ -363,8 +363,12 @@ try {
     } else if (command === 'routines') {
       if (action === 'list') result = await request('/v1/routines');
       else if (action === 'history') result = await request('/v1/routines/'+segment(rest[0])+'/occurrences'+(args.values['task-status'] ? '?includeTaskStatus=true' : ''));
-      else if (action === 'add') result = await request('/v1/routines','POST',await json(rest[0]));
-      else if (action === 'update') result = await request('/v1/routines/'+segment(rest[0]),'PATCH',await json(rest[1]));
+      else if (action === 'add' || action === 'update') {
+        const input = await json(rest[action === 'add' ? 0 : 1]);
+        if (input.assistant !== undefined && !await client.healthy('routine-assistants')) throw new Error('请重启到支持命名助手执行例行任务的后台版本。');
+        result = action === 'add' ? await request('/v1/routines', 'POST', input)
+          : await request('/v1/routines/' + segment(rest[0]), 'PATCH', input);
+      }
       else if (action === 'run') result = await request('/v1/routines/'+segment(rest[0])+'/run','POST',{requestId:rest[1] ?? randomUUID()});
       else if (action === 'event') result = await request('/v1/routines/'+segment(rest[0])+'/events','POST',await json(rest[1]));
       else if (action === 'github-sync') {
