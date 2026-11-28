@@ -18,6 +18,43 @@ const locations = (context: { messages: { role: string }[] }) =>
     .map(match => decode(JSON.parse('"' + match[1] + '"'))))];
 const body = (text: string) => '---\nname: assigned-proof\ndescription: Apply the assigned proof method.\n---\n\n' + text + '\n';
 
+test('a legacy assistant inherits project Skill snapshots in ordinary chat and after restoring defaults', async t => {
+  const f = await scriptedFixture(context => {
+    const paths = locations(context).filter(path => path.includes('assigned-proof'));
+    assert.equal(paths.length, 1);
+    const last = context.messages.findLastIndex(message => message.role === 'user');
+    const result = context.messages.slice(last).find((message): message is ToolResultMessage => message.role === 'toolResult' && message.toolName === 'read');
+    if (!result) return call('read', { path: paths[0]! });
+    assert.equal(result.isError, false);
+    assert.match(JSON.stringify(result), String(context.messages[last]?.content).includes('current defaults') ? /NEW_ASSIGNED_PROOF/ : /ORIGINAL_ASSIGNED_PROOF/);
+    return fauxAssistantMessage('Inherited method checked.');
+  });
+  let runtime = f.runtime;
+  t.after(async () => { await runtime.close(); await f.close(); });
+  const source = join(f.workspace, '.kada', 'skills', 'assigned-proof');
+  await mkdir(source, { recursive: true });
+  await writeFile(join(source, 'SKILL.md'), body('ORIGINAL_ASSIGNED_PROOF'));
+  const role = await runtime.assistants.create({ workspace: f.workspace, name: 'Legacy reader', instructions: 'Use the project methods.', tools: ['read'] });
+  assert.equal(role.skills, undefined);
+  const chat = await runtime.create('Read the inherited original method.', f.workspace, [], { chat: true, assistant: { id: role.id, revision: 1 } });
+  assert(chat.skillPins?.pins.some(pin => pin.name === 'assigned-proof'));
+  assert.equal(chat.skillSelection, undefined);
+  await until(() => runtime.status(chat.id), row => row.status === 'answered');
+  await runtime.close();
+  await writeFile(join(source, 'SKILL.md'), body('NEW_ASSIGNED_PROOF'));
+  runtime = new LocalRuntime(f.settings, { models: f.models });
+  await runtime.recover();
+  await runtime.followUp(chat.id, 'Read the original method after restart.', 'inherited-original');
+  await until(() => runtime.status(chat.id), row => row.status === 'answered' && row.submission?.requestId === 'user:inherited-original');
+  await runtime.assistants.update(role.id, { revision: 1, skills: [] });
+  const restored = await runtime.assistants.update(role.id, { revision: 2, skills: null });
+  assert.equal(restored.skills, undefined);
+  const next = await runtime.create('Read current defaults.', f.workspace, [], { chat: true, assistant: { id: role.id, revision: 3 } });
+  await until(() => runtime.status(next.id), row => row.status === 'answered');
+  assert.notEqual(next.skillPins?.pins.find(pin => pin.name === 'assigned-proof')?.version,
+    chat.skillPins?.pins.find(pin => pin.name === 'assigned-proof')?.version);
+});
+
 test('a named assistant keeps its assigned native Skill in ordinary chat, execution and restart', async t => {
   let phase = 'chat';
   const seen: string[] = [];
@@ -187,7 +224,7 @@ test('an assistant retains its assigned published Skill after a new version, rev
   await assert.rejects(runtime.create('Start a new run with the revoked method.', consumer, [], { assistant: { id: role.id, revision: 1 } }), /disabled/i);
 });
 
-test('a cross-project peer reads only its fixed assigned package and rework keeps its original bytes', async t => {
+for (const inherited of [false, true]) test(`a cross-project peer reads its ${inherited ? 'inherited' : 'assigned'} package and rework keeps the original bytes`, async t => {
   let role!: { id: string; revision: number };
   let methodFile!: string;
   let privateFile!: string;
@@ -200,7 +237,7 @@ test('a cross-project peer reads only its fixed assigned package and rework keep
     const results = context.messages.slice(start).filter((message): message is ToolResultMessage => message.role === 'toolResult');
     const read = results.filter(result => result.toolName === 'read');
     if (system.includes('ASSIGNED_PEER_482')) {
-      const paths = locations(context);
+      const paths = locations(context).filter(path => path.includes('assigned-proof'));
       assert.equal(paths.length, 1);
       if (!read.length) return call('read', { path: paths[0]! });
       assert.equal(read[0]!.isError, false);
@@ -240,24 +277,25 @@ test('a cross-project peer reads only its fixed assigned package and rework keep
   await writeFile(methodFile, body('ORIGINAL_ASSIGNED_PROOF'));
   const method = (await f.runtime.skillCatalog(peer)).find(skill => skill.name === 'assigned-proof')!;
   const saved = await f.runtime.assistants.create({ workspace: peer, name: 'Method peer', instructions: 'ASSIGNED_PEER_482',
-    tools: ['read'], skills: [{ name: method.name, version: method.currentVersion! }] });
+    tools: ['read'], ...(inherited ? {} : { skills: [{ name: method.name, version: method.currentVersion! }] }) });
   role = { id: saved.id, revision: saved.revision };
   const task = await f.runtime.create('Check and recheck the selected peer method.', f.workspace, [], {
     collaborators: [{ ...role, workspace: peer }],
   });
+  assert(task.collaborators?.[0]?.skillPins?.pins.some(pin => pin.name === 'assigned-proof'));
   const done = await until(() => f.runtime.status(task.id), state => ['completed', 'failed'].includes(state.status));
   assert.equal(done.status, 'completed', JSON.stringify(done.submission));
   assert.equal(skillReads, 2);
   assert.equal(done.assistantWork.length, 2);
 });
 
-test('local room members use assigned Skill snapshots while paired room turns retain their chat permissions', async t => {
+for (const inherited of [false, true]) test(`local room members use ${inherited ? 'inherited' : 'assigned'} Skill snapshots while paired turns retain chat permissions`, async t => {
   let peer!: string;
   let reads = 0;
   const trace: unknown[] = [];
   const f = await scriptedFixture(context => {
     const input = JSON.parse(String(context.messages.findLast(message => message.role === 'user')?.content));
-    const paths = locations(context);
+    const paths = locations(context).filter(path => path.includes('assigned-proof'));
     trace.push({ input, paths, results: context.messages.filter(message => message.role === 'toolResult') });
     if (input.message === 'Paired check') {
       assert.deepEqual(paths, []);
@@ -281,11 +319,12 @@ test('local room members use assigned Skill snapshots while paired room turns re
   await writeFile(join(source, 'SKILL.md'), body('ORIGINAL_ASSIGNED_PROOF'));
   const method = (await runtime.skillCatalog(peer)).find(skill => skill.name === 'assigned-proof')!;
   const role = await runtime.assistants.create({ workspace: peer, name: 'Room method reader', instructions: 'Use the selected method.',
-    tools: ['read'], skills: [{ name: method.name, version: method.currentVersion! }] });
+    tools: ['read'], ...(inherited ? {} : { skills: [{ name: method.name, version: method.currentVersion! }] }) });
   const companion = await runtime.assistants.create({ workspace: f.workspace, name: 'Room companion', instructions: 'Read the room.',
     tools: [], skills: [] });
   const room = await runtime.createRoom({ workspace: f.workspace, title: 'Method room',
     members: [{ id: role.id, revision: role.revision, workspace: peer }, { id: companion.id, revision: companion.revision }] });
+  assert((await runtime.metadata(room.id)).room?.[0]?.skillPins?.pins.some(pin => pin.name === 'assigned-proof'));
   await writeFile(join(source, 'SKILL.md'), body('NEW_ASSIGNED_PROOF'));
   await runtime.sendRoomMessage(room.id, { memberId: role.id, message: 'First local check', requestId: 'first-method' });
   const first = await until(() => runtime.roomDetails(room.id), state => state.active === null);

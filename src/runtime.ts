@@ -620,10 +620,10 @@ export class LocalRuntime {
   }
   private async pinAssistant(workspace: string, ref: AssistantRef, fallback: ModelRef | undefined, directory: string): Promise<AssistantPin> {
     const { id, revision, project, name, description, instructions, tools, model, memoryScope, skills } = await this.assistants.select(workspace, ref);
-    const skillPins = skills === undefined ? undefined : await pinSkills(await Workspace.open(workspace, { create: false }),
+    const skillPins = await pinSkills(await Workspace.open(workspace, { create: false }),
       join(directory, 'assistant-skills', id), await SkillStore.existing(this.config.dataDir), skills, await this.discoveredSkills(workspace));
     return { id, revision, project, name, description, instructions, tools, model: validateModel(this.options.models, model ?? fallback),
-      ...(memoryScope ? { memoryScope } : {}), ...(skills === undefined ? {} : { skills, skillPins }) };
+      ...(memoryScope ? { memoryScope } : {}), ...(skills === undefined ? {} : { skills }), skillPins };
   }
 
   private async pinParticipant(workspace: string, { workspace: target, ...ref }: AssistantCollaboratorRef,
@@ -724,7 +724,7 @@ export class LocalRuntime {
       const calendar = credentialProject ? await this.calendars.assistantCalendar(credentialProject) : undefined;
       if (options.chat && localChat && !workItemProject) throw new Error('The chat work item project is unavailable.');
       const selection=options.remote ? [] : options.skills ?? role?.skills;
-      const selectedSkills=selection === undefined ? undefined : selection.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
+      const selectedSkills=selection === undefined && !role ? undefined : selection?.length===0 ? {pins:[],loaded:[]} : await pinSkills(files,this.directory(id),await SkillStore.existing(this.config.dataDir),selection,await this.discoveredSkills(files.root));
       let mcpPins = localChat ? await this.mcp.pins(projectWorkspace === undefined ? undefined : files.root) : [];
       const fileSource = options.routineGmail ?? gmail;
       const attachmentPin = fileSource && mcpPins.find(pin => pin.id === fileSource.id && pin.tools.includes(gmailAttachmentTool) &&
@@ -770,7 +770,7 @@ export class LocalRuntime {
         mcpPins,
         ...(mcpPins.reduce((count, pin) => count + pin.tools.length, 0) > 20 ? { mcpDiscovery: 'deferred' as const } : {}),
         ...(this.config.deferOptionalTools && localChat && !role ? { optionalToolDiscovery:true as const } : {}),
-        ...(selection === undefined ? {} : {skillSelection:selection,skillPins:selectedSkills}),
+        ...(selection === undefined ? {} : {skillSelection:selection}), ...(selectedSkills ? {skillPins:selectedSkills} : {}),
         ...(options.remote ? {remotePolicy:'workspace' as const} : {}),
         ...(options.images?.length ? { initialImages: structuredClone(options.images) } : {}),
         ...(options.routineOccurrenceId ? {routineOccurrenceId:options.routineOccurrenceId} : {}),
