@@ -10,7 +10,7 @@ import { atomicJson, readJson, redactCredentials, SerialQueue } from "./util.js"
 
 type Peer = { accountId: string; deviceId: string };
 type MessageId = number | string;
-type ChannelName = "Telegram" | "Discord" | "Slack";
+type ChannelName = "Telegram" | "Discord" | "Slack" | "Teams";
 type Action = { kind: "confirm"; revision: number; digest: string } |
   { kind: "answer"; questionId?: string; cursor: number | null; childId?: number };
 type Outbox = { conversation: string; action?: Action; messageId?: MessageId };
@@ -20,6 +20,7 @@ export type ChannelMessage = {
   id: MessageId;
   text: string;
   replyTo?: MessageId;
+  replyKey?: string;
   confirmation?: boolean;
   documents?: readonly (() => Promise<ChannelDocument | undefined>)[];
 };
@@ -29,7 +30,7 @@ type ChannelTransport = {
   commandPrefix: "/" | "!";
   textLimit: number;
   sendText(text: string, action: Action["kind"] | undefined, sendId: string): Promise<MessageId>;
-  sendFile(path: string, bytes: ArrayBuffer, sendId: string): Promise<MessageId>;
+  sendFile(path: string, bytes: ArrayBuffer, sendId: string, href: string): Promise<MessageId>;
 };
 type Relay = {
   consume(message: ChannelMessage): Promise<void>;
@@ -37,6 +38,7 @@ type Relay = {
   sync(): Promise<void>;
   save(): Promise<void>;
   restore(sendId: string, messageId: string): Promise<void>;
+  readArtifact(href: string): Promise<ArrayBuffer>;
 };
 type Artifact = { href: string; name: string; kind?: "file" | "directory" };
 type PortalView = {
@@ -148,6 +150,17 @@ export async function withPairedChannel<State extends PairedState>(
   const view = async (conversation: string) => (await (await portal(route(conversation))).json()) as PortalView;
   const anchor = (id?: MessageId) => id === undefined ? undefined : Object.values(state.outbox).find(post => post.messageId === id);
   const keepOpen = (conversation: string) => { if (!state.open.includes(conversation)) state.open.push(conversation); };
+  async function readArtifact(href: string) {
+    if (!/^\/remote\/api\/conversations\/[A-Za-z0-9_-]+\/artifacts\/\d+\/[a-f0-9]{64}(?:\?file=[^\s#]+)?$/.test(href)) {
+      throw new Error("Invalid verified artifact link.");
+    }
+    const response = await portal(href);
+    const bytes = await response.arrayBuffer();
+    if (createHash("sha256").update(Buffer.from(bytes)).digest("hex") !== response.headers.get("X-Kada-SHA256")) {
+      throw new Error("The downloaded Kada artifact failed its digest check.");
+    }
+    return bytes;
+  }
 
   async function uploadDocument(conversation: string, loadDocument: () => Promise<ChannelDocument | undefined>) {
     const file = await loadDocument();
@@ -174,7 +187,7 @@ export async function withPairedChannel<State extends PairedState>(
     } catch (error) {
       if (!(error instanceof TransportError)) throw error;
       if (post.messageId !== undefined) return;
-      if ((error.service === "Discord" || error.service === "Slack") && error.status === 429) {
+      if ((error.service === "Discord" || error.service === "Slack" || error.service === "Teams") && error.status === 429) {
         delete state.outbox[key];
         await save();
         throw error;
@@ -206,12 +219,8 @@ export async function withPairedChannel<State extends PairedState>(
           if (file.href !== artifact.href && !file.href.startsWith(artifact.href + "?file=")) throw new Error("Kada returned an invalid directory member link.");
           const key = source + ":" + file.href;
           if (state.outbox[outboxKey(conversation, key)]) continue;
-          const response = await portal(file.href);
-          const bytes = await response.arrayBuffer();
-          if (createHash("sha256").update(Buffer.from(bytes)).digest("hex") !== response.headers.get("X-Kada-SHA256")) {
-            throw new Error("The downloaded Kada artifact failed its digest check.");
-          }
-          await publish(conversation, key, sendId => transport.sendFile(file.path, bytes, sendId));
+          const bytes = await readArtifact(file.href);
+          await publish(conversation, key, sendId => transport.sendFile(file.path, bytes, sendId, file.href));
         }
       } catch (error) {
         if (!(error instanceof TransportError) || error.service !== "Kada" || ![404, 409, 413].includes(error.status ?? 0)) throw error;
@@ -252,8 +261,8 @@ export async function withPairedChannel<State extends PairedState>(
     }
   }
 
-  async function confirm(replyTo?: MessageId) {
-    const post = anchor(replyTo);
+  async function confirm(replyTo?: MessageId, replyKey?: string) {
+    const post = replyKey ? state.outbox[replyKey] : anchor(replyTo);
     if (post?.action?.kind !== "confirm") return false;
     const { conversation, action } = post;
     const task = (await view(conversation)).task;
@@ -268,14 +277,18 @@ export async function withPairedChannel<State extends PairedState>(
     const text = message.text;
     const command = hasFiles ? "" : text.trim();
     const commandPrefix = transport.commandPrefix;
-    const post = anchor(message.replyTo);
+    const post = message.replyKey ? state.outbox[message.replyKey] : anchor(message.replyTo);
     const conversation = post?.conversation ?? state.current;
 
     if (message.confirmation) {
       let accepted = false;
-      try { accepted = await confirm(message.replyTo); }
+      try { accepted = await confirm(message.replyTo, message.replyKey); }
       catch (error) { if (!(error instanceof TransportError) || error.status !== 409) throw error; }
       await say(conversation, source, accepted ? "Brief confirmed." : "Reply to the original task brief that is still pending.");
+      return;
+    }
+    if (message.replyKey && post?.action?.kind !== "answer") {
+      await say(conversation, source, "This question is no longer current. Open the latest Kada message.");
       return;
     }
     if (command === commandPrefix + "new") {
@@ -384,7 +397,7 @@ export async function withPairedChannel<State extends PairedState>(
     if (state.peer.accountId !== peer.accountId || state.peer.deviceId !== peer.deviceId) {
       throw new Error("The " + transport.name + " relay is already bound to another paired device.");
     }
-    await run(state, { consume, confirm, save, restore, async sync() {
+    await run(state, { consume, confirm, save, restore, readArtifact, async sync() {
       for (const conversation of state.open) await sync(conversation);
     } });
   } finally { await release(); }

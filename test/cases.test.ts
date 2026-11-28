@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-const execute = promisify(execFile), python = process.env.CASE_PYTHON ?? "python3";
+const execute = promisify(execFile);
+const python = process.env.CASE_PYTHON ?? (process.platform === "win32" ? "py" : "python3");
 
 for (const name of ["code_inventory", "code_pool", "code_import", "code_cache"]) {
   test(`case ${name}: reference accepted and two real defects rejected`, { timeout: 60000 }, async () => {

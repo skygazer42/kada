@@ -665,6 +665,36 @@ npm run harness -- slack
 
 `!new` 开新聊天。`!status` 查看当前任务并重新显示待确认或待答内容。`!delivery` 明确请求再发核验产物。重连时补读原私聊和任务相关线程，已经受理的事件保留原回执。 [实现与测试](superpowers/plans/2026-11-27-slack.md)
 
+## Microsoft Teams 私聊入口
+
+准备一个启用 Socket Mode 的 Teams 应用，允许在个人范围安装。在 Teams 应用清单中把该 Bot 的 `supportsFiles` 设为 `true`。需要组织中该应用的 Client ID、Tenant ID 和本人 Microsoft Entra 用户的 Object ID。 [Teams 文件能力与权限](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/bots-filesv4)
+
+```powershell
+npm run harness -- remote pair teams bot
+```
+
+在运行 daemon 的配置中添加 `teams`。把下列 GUID 换成实际值。应用 Secret 和 Kada 配对令牌放在指定环境变量。
+
+```json
+{
+  "teams": {
+    "clientId": "00000000-0000-4000-8000-000000000001",
+    "tenantId": "00000000-0000-4000-8000-000000000002",
+    "userId": "00000000-0000-4000-8000-000000000003",
+    "clientSecretEnv": "KADA_TEAMS_CLIENT_SECRET",
+    "pairingTokenEnv": "KADA_TEAMS_PAIRING_TOKEN"
+  }
+}
+```
+
+```powershell
+npm run harness -- teams
+```
+
+启动后在这个 Bot 的一对一私聊发文字或文档。用任务卡确认原任务或答复原问题。Teams 会显示文件邀请，接受后才向它指定的位置上传原核验字节。拒绝后可用 `!delivery` 请求新的文件邀请。`!new` 开新会话，`!status` 查看任务或重新打开待确认、待答内容。
+
+连接器重启后接回已经保存的活动和文件邀请。Teams 断线期间未投递的私聊需要平台历史补读。 [实现与回归](superpowers/plans/2026-11-27-teams.md)
+
 ## 电脑接管与分工
 
 ```powershell

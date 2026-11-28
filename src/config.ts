@@ -7,6 +7,7 @@ export type GithubWebhookConfig = { routineId: string; secretEnv: string };
 export interface TelegramConfig { userId: number; botTokenEnv: string; pairingTokenEnv: string }
 export interface DiscordConfig { userId: string; botTokenEnv: string; pairingTokenEnv: string }
 export interface SlackConfig { userId: string; appTokenEnv: string; botTokenEnv: string; pairingTokenEnv: string }
+export interface TeamsConfig { clientId: string; tenantId: string; userId: string; clientSecretEnv: string; pairingTokenEnv: string }
 
 export function discordSnowflake(value: unknown): value is string {
   return typeof value === "string" && /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 0xffff_ffff_ffff_ffffn;
@@ -49,6 +50,7 @@ export interface Config {
   telegram?: TelegramConfig;
   discord?: DiscordConfig;
   slack?: SlackConfig;
+  teams?: TeamsConfig;
   githubIssuePolling?: string[];
   githubIssueTokenEnv?: string;
   githubWebhooks?: GithubWebhookConfig[];
@@ -186,6 +188,21 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     }
     slack = { userId: input.userId, appTokenEnv: input.appTokenEnv, botTokenEnv: input.botTokenEnv, pairingTokenEnv: input.pairingTokenEnv };
   }
+  let teams: TeamsConfig | undefined;
+  if (raw.teams !== undefined) {
+    const input = raw.teams as Partial<TeamsConfig> | null;
+    const uuid = (value: unknown): value is string =>
+      typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+      Object.keys(input).some(key => !["clientId", "tenantId", "userId", "clientSecretEnv", "pairingTokenEnv"].includes(key)) ||
+      !uuid(input.clientId) || !uuid(input.tenantId) || !uuid(input.userId) ||
+      typeof input.clientSecretEnv !== "string" || !envName.test(input.clientSecretEnv) ||
+      typeof input.pairingTokenEnv !== "string" || !envName.test(input.pairingTokenEnv)) {
+      throw new Error("teams requires clientId, tenantId and userId GUIDs and two token environment variable names.");
+    }
+    teams = { clientId: input.clientId.toLowerCase(), tenantId: input.tenantId.toLowerCase(), userId: input.userId.toLowerCase(),
+      clientSecretEnv: input.clientSecretEnv, pairingTokenEnv: input.pairingTokenEnv };
+  }
   const maxEstimatedCostUsd = raw.maxEstimatedCostUsd ?? 1;
   if (typeof maxEstimatedCostUsd !== "number" || !Number.isFinite(maxEstimatedCostUsd) || maxEstimatedCostUsd <= 0) throw new Error("maxEstimatedCostUsd must be a positive number");
   return {
@@ -208,6 +225,7 @@ export async function loadConfig(filename = "harness.config.json"): Promise<Conf
     ...(telegram ? { telegram } : {}),
     ...(discord ? { discord } : {}),
     ...(slack ? { slack } : {}),
+    ...(teams ? { teams } : {}),
     ...(githubIssuePolling ? { githubIssuePolling: [...new Set(githubIssuePolling)] } : {}),
     ...(githubIssueTokenEnv ? { githubIssueTokenEnv } : {}),
     ...(githubWebhooks ? { githubWebhooks: githubWebhooks.map(({ routineId, secretEnv }) => ({ routineId, secretEnv })) } : {}),
