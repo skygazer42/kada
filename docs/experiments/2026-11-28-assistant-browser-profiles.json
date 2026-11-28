@@ -1,5 +1,7 @@
 {
   "date": "2026-11-28",
+  "codeCommit": "5104fd06100ed0a7ab03718e122ba7d5ada50f06",
+  "baseCommit": "e9e0f39a81c5e3a8eda62674c2f937593ca4b694",
   "environment": "Windows, existing agent-browser CLI and Chromium, synthetic local pages only",
   "browserExecution": {
     "source": "named assistant defaults",
@@ -25,6 +27,29 @@
     "failed": 0,
     "skipped": 0,
     "typecheck": "passed"
+  },
+  "repositoryCheck": {
+    "command": "npm run check",
+    "exitCode": 0,
+    "tests": 758,
+    "passed": 758,
+    "failed": 0,
+    "skipped": 0,
+    "testDurationMs": 2116126.2653,
+    "typecheck": "passed",
+    "build": "passed",
+    "commitContentCheck": "passed"
+  },
+  "independentStaticReview": {
+    "range": "e9e0f39..5104fd0",
+    "result": "No material correctness or permission blockers found; no in-scope requirement set aside.",
+    "reviewerRanTests": false
+  },
+  "structuredAutoreview": {
+    "credentialPreflight": "passed",
+    "preflightSeconds": 35.8,
+    "modelReport": "not produced",
+    "reason": "The model invocation timed out and then returned HTTP 401 for missing authentication."
   },
   "limits": [
     "The model is scripted; this does not establish real-model quality or cost improvements.",
